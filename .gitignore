@@ -1,0 +1,7 @@
+# generated artifacts
+__pycache__/
+*.pyc
+.pytest_cache/
+build/
+screenshots/
+*.egg-info/

@@ -1,0 +1,226 @@
+"""Pegasus frontend metadata source (``metadata.pegasus.txt``).
+
+Read-only by design: Pegasus has no representation for ``favorite``,
+``playcount`` or ``lastplayed``, so Retrostation never writes this file and
+keeps frontend state in the ES-DE gamelist (or in the sidecar fallback).
+
+Format notes that actually matter when parsing:
+
+* keys are case-insensitive and lowercase-normalised here;
+* a value continues onto the next line when that line starts with whitespace;
+* a line containing a single ``.`` inserts an empty line inside a value;
+* ``file:`` may repeat (multi-disc games) -- the first one is the key.
+"""
+
+from __future__ import annotations
+
+import os
+from pathlib import Path
+
+from ...core.model import (
+    ASSET_COVER,
+    ASSET_FANART,
+    ASSET_LOGO,
+    ASSET_SCREENSHOT,
+    ASSET_VIDEO,
+    Game,
+    PartialDate,
+)
+from .base import MetadataSource, RawEntry
+
+FILENAME = "metadata.pegasus.txt"
+
+#: Pegasus asset key -> internal asset kind.  First match wins per kind.
+_ASSET_KEYS: dict[str, str] = {
+    "boxfront": ASSET_COVER,
+    "box2d": ASSET_COVER,
+    "marquee": ASSET_LOGO,
+    "wheel": ASSET_LOGO,
+    "screenshot": ASSET_SCREENSHOT,
+    "titlescreen": ASSET_SCREENSHOT,
+    "video": ASSET_VIDEO,
+    "videos": ASSET_VIDEO,
+    "fanart": ASSET_FANART,
+}
+
+#: Collection-level keys that describe the folder rather than a game.
+_COLLECTION_KEYS = frozenset(
+    {"collection", "extension", "directory", "command", "launch", "ignore-file", "ignore-ext", "shortname"}
+)
+
+
+class PegasusSource(MetadataSource):
+    """Reads ``<system>/metadata.pegasus.txt``."""
+
+    name = "pegasus"
+    display_name = "Pegasus"
+    writable = False
+    priority = 20
+
+    FILENAME = FILENAME
+
+    def __init__(self, filename: str = FILENAME) -> None:
+        self._filename = filename
+
+    # ------------------------------------------------------------------ #
+    # Discovery / reading
+    # ------------------------------------------------------------------ #
+
+    def detect(self, system_dir: Path) -> bool:
+        return (system_dir / self._filename).is_file()
+
+    def load(self, system_dir: Path) -> dict[str, RawEntry]:
+        path = system_dir / self._filename
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            return {}
+
+        try:
+            modified = path.stat().st_mtime
+        except OSError:
+            modified = 0.0
+
+        blocks = self._parse_blocks(text)
+        entries: dict[str, RawEntry] = {}
+        for block in blocks:
+            entry = self._to_entry(block, modified)
+            if entry is None:
+                continue
+            entries.setdefault(entry.key, entry)
+        return entries
+
+    # -- parsing ---------------------------------------------------------- #
+
+    @staticmethod
+    def _parse_blocks(text: str) -> list[dict[str, str]]:
+        """Split the file into key/value blocks, handling multi-line values."""
+        blocks: list[dict[str, str]] = []
+        current: dict[str, str] = {}
+        current_key: str | None = None
+
+        for line in text.splitlines():
+            if not line.strip() or line.lstrip().startswith("#"):
+                current_key = None if not line.strip() else current_key
+                continue
+
+            # Continuation of the previous value.
+            if line[0] in " \t" and current_key:
+                body = line.strip()
+                if body == ".":
+                    body = ""
+                current[current_key] = f"{current[current_key]}\n{body}"
+                continue
+
+            if ":" not in line:
+                continue
+            key, _, value = line.partition(":")
+            key = key.strip().lower()
+            value = value.strip()
+            if not key:
+                continue
+
+            if key == "game":
+                # A new game starts here; flush the previous block.
+                if current:
+                    blocks.append(current)
+                current = {}
+                current_key = "game"
+                current[current_key] = value
+                continue
+
+            current_key = key
+            if key in current:
+                current[key] = f"{current[key]}\n{value}"  # repeated key (files)
+            else:
+                current[key] = value
+
+        if current:
+            blocks.append(current)
+        return blocks
+
+    def _to_entry(self, block: dict[str, str], modified: float) -> RawEntry | None:
+        files = [line for line in block.get("file", "").splitlines() if line.strip()]
+        if not files:
+            return None  # a block without a file is collection metadata
+
+        key = files[0].strip()
+        media: dict[str, str] = {}
+        for name, value in block.items():
+            if not name.startswith("assets."):
+                continue
+            asset_key = name[len("assets."):].replace("_", "").replace("-", "").lower()
+            kind = _ASSET_KEYS.get(asset_key)
+            first = value.splitlines()[0].strip() if value else ""
+            if kind and first and kind not in media:
+                media[kind] = first
+
+        return RawEntry(key=key, fields=dict(block), media=media, modified=modified)
+
+    # ------------------------------------------------------------------ #
+    # Conversion
+    # ------------------------------------------------------------------ #
+
+    def to_game(self, system: str, rom: Path, raw: RawEntry) -> Game:
+        game = Game.from_rom(system, rom)
+        f = raw.fields
+
+        game.name = (f.get("game") or "").splitlines()[0].strip() or rom.stem
+        game.sortname = (f.get("sortby") or "").strip() or None
+        game.summary = (f.get("summary") or "").strip()
+        game.description = (f.get("description") or "").strip() or game.summary
+        game.rating = self._rating(f.get("rating"))
+        game.release = PartialDate.parse(f.get("release"))
+        game.developer = self._first_line(f.get("developer"))
+        game.publisher = self._first_line(f.get("publisher"))
+        game.genres = self._split_list(f.get("genre"))
+        game.tags = self._split_list(f.get("tags"))
+        game.players = self._first_line(f.get("players"))
+
+        base = rom.parent
+        for kind, text in raw.media.items():
+            if text:
+                game.set_asset(kind, self._resolve(base, text, rom))
+
+        game.sources[self.name] = self._filename
+        return game
+
+    def to_raw(self, game: Game, previous: RawEntry | None) -> RawEntry:
+        # Read-only source: rebuilding an entry is only useful for round-trip
+        # tests, so we simply reuse what we parsed.
+        return previous or RawEntry(key=game.path.name, missing=True)
+
+    def save(self, system_dir: Path, entries: dict[str, RawEntry]) -> None:  # pragma: no cover
+        raise super().save(system_dir, entries)
+
+    # ------------------------------------------------------------------ #
+    # Helpers
+    # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def _first_line(value: object) -> str | None:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        first = text.splitlines()[0].strip()
+        return first or None
+
+    @staticmethod
+    def _resolve(base: Path, text: str, rom: Path) -> Path | None:
+        """Pegasus resolves relative paths against the collection directory.
+
+        Only existing files are returned: a stale ``assets.`` line must not
+        shadow our own media directories (DESIGN §6.8.5 level 2).
+        """
+        text = text.strip()
+        if not text:
+            return None
+        path = Path(text)
+        if path.is_absolute() or text.startswith("~"):
+            expanded = Path(os.path.expanduser(text))
+            return expanded if expanded.is_file() else None
+
+        for candidate in (base / path, base / path.name):
+            if candidate.is_file():
+                return candidate.resolve()
+        return None

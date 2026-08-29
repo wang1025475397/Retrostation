@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Retrostation · 双屏游戏前端 UI 原型</title>
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+
+<div class="app">
+
+  <!-- ============ 设备 ============ -->
+  <div class="stage">
+    <div class="device" id="device">
+      <div class="device__brand">Anbernic RG&nbsp;DS · 640×480 ×2</div>
+
+      <div class="screens">
+        <div class="screen-label"><span class="dot" id="dotTop"></span>上屏 DSI-1 · 交互主控</div>
+        <div class="screen screen--top" id="screenTop"></div>
+
+        <div class="screen-label"><span class="dot" id="dotBottom"></span>下屏 DSI-2 · 上下文展示</div>
+        <div class="screen screen--bottom" id="screenBottom"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ 说明 / 控制 ============ -->
+  <aside class="panel">
+    <h2>Retrostation 交互原型</h2>
+    <p class="lead">
+      双屏游戏前端 · 上屏交互、下屏联动。<b style="color:var(--accent)">下方两个屏幕均可点击</b>，
+      也可用键盘模拟手柄操作。所有数据为真机 <code>/mnt/mmc/Roms</code> 的实测规模。
+    </p>
+
+    <section>
+      <h3>手柄键位模拟</h3>
+      <table class="keys">
+        <tr><td><span class="kbd">↑</span><span class="kbd">↓</span></td><td class="desc">上 / 下一个（支持按住连发）</td></tr>
+        <tr><td><span class="kbd">←</span><span class="kbd">→</span></td><td class="desc">平台页：切平台 ｜ 列表：±10 ｜ 网格：±1</td></tr>
+        <tr><td><span class="kbd">PgUp</span><span class="kbd">PgDn</span></td><td class="desc"><b style="color:var(--accent)">L1 / R1</b> 翻页（列表 ±10 / 网格 ±12）</td></tr>
+        <tr><td><span class="kbd">Enter</span></td><td class="desc"><b style="color:var(--accent)">A</b> 进入平台 / 启动游戏</td></tr>
+        <tr><td><span class="kbd">Backspace</span></td><td class="desc"><b style="color:var(--accent)">B</b> 返回上一级</td></tr>
+        <tr><td><span class="kbd">Y</span></td><td class="desc"><b style="color:var(--accent)">Y</b> 收藏 / 取消收藏</td></tr>
+        <tr><td><span class="kbd">X</span></td><td class="desc"><b style="color:var(--accent)">X</b> 三视图循环：<b>列表 → 网格 → 轮播</b></td></tr>
+        <tr><td><span class="kbd">V</span></td><td class="desc">副屏视频 开 / 关（关则显示封面）<br><span style="color:#5C5C63">（真机 = 设置菜单「副屏视频」）</span></td></tr>
+        <tr><td><span class="kbd">S</span></td><td class="desc"><b style="color:var(--accent)">SELECT</b> 切换筛选（全部 / 有封面 / 缺封面）</td></tr>
+        <tr><td><span class="kbd">M</span></td><td class="desc"><b style="color:var(--accent)">START</b> 系统菜单</td></tr>
+        <tr><td><span class="kbd">P</span></td><td class="desc"><b style="color:var(--accent)">MENU</b> 退出确认</td></tr>
+        <tr><td><span class="kbd">Esc</span></td><td class="desc">关闭弹窗</td></tr>
+      </table>
+    </section>
+
+    <section>
+      <h3>显示模式</h3>
+      <div class="switches">
+        <div class="switch" id="swSingle">
+          <div class="box"><i></i></div>
+          <div class="lbl">单屏兼容模式<div class="hint">检测到 1 个显示输出时自动降级：副屏内容并入主屏下分区</div></div>
+        </div>
+        <div class="switch on" id="swBottom">
+          <div class="box"><i></i></div>
+          <div class="lbl">副屏实时联动<div class="hint">选中项变化后 90ms 节流刷新（模拟真机策略）</div></div>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <h3>当前状态</h3>
+      <div class="statebar" id="stateBar"></div>
+    </section>
+
+    <section>
+      <h3>gamelist.xml（选中项 · ES-DE 格式）</h3>
+      <div class="xmlbox" id="gamelistXml"></div>
+    </section>
+
+    <section>
+      <h3>媒体用途</h3>
+      <div class="legend">
+        <span><b>封面 Imgs/</b> 网格 / 轮播 / 副屏</span>
+        <span><b>Logo logo/</b> 列表左图 / 轮播卡底部</span>
+        <span><b>视频 video/</b> 副屏媒体区</span>
+      </div>
+    </section>
+  </aside>
+
+</div>
+
+<script src="js/data.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>
