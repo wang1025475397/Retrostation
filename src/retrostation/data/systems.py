@@ -13,6 +13,7 @@ disappearing.
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
+from functools import lru_cache
 
 
 @dataclass(frozen=True)
@@ -203,8 +204,15 @@ SYSTEMS: dict[str, SystemDef] = _build()
 _UNKNOWN = SystemDef(key="", label="Unknown", label_zh="未知", extensions=())
 
 
+@lru_cache(maxsize=256)
 def lookup(key: str) -> SystemDef:
-    """Definition for ``key``; unknown keys still get a usable default."""
+    """Definition for ``key``; unknown keys still get a usable default.
+
+    Cached because it is on the frame path: the home page asks for every
+    system's label and order on every frame, and firmware directories are
+    UPPER CASE while the table is lower case -- without the cache every one of
+    those ~250 calls allocated a fresh ``SystemDef`` through ``replace``.
+    """
     definition = SYSTEMS.get(key) or SYSTEMS.get(key.casefold())
     if definition is not None and definition.key:
         if key != definition.key:  # directory uses a different case than the table

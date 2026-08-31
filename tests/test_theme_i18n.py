@@ -99,10 +99,32 @@ class TestColors:
         assert colors.as_dict()["accent"] == colors.accent
         assert len(colors.as_dict()) == 11
 
-    def test_palette_is_immutable(self) -> None:
+    def test_theme_switch_updates_the_palette_in_place(self) -> None:
+        """A theme has to update the shared palette, not replace it.
+
+        Every screen does ``from ...core.theme import COLORS``; handing out a
+        new object would leave half the UI painting with the old palette.
+        """
         colors = Colors()
-        with pytest.raises(Exception):
-            colors.accent = (0, 0, 0, 255)  # type: ignore[misc]
+        amber = colors.accent
+        colors.apply("ice")
+        assert colors.accent != amber
+        colors.apply("amber")
+        assert colors.accent == amber, "switching back must restore it"
+
+    def test_variant_moves_the_neutrals_only(self) -> None:
+        colors = Colors()
+        accent = colors.accent
+        colors.apply("amber", "light")
+        assert colors.bg != Colors().bg
+        assert colors.accent == accent, "the accent family must survive a variant change"
+
+    def test_unknown_theme_falls_back_to_the_default(self) -> None:
+        """A config written by a newer build must not stop the app painting."""
+        colors = Colors()
+        colors.apply("no-such-family", "no-such-surface")
+        assert colors.accent == Colors().accent
+        assert colors.bg == Colors().bg
 
     def test_module_level_instance(self) -> None:
         assert theme.COLORS.bg == (20, 20, 20, 255)

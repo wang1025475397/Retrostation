@@ -259,6 +259,46 @@ class Canvas(abc.ABC):
 
 
 # --------------------------------------------------------------------------- #
+# Video
+# --------------------------------------------------------------------------- #
+
+
+class VideoPipe(abc.ABC):
+    """A decoder that hands out one decoded frame at a time (DESIGN §6.5).
+
+    On the handheld this is an ``ffmpeg`` process writing rawvideo into a pipe;
+    on Android it will be a MediaCodec surface.  Either way the frame is an
+    opaque bitmap from the platform -- ``data/`` never imports PIL.
+    """
+
+    #: Decoded frame size in pixels.
+    size: tuple[int, int]
+
+    @abc.abstractmethod
+    def read_frame(self) -> object | None:
+        """Block until the next frame is decoded.
+
+        Returns ``None`` at end of stream, and also once :meth:`close` has been
+        called from another thread -- terminating the decoder is what unblocks
+        this call, so implementations must make ``close()`` safe to call
+        concurrently.
+        """
+
+    @abc.abstractmethod
+    def close(self) -> None:
+        """Stop decoding and release the process.  Must be idempotent."""
+
+    @property
+    def duration(self) -> float:
+        """Clip length in seconds, or ``0`` when the decoder cannot tell.
+
+        Read once by the pumping thread before the first frame is published;
+        probing here keeps an ``ffprobe`` call off the UI thread.
+        """
+        return 0.0
+
+
+# --------------------------------------------------------------------------- #
 # Filesystem
 # --------------------------------------------------------------------------- #
 
@@ -288,6 +328,10 @@ class Platform(abc.ABC):
 
     #: Short identifier, used in logs and in the About screen.
     name: str = "base"
+
+    #: Where the shell bootstrap looks for a pending launch command
+    #: (DESIGN §8.2).  Only platforms that hand off through a file use it.
+    launch_cmd_path: str = "/tmp/retrostation_launch.cmd"
 
     # -- display ---------------------------------------------------------- #
 
@@ -352,9 +396,12 @@ class Platform(abc.ABC):
     def launch_game(self, argv: Sequence[str]) -> None:
         """Hand the device over to a game.
 
-        On Linux this replaces the process (the shell bootstrap in
-        ``launcher/`` restarts us afterwards); on Android it will start an
-        activity.  Either way this call is not expected to return.
+        Implementations **return** -- they must not replace the process.  The
+        app still has to unwind so it can exit with the "a game ran" code,
+        which is the only way the shell bootstrap can tell that apart from a
+        plain quit (DESIGN §8.2).  On Linux the command is written to
+        :attr:`launch_cmd_path` for the bootstrap to run; on Android it will
+        start an activity.
         """
 
     def on_resume(self) -> None:
@@ -379,6 +426,23 @@ class Platform(abc.ABC):
     def save_screenshot(self, canvas: Canvas, path: Path) -> None:
         """Write ``canvas`` to ``path`` (development / diagnostics only)."""
         raise NotImplementedError
+
+    def open_video_pipe(
+        self,
+        path: Path,
+        *,
+        width: int,
+        height: int,
+        fps: int,
+    ) -> VideoPipe | None:
+        """Decode ``path`` into frames of ``width x height`` at ``fps``.
+
+        ``None`` means "this platform cannot decode video" (or the file cannot
+        be opened): the caller then silently falls back to cover art, which is
+        the behaviour DESIGN §6.5 asks for.  Implementations must return
+        quickly -- this runs on the UI thread.
+        """
+        return None
 
     @abc.abstractmethod
     def shutdown(self) -> None:

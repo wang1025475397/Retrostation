@@ -6,7 +6,7 @@ Resolution order (DESIGN §6.8.5), cheapest first:
 2. this app's own directories -- ``Imgs/`` / ``video/`` / ``logo/`` from
    ``config.media_dirs``, which is where tiny-scraper already writes covers,
 3. the conventional directories of the metadata formats we read
-   (ES-DE ``media/...``, Pegasus ``assets/...``),
+   (ES-DE ``media/...``, Pegasus ``assets/...``, 天马 ``media/<game>/...``),
 4. nothing -- callers fall back to a programmatic placeholder.
 
 Thumbnails are written next to the originals in a dot-directory so the ROM
@@ -17,7 +17,10 @@ from __future__ import annotations
 
 import hashlib
 import logging
-from dataclasses import dataclass
+import queue
+import threading
+import time
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from ..core.config import Config
@@ -48,27 +51,141 @@ _FORMAT_DIRS: dict[str, dict[str, tuple[str, ...]]] = {
 _IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".webp")
 _VIDEO_SUFFIXES = (".mp4", ".webm", ".mkv", ".avi")
 
+#: One folder per game, named after the game: ``media/<game>/boxFront.jpg``
+#: (Pegasus, and the 天马 packs built on it).  Here the *folder* is the game and
+#: the *file name* is the asset kind -- the opposite of the flat layouts above.
+_PER_GAME_ROOTS = ("media", "assets")
+#: Asset kind -> keywords a file name is matched against, best first.
+#:
+#: Matching is a case-insensitive substring test on the name without its
+#: suffix, the way 天马's own tooling scans these folders: ``boxFront.jpg``,
+#: ``box_front.png`` and ``cover.webp`` are all the cover, and a scraper that
+#: renames to ``logo.png`` or ``marquee.png`` still lands on the logo.
+_PER_GAME_KEYWORDS: dict[str, tuple[str, ...]] = {
+    ASSET_COVER: ("boxfront", "box_front", "cover", "cartridge"),
+    ASSET_LOGO: ("logo", "marquee", "wheel", "middle"),
+    ASSET_SCREENSHOT: ("screenshot", "titlescreen"),
+    ASSET_VIDEO: ("video",),
+    ASSET_FANART: ("fanart", "background"),
+}
+
 
 def _suffixes(kind: str) -> tuple[str, ...]:
     return _VIDEO_SUFFIXES if kind == ASSET_VIDEO else _IMAGE_SUFFIXES
 
 
-@dataclass(frozen=True)
+@dataclass
 class MediaDirs:
-    """Resolved media directories for one system."""
+    """Resolved media directories for one system, with a listing cache.
+
+    Looking media up by *listing each directory once* instead of stat-ing every
+    guess matters: opening a 600-ROM system used to cost ~5000 stats (and video
+    probing would have doubled that), which is a visible hitch on the SD card.
+    """
 
     root: Path
     by_kind: dict[str, Path]
     format_dirs: tuple[Path, ...]
+    per_game_dirs: tuple[Path, ...] = ()
+    platform: object = None
+    _listings: dict[Path, dict[tuple[str, str], Path]] = field(default_factory=dict, repr=False)
+    _order: dict[str, tuple[Path, ...]] = field(default_factory=dict, repr=False)
+    _folders: dict[Path, set[str]] = field(default_factory=dict, repr=False)
+
+    def directories(self, kind: str) -> tuple[Path, ...]:
+        """Directories that may hold ``kind`` media, best guess first."""
+        cached = self._order.get(kind)
+        if cached is not None:
+            return cached
+        self._order[kind] = cached = tuple(self._build_directories(kind))
+        return cached
+
+    def _build_directories(self, kind: str) -> list[Path]:
+        ordered: list[Path] = []
+        own = self.by_kind.get(kind)
+        if own is not None:
+            ordered.append(own)
+        if kind == ASSET_VIDEO:
+            # Measured on the RG DS: the scraper in use drops .mp4 files next to
+            # the covers (``Imgs/``) instead of the ``video/`` we ask for, so the
+            # cover directory is probed for video suffixes too (DESIGN §6.3).
+            extra = self.by_kind.get(ASSET_COVER)
+            if extra is not None and extra != own:
+                ordered.append(extra)
+        ordered.extend(path for path in self.format_dirs if path not in ordered)
+        return ordered
+
+    def lookup(self, kind: str, stem: str) -> Path | None:
+        """The media file for ``stem``, or ``None``.  No stat storm."""
+        suffixes = _suffixes(kind)
+        for directory in self.directories(kind):
+            listing = self._listing(directory)
+            for suffix in suffixes:
+                hit = listing.get((stem, suffix))
+                if hit is not None:
+                    return hit
+        return None
+
+    def lookup_per_game(self, kind: str, names: tuple[str, ...]) -> Path | None:
+        """Media in ``media/<game>/`` folders, one folder per game (天马).
+
+        ``names`` are the folder spellings to try -- a pack may name the folder
+        after the ROM file or after the scraped title, and the title is not
+        always the file name.
+        """
+        keywords = _PER_GAME_KEYWORDS.get(kind)
+        if not keywords or not self.per_game_dirs:
+            return None
+        suffixes = _suffixes(kind)
+        for root in self.per_game_dirs:
+            folders = self._per_game_folders(root)
+            for name in names:
+                if name not in folders:
+                    continue
+                listing = self._listing(root / name)
+                for keyword in keywords:
+                    for (file_stem, suffix), path in listing.items():
+                        if suffix in suffixes and keyword in file_stem.lower():
+                            return path
+        return None
+
+    def _per_game_folders(self, root: Path) -> set[str]:
+        """Sub-folder names of one per-game media root; listed once, then cached."""
+        cached = self._folders.get(root)
+        if cached is None:
+            entries = self.platform.list_dir(root) if self.platform else []
+            cached = {entry.name for entry in entries if entry.is_dir}
+            self._folders[root] = cached
+        return cached
 
     def candidates(self, kind: str, stem: str) -> list[Path]:
-        """Every path that could hold ``kind`` media for a ROM named ``stem``."""
+        """Every path that *could* hold ``kind`` media for ``stem``.
+
+        Kept for callers that want the whole search order; :meth:`lookup` is the
+        fast path used by the resolver.
+        """
+        suffixes = _suffixes(kind)
         out: list[Path] = []
-        directory = self.by_kind.get(kind)
-        if directory is not None:
-            out.extend(directory / f"{stem}{suffix}" for suffix in _suffixes(kind))
-        out.extend(directory / f"{stem}{suffix}" for directory in self.format_dirs for suffix in _suffixes(kind))
+        for directory in self.directories(kind):
+            out.extend(directory / f"{stem}{suffix}" for suffix in suffixes)
+        for root in self.per_game_dirs:
+            for keyword in _PER_GAME_KEYWORDS.get(kind, ()):
+                out.extend(root / stem / f"{keyword}{suffix}" for suffix in suffixes)
         return out
+
+    def _listing(self, directory: Path) -> dict[tuple[str, str], Path]:
+        cached = self._listings.get(directory)
+        if cached is not None:
+            return cached
+        cached = {}
+        if self.platform is not None:
+            for entry in self.platform.list_dir(directory):
+                if entry.is_dir:
+                    continue
+                stem, _dot, suffix = entry.name.rpartition(".")
+                cached.setdefault((stem, f".{suffix.lower()}"), directory / entry.name)
+        self._listings[directory] = cached
+        return cached
 
 
 def media_dirs_for(platform: Platform, config: Config, system_key: str) -> MediaDirs:
@@ -88,7 +205,19 @@ def media_dirs_for(platform: Platform, config: Config, system_key: str) -> Media
                 path = root / directory
                 if path.is_dir() and (target is None or path != target):
                     format_dirs.append(path)
-    return MediaDirs(root=root, by_kind=by_kind, format_dirs=tuple(dict.fromkeys(format_dirs)))
+
+    per_game: list[Path] = []
+    for name in _PER_GAME_ROOTS:
+        path = root / name
+        if path.is_dir():
+            per_game.append(path)
+    return MediaDirs(
+        root=root,
+        by_kind=by_kind,
+        format_dirs=tuple(dict.fromkeys(format_dirs)),
+        per_game_dirs=tuple(per_game),
+        platform=platform,
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -103,18 +232,27 @@ def resolve_assets(game: Game, dirs: MediaDirs) -> Game:
     """
     resolved = dict(game.assets)
     stem = game.path.stem
+    names = _per_game_names(game)
 
     for kind in ASSET_KEYS:
         if resolved.get(kind):
             continue
-        for candidate in dirs.candidates(kind, stem):
-            if candidate.is_file():
-                resolved[kind] = candidate
-                break
-        else:
-            resolved[kind] = None
+        resolved[kind] = dirs.lookup(kind, stem) or dirs.lookup_per_game(kind, names)
 
     return game.copy(assets=resolved)
+
+
+def _per_game_names(game: Game) -> tuple[str, ...]:
+    """Folder spellings a per-game media directory may use.
+
+    A 天马 pack names the folder after the game, but not always exactly like the
+    ROM file: the scraped title can hold dots and characters the file name lost
+    (``Vs. 女子高尔夫`` vs ``Vs 女子高尔夫``), so every spelling is tried.
+    """
+    names = [game.path.stem, game.path.stem.replace(".", "")]
+    if game.name:
+        names += [game.name, game.name.replace(".", "")]
+    return tuple(dict.fromkeys(name for name in names if name))
 
 
 def placeholder_bitmap(platform: Platform, seed: str, width: int, height: int) -> object:
@@ -168,6 +306,21 @@ def placeholder_bitmap(platform: Platform, seed: str, width: int, height: int) -
 # --------------------------------------------------------------------------- #
 
 
+#: How many thumbnails may wait for the writer thread.  Dropping one is fine:
+#: it only means the file is regenerated next time.
+_WRITE_QUEUE = 64
+#: Pause between writes.  The card is shared with the clip decoder and the
+#: metadata reads, and writing flat out starved them: browsing a fresh library
+#: measured ~1.9 s per frame, because every frame was waiting on I/O that the
+#: writer had queued ahead of it.  One thumbnail at a time keeps the card
+#: mostly free for whatever the frame actually needs.
+_WRITE_PAUSE = 0.08
+#: How long a source's stat() is trusted, and how many are remembered.
+#: See :meth:`ThumbnailCache._stat`.
+_STAT_TTL = 5.0
+_STAT_LIMIT = 4000
+
+
 class ThumbnailCache:
     """On-disk JPEG/PNG cache for scaled-down artwork.
 
@@ -181,14 +334,49 @@ class ThumbnailCache:
         self._enabled = enabled
         self._memory: dict[tuple[str, int, int, int], object] = {}
         self._memory_order: list[tuple[str, int, int, int]] = []
+        self._dirs: set[Path] = set()
+        self._stats: dict[str, tuple[float, int, bool]] = {}
+        # Saving a thumbnail to the SD card measured ~0.5 s, which the UI paid
+        # in full the first time a game came on screen.  The bitmap is already
+        # decoded by then, so hand the write to a background thread and keep
+        # only the (much cheaper) decode on the frame path.
+        self._pending: queue.Queue = queue.Queue(maxsize=_WRITE_QUEUE)
+        self._writer = threading.Thread(
+            target=self._write_loop, name="retrostation-thumbs", daemon=True
+        )
+        self._writer.start()
 
     # ------------------------------------------------------------------ #
 
+    def _stat(self, source: Path) -> tuple[int, bool]:
+        """``(mtime, is_file)``, re-asked at most every ``_STAT_TTL`` seconds.
+
+        Both are round trips to the SD card, and :meth:`get` used to make them
+        on every lookup: ~14 ms a time on this device, which is more than all
+        the drawing in the strip combined, paid on every clip frame.  Artwork
+        is edited rarely enough that remembering it for a few seconds is a
+        good trade.
+        """
+        path = str(source)
+        now = time.monotonic()
+        entry = self._stats.get(path)
+        if entry is not None and now - entry[0] < _STAT_TTL:
+            return entry[1], entry[2]
+        try:
+            fresh = (now, int(source.stat().st_mtime), True)
+        except OSError:
+            fresh = (now, 0, False)
+        if len(self._stats) >= _STAT_LIMIT:
+            self._stats.clear()
+        self._stats[path] = fresh
+        return fresh[1], fresh[2]
+
     def get(self, kind: str, source: Path, width: int, height: int) -> object | None:
         """A scaled bitmap for ``source``, or ``None`` if it cannot be made."""
-        if not source.is_file():
+        mtime, exists = self._stat(source)
+        if not exists:
             return None
-        key = (str(source), width, height, int(source.stat().st_mtime))
+        key = (str(source), width, height, mtime)
 
         cached = self._memory.get(key)
         if cached is not None:
@@ -226,26 +414,53 @@ class ThumbnailCache:
         digest = hashlib.sha1(f"{source}|{width}x{height}".encode("utf-8")).hexdigest()[:16]
         suffix = ".jpg" if source.suffix.lower() not in (".png",) else ".png"
         directory = source.parent / ".cache"
-        try:
-            directory.mkdir(parents=True, exist_ok=True)
-        except OSError:
-            return None
+        # mkdir() is a round trip to the card on every miss; remember the ones
+        # that already exist instead of asking again each time.
+        if directory not in self._dirs:
+            try:
+                directory.mkdir(parents=True, exist_ok=True)
+            except OSError:
+                return None
+            self._dirs.add(directory)
         return directory / f"{digest}_{width}x{height}{suffix}"
 
     def _store(self, target: Path, bitmap: object) -> None:
+        """Queue the bitmap for the writer thread; never blocks the caller."""
         try:
-            from PIL import Image
+            self._pending.put_nowait((target, bitmap))
+        except queue.Full:
+            log.debug("thumbnail write queue full, dropping %s", target)
 
-            image: Image.Image = bitmap  # type: ignore[assignment]
-            if image.mode in ("RGBA", "LA", "P"):
-                image = image.convert("RGBA")
-                background = Image.new("RGB", image.size, (20, 20, 20))
-                background.paste(image, mask=image.split()[-1])
-                background.save(target, quality=86)
-            else:
-                image.save(target, quality=86)
-        except (OSError, ValueError) as exc:  # pragma: no cover - best effort
-            log.debug("thumbnail write failed for %s: %s", target, exc)
+    def flush(self) -> None:
+        """Block until every queued thumbnail has been written.
+
+        For tests and shutdown only: the point of the queue is that the frame
+        loop never waits for the card.
+        """
+        self._pending.join()
+
+    def _write_loop(self) -> None:
+        while True:
+            target, bitmap = self._pending.get()
+            try:
+                self._write(target, bitmap)
+            except Exception:  # noqa: BLE001 - a lost thumbnail is not fatal
+                log.debug("thumbnail write failed for %s", target, exc_info=True)
+            finally:
+                self._pending.task_done()
+                time.sleep(_WRITE_PAUSE)
+
+    def _write(self, target: Path, bitmap: object) -> None:
+        from PIL import Image
+
+        image: Image.Image = bitmap  # type: ignore[assignment]
+        if image.mode in ("RGBA", "LA", "P"):
+            image = image.convert("RGBA")
+            background = Image.new("RGB", image.size, (20, 20, 20))
+            background.paste(image, mask=image.split()[-1])
+            background.save(target, quality=86)
+        else:
+            image.save(target, quality=86)
 
     # -- memory LRU ------------------------------------------------------- #
 

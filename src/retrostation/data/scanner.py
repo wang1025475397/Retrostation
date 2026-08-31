@@ -15,6 +15,7 @@ import hashlib
 import json
 import logging
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterable
@@ -35,6 +36,11 @@ _GENERIC_EXTENSIONS = frozenset(
 _SKIPPED_NAMES = (".cache", "Imgs", "video", "logo", "media", "assets", ".retrostation")
 
 INDEX_VERSION = 2
+
+#: How many system directories are listed at once.  Listing one costs a stat()
+#: per file, so the work is I/O bound and the card keeps up with a handful of
+#: directories in parallel -- measured on the RG DS below.
+_SCAN_WORKERS = 4
 
 
 @dataclass(frozen=True)
@@ -138,6 +144,38 @@ class LibraryIndex:
                 return None
         return roms
 
+    def matches(self, system_key: str, expected: str) -> bool:
+        """True when the cached signature still matches, without rebuilding ROMs.
+
+        A hit means the listing :func:`scan_library` just made is already
+        exactly what the cache holds, so it keeps its own objects instead of
+        deserialising thousands of them only to drop them.
+        """
+        record = self._data["systems"].get(system_key)
+        return isinstance(record, dict) and record.get("signature") == expected
+
+    def count(self, system_key: str) -> int:
+        record = self._data["systems"].get(system_key)
+        if not isinstance(record, dict):
+            return -1
+        return len(record.get("roms", ()))
+
+    def restore(self) -> dict[str, list[Rom]]:
+        """Everything the index holds, without checking it against the disk.
+
+        Used to bring the first frame up with a populated library: listing the
+        ROM tree costs a stat() per file (~0.7 s for 3.9k ROMs here) and the
+        listing that actually detects changes runs behind the UI anyway.
+        """
+        systems: dict[str, list[Rom]] = {}
+        for key, record in self._data["systems"].items():
+            if not isinstance(record, dict):
+                continue
+            roms = self.get(key, record.get("signature", ""))
+            if roms is not None:
+                systems[key] = roms
+        return systems
+
     def put(self, system_key: str, sig: str, roms: list[Rom]) -> None:
         self._data["systems"][system_key] = {
             "signature": sig,
@@ -181,20 +219,45 @@ class ScanResult:
         return sum(len(roms) for roms in self.systems.values())
 
 
+def _scan_all(platform: Platform, keys: list[str]) -> list[list[Rom]]:
+    """List every system directory, several at a time.
+
+    Listing one directory costs a stat() per file, so the work is I/O bound and
+    the GIL is released throughout: on the RG DS, 3.9k ROMs across 54
+    directories took 0.71 s serially and about a third of that with four
+    workers.  Cold start is dominated by this, so it is worth the threads.
+    """
+    if len(keys) < 2:
+        return [scan_system(platform, key) for key in keys]
+    with ThreadPoolExecutor(max_workers=_SCAN_WORKERS) as pool:
+        return list(pool.map(lambda key: scan_system(platform, key), keys))
+
+
 def scan_library(
     platform: Platform,
     config: Config,
     *,
     index_path: Path | None = None,
     on_progress: Callable[[str, int, int], None] | None = None,
+    cached_only: bool = False,
 ) -> ScanResult:
     """Scan every known system directory.
 
     ``on_progress(system_key, done, total)`` lets the UI draw a progress bar
     while the scan runs in the background.
+
+    ``cached_only`` skips the directory listing entirely and hands back what
+    the index remembers, so the first frame can come up with a full library
+    instead of an empty one.  Nothing is verified against the disk in that
+    mode -- the caller is expected to run a real scan behind it.
     """
     started = time.monotonic()
     index = LibraryIndex(index_path or platform.config_dir / "index.json")
+
+    if cached_only:
+        systems = index.restore()
+        return ScanResult(systems=systems, duration=time.monotonic() - started,
+                          cached=len(systems), rescanned=0)
 
     entries = sorted(platform.list_dir(platform.rom_root), key=lambda entry: entry.name)
     keys = [
@@ -207,15 +270,17 @@ def scan_library(
     cached = rescanned = 0
     total = len(keys)
 
-    for position, key in enumerate(keys, start=1):
-        roms = scan_system(platform, key)
+    listings = _scan_all(platform, keys)
+    for position, (key, roms) in enumerate(zip(keys, listings), start=1):
         sig = signature(roms)
-        hit = index.get(key, sig)
-        if hit is not None and len(hit) == len(roms):
-            systems[key] = hit
+        systems[key] = roms
+        # The index answers one question -- did this system change?  On a hit
+        # the listing above is already the answer, so there is nothing to read
+        # back: deserialising ~3.9k ROMs to replace them with identical ones
+        # used to cost a fifth of a second of cold start.
+        if index.matches(key, sig) and len(roms) == index.count(key):
             cached += 1
         else:
-            systems[key] = roms
             index.put(key, sig, roms)
             rescanned += 1
         if on_progress:

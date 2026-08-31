@@ -13,8 +13,9 @@ import pytest
 from retrostation.core.config import Config
 from retrostation.core.i18n import Translator
 from retrostation.data.library import Library
+from retrostation.main import run_ui
 from retrostation.platform.base import InputAction, InputEvent, InputKind
-from retrostation.ui.app import EXIT_RESTART, App
+from retrostation.ui.app import EXIT_OK, EXIT_RESTART, App
 from tests.conftest import FakePlatform
 
 
@@ -62,6 +63,25 @@ class TestBoot:
         assert app.library.rom_count("FC") == 3
 
 
+class TestBackgroundScan:
+    def test_a_scan_landing_forces_a_repaint(self, app: App, platform) -> None:
+        """A scan finishes with no input, and nothing else would repaint.
+
+        The panel is cached and the game list is memoised for a frame; both are
+        dropped on input.  A background scan arrives on its own, so without
+        this the list kept showing what it had built before the scan finished.
+        """
+        app.run(max_frames=1)
+        platform.send(InputEvent(InputAction.A))
+        app.run(max_frames=1)
+        app.session.games()
+        assert app._top_cache is not None
+
+        app.library_changed()
+        assert app._top_cache is None
+        assert app._top_dirty is True
+
+
 class TestNavigation:
     def test_enter_and_back(self, app: App) -> None:
         platform = app.platform
@@ -104,6 +124,30 @@ class TestNavigation:
         assert app.run(max_frames=1) == 0  # plain quit, no restart
 
 
+class TestMissingCover:
+    def test_no_artwork_is_labelled_instead_of_placeholdered(self, app: App) -> None:
+        """FC has one cover (魂斗罗); the other two ROMs have no artwork at all.
+
+        A generated gradient tile used to stand in for them, which read as
+        decoration rather than as "this game has no cover".
+        """
+        calls: list[str] = []
+        original = app.art.placeholder
+        app.art.placeholder = lambda seed, w, h: (calls.append(seed), original(seed, w, h))[1]
+
+        send(app.platform, InputEvent(InputAction.A))   # enter FC
+        frames(app, app.platform, n=2)
+
+        assert calls == [], f"must not draw a generated placeholder, drew {calls}"
+
+    def test_a_missing_cover_still_renders_a_plate(self, app: App) -> None:
+        """The labelled plate is drawn, so the row is not a hole in the list."""
+        send(app.platform, InputEvent(InputAction.A))
+        top = frames(app, app.platform, n=2)[0].pil_image
+        colours = set(top.getdata())
+        assert (20, 20, 20, 255) in colours
+
+
 class TestLaunch:
     def test_launch_reports_restart_and_records_command(self, app: App) -> None:
         platform = app.platform
@@ -116,6 +160,22 @@ class TestLaunch:
         assert platform.launched is not None
         assert platform.launched[0].endswith("RA_launch.sh")
         assert platform.launched[2].endswith(".nes")
+
+    def test_ctrl_c_quits_without_a_traceback(self, rom_root: Path, monkeypatch) -> None:
+        """Ctrl+C in an SSH debug session is a user quit (exit 0), not a crash.
+
+        ``App.run`` shuts the display down in its ``finally``, so all ``run_ui``
+        has to do is stop the KeyboardInterrupt from reaching the interpreter.
+        """
+        platform = FakePlatform(rom_root)
+
+        def interrupt(timeout: float = 0.0) -> list[InputEvent]:
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr(platform, "poll_events", interrupt)
+
+        config = Config()
+        assert run_ui(platform, config, Translator(config.language)) == EXIT_OK
 
     def test_favourite_is_written_back(self, app: App, rom_root: Path) -> None:
         platform = app.platform

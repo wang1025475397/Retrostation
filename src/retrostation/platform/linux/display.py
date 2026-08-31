@@ -7,8 +7,10 @@ Facts this module encodes, all verified on the RG DS (see DESIGN §4.4):
 * the bottom window is created **after a delay** (500 ms), otherwise it fails
   or ends up hidden;
 * renderers are ``SDL_RENDERER_SOFTWARE``: GPU composition fights Weston;
-* the texture created for every frame **must** be destroyed, or we leak one
-  640x480 texture per paint and die of OOM within minutes.
+* one streaming texture per screen is created on the first paint and then only
+  *updated*.  Building a texture per frame costs an extra full-screen copy plus
+  an allocation, ~10 ms at 640x480 -- measured as the largest single line item
+  in a video frame once the artwork was cached.
 """
 
 from __future__ import annotations
@@ -26,6 +28,10 @@ SDL_INIT_VIDEO = 0x00000020
 SDL_WINDOW_FULLSCREEN_DESKTOP = 0x00001001
 SDL_RENDERER_SOFTWARE = 0x00000001
 SDL_WINDOWPOS_CENTERED_MASK = 0x2FFF0000
+SDL_TEXTUREACCESS_STREAMING = 1
+
+#: Byte order Pillow produces for mode "RGBA", which is also SDL's RGBA8888.
+_RMASK, _GMASK, _BMASK, _AMASK = 0x000000FF, 0x0000FF00, 0x00FF0000, 0xFF000000
 
 
 def _centered(display_index: int) -> int:
@@ -83,6 +89,10 @@ class SDLDisplay:
         self._renderers: list[int] = []
         self._sizes: list[tuple[int, int]] = []
         self._canvases: list[PilCanvas] = []
+        self._textures: list[int] = []
+        self._format = self._lib.SDL_MasksToPixelFormatEnum(
+            32, _RMASK, _GMASK, _BMASK, _AMASK
+        )
         self._closed = False
 
         for index in range(count):
@@ -98,6 +108,7 @@ class SDLDisplay:
             self._renderers.append(renderer)
             self._sizes.append((w, h))
             self._canvases.append(PilCanvas(w, h))
+            self._textures.append(0)  # created on the first present()
 
     # ------------------------------------------------------------------ #
     # Setup
@@ -120,18 +131,6 @@ class SDLDisplay:
         lib.SDL_CreateWindow.restype = ctypes.c_void_p
         lib.SDL_CreateRenderer.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_uint32]
         lib.SDL_CreateRenderer.restype = ctypes.c_void_p
-        lib.SDL_SetRenderDrawColor.argtypes = [
-            ctypes.c_void_p, ctypes.c_uint8, ctypes.c_uint8, ctypes.c_uint8, ctypes.c_uint8,
-        ]
-        lib.SDL_RenderClear.argtypes = [ctypes.c_void_p]
-        lib.SDL_CreateRGBSurfaceFrom.argtypes = [
-            ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
-            ctypes.c_uint32, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_uint32,
-        ]
-        lib.SDL_CreateRGBSurfaceFrom.restype = ctypes.c_void_p
-        lib.SDL_CreateTextureFromSurface.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
-        lib.SDL_CreateTextureFromSurface.restype = ctypes.c_void_p
-        lib.SDL_FreeSurface.argtypes = [ctypes.c_void_p]
         lib.SDL_DestroyTexture.argtypes = [ctypes.c_void_p]
         lib.SDL_DestroyRenderer.argtypes = [ctypes.c_void_p]
         lib.SDL_DestroyWindow.argtypes = [ctypes.c_void_p]
@@ -140,6 +139,18 @@ class SDLDisplay:
         ]
         lib.SDL_RenderPresent.argtypes = [ctypes.c_void_p]
         lib.SDL_Delay.argtypes = [ctypes.c_uint32]
+        # Pixel format of a "RGBA" Pillow image, worked out by SDL itself --
+        # hand-rolling the SDL_PIXELFORMAT_* bitfield is a classic off-by-one.
+        lib.SDL_MasksToPixelFormatEnum.argtypes = [ctypes.c_int] + [ctypes.c_uint32] * 4
+        lib.SDL_MasksToPixelFormatEnum.restype = ctypes.c_uint32
+        lib.SDL_CreateTexture.argtypes = [
+            ctypes.c_void_p, ctypes.c_uint32, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+        ]
+        lib.SDL_CreateTexture.restype = ctypes.c_void_p
+        lib.SDL_UpdateTexture.argtypes = [
+            ctypes.c_void_p, ctypes.c_void_p, ctypes.c_char_p, ctypes.c_int,
+        ]
+        lib.SDL_UpdateTexture.restype = ctypes.c_int
         lib.SDL_Quit.restype = None
         lib.SDL_GetRendererOutputSize.argtypes = [ctypes.c_void_p, int_p, int_p]
         lib.SDL_GetRendererOutputSize.restype = ctypes.c_int
@@ -186,45 +197,45 @@ class SDLDisplay:
     def present(self, index: int) -> None:
         """Upload canvas ``index`` and flip.
 
-        The texture is destroyed on every call: leaking it means one full-screen
-        RGBA surface per frame.
+        The texture is created once and then only updated: creating one per
+        frame means an extra full-screen copy and an allocation, which measured
+        ~10 ms per paint at 640x480 -- the frame budget is 33 ms.
+
+        There is no ``SDL_RenderClear``: the canvas is opaque and covers the
+        whole target, and a texture's default blend mode is ``NONE``, so the
+        copy overwrites every pixel.
         """
         if self._closed or index >= len(self._renderers):
             return
         renderer = self._renderers[index]
         canvas = self._canvases[index]
         width, height = canvas.size
+        lib = self._lib
 
-        # RGBA byte order, matching what Pillow produces for mode "RGBA".
-        rmask = 0x000000FF
-        gmask = 0x0000FF00
-        bmask = 0x00FF0000
-        amask = 0xFF000000
+        texture = self._textures[index]
+        if not texture:
+            texture = lib.SDL_CreateTexture(
+                renderer, self._format, SDL_TEXTUREACCESS_STREAMING, width, height
+            )
+            if not texture:
+                return
+            self._textures[index] = texture
 
         pixels = canvas.pil_image.tobytes("raw", "RGBA")
-        surface = self._lib.SDL_CreateRGBSurfaceFrom(
-            pixels, width, height, 32, width * 4, rmask, gmask, bmask, amask
-        )
-        if not surface:
+        if lib.SDL_UpdateTexture(texture, None, pixels, width * 4) != 0:
             return
-        texture = self._lib.SDL_CreateTextureFromSurface(renderer, surface)
-        self._lib.SDL_FreeSurface(surface)  # the pixel buffer may go now
-        if not texture:
-            return
-
-        try:
-            self._lib.SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255)
-            self._lib.SDL_RenderClear(renderer)
-            self._lib.SDL_RenderCopy(renderer, texture, None, None)
-            self._lib.SDL_RenderPresent(renderer)
-        finally:
-            self._lib.SDL_DestroyTexture(texture)
+        lib.SDL_RenderCopy(renderer, texture, None, None)
+        lib.SDL_RenderPresent(renderer)
 
     def close(self) -> None:
         """Destroy windows and quit SDL.  Called exactly once, on the way out."""
         if self._closed:
             return
         self._closed = True
+        for texture in self._textures:
+            if texture:
+                self._lib.SDL_DestroyTexture(texture)
+        self._textures.clear()
         for renderer in self._renderers:
             self._lib.SDL_DestroyRenderer(renderer)
         for window in self._windows:

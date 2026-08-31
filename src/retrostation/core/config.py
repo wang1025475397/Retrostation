@@ -18,6 +18,8 @@ from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from typing import Any, ClassVar, Mapping
 
+from .theme import THEMES, VARIANTS
+
 # --------------------------------------------------------------------------- #
 # Valid values (shared with the UI so there is a single source of truth)
 # --------------------------------------------------------------------------- #
@@ -84,7 +86,11 @@ class Config:
         default_factory=lambda: {"cover": "Imgs", "video": "video", "logo": "logo"}
     )
     bottom_video: bool = True
-    video_fps: int = 15
+    #: Output rate for the clip decoder.  The sources are 24-60 fps and the
+    #: device sustains 30 fps even with the bottom panel's larger frames, so 24
+    #: is a comfortable place to sit: visibly smoother than 15, well clear of
+    #: what the CPU can do.
+    video_fps: int = 24
     video_size: list[int] = field(default_factory=lambda: [288, 216])
 
     # metadata ------------------------------------------------------------ #
@@ -110,6 +116,8 @@ class Config:
         "layout": LAYOUTS,
         "sort": SORT_ORDERS,
         "filter": FILTERS,
+        "theme": THEMES,
+        "theme_variant": VARIANTS,
     }
 
     # ------------------------------------------------------------------ #

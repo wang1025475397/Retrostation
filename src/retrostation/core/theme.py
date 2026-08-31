@@ -35,12 +35,53 @@ def _clamp(value: int, low: int, high: int) -> int:
 # --------------------------------------------------------------------------- #
 
 
-@dataclass(frozen=True)
+#: Accent families.  Amber came first because it is what tiny-scraper uses, so
+#: both apps feel like one product on the same device.  Each pair is
+#: ``(accent, accent_d1)``: the second is the gradient tail and button fill.
+_ACCENTS: dict[str, dict[str, tuple[int, int, int, int]]] = {
+    "amber": {"accent": (232, 163, 61, 255), "accent_d1": (184, 125, 34, 255)},
+    "ice": {"accent": (97, 175, 239, 255), "accent_d1": (47, 118, 186, 255)},
+    "lime": {"accent": (163, 209, 78, 255), "accent_d1": (113, 154, 42, 255)},
+}
+
+#: Light and dark surfaces.  Only the neutrals live here -- the accent stays
+#: whatever family was picked, so a theme is a (family, surface) pair.
+_SURFACES: dict[str, dict[str, tuple[int, int, int, int]]] = {
+    "dark": {
+        "bg": (20, 20, 20, 255),
+        "panel": (28, 28, 30, 255),
+        "panel_2": (36, 36, 38, 255),
+        "border": (51, 51, 54, 255),
+        "text": (242, 242, 242, 255),
+        "text_dim": (154, 154, 158, 255),
+    },
+    "light": {
+        "bg": (233, 233, 236, 255),
+        "panel": (248, 248, 250, 255),
+        "panel_2": (222, 222, 227, 255),
+        "border": (193, 193, 200, 255),
+        "text": (30, 30, 33, 255),
+        "text_dim": (104, 104, 112, 255),
+    },
+}
+
+DEFAULT_THEME = "amber"
+DEFAULT_VARIANT = "dark"
+
+#: Values accepted by ``config.theme`` / ``config.theme_variant``; shared with
+#: the settings dialog so there is one source of truth.
+THEMES: tuple[str, ...] = tuple(_ACCENTS)
+VARIANTS: tuple[str, ...] = tuple(_SURFACES)
+
+
+@dataclass
 class Colors:
     """RGBA palette.
 
-    Amber accent is inherited from tiny-scraper so both apps feel like the same
-    product on the same device.
+    Mutable on purpose, and shared as a single instance: every screen does
+    ``from ...core.theme import COLORS``, so switching a theme has to update
+    *that* object rather than hand out a new one -- otherwise half the UI would
+    keep painting with the palette it imported.
     """
 
     bg: tuple[int, int, int, int] = (20, 20, 20, 255)
@@ -74,8 +115,20 @@ class Colors:
             "danger": self.danger,
         }
 
+    def apply(self, theme: str = DEFAULT_THEME, variant: str = DEFAULT_VARIANT) -> None:
+        """Load a (family, surface) pair into this instance.
 
-#: Shared immutable instance -- the palette is not user-configurable yet.
+        Unknown names fall back to the defaults rather than raising: a config
+        written by a newer build must not stop the app from painting.
+        """
+        accents = _ACCENTS.get(theme) or _ACCENTS[DEFAULT_THEME]
+        surfaces = _SURFACES.get(variant) or _SURFACES[DEFAULT_VARIANT]
+        for name, value in {**surfaces, **accents}.items():
+            setattr(self, name, value)
+
+
+#: The palette every screen paints with.  Call :meth:`Colors.apply` on it once
+#: at startup (and whenever the settings change) -- never replace the object.
 COLORS = Colors()
 
 

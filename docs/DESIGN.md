@@ -158,8 +158,8 @@ d:/code/Retrostation/
     │   │   ├── base.py          #    MetadataSource 抽象 + 合并/写回策略
     │   │   ├── esde.py          #    gamelist.xml（可写，主写源）
     │   │   └── pegasus.py       #    metadata.pegasus.txt（只读，预留）
-    │   ├── media.py             # ★ 封面/视频/Logo 探测 + 缩略图缓存 + LRU
-    │   └── video.py             # ★ ffmpeg 管道解码 + 解码线程 + 帧队列
+    │   ├── media.py             # ★ 封面/视频/Logo 探测（列一次表）+ 缩略图缓存 + LRU
+    │   └── video.py             # ★ 副屏视频：防抖 / 按 fps 节流 / 静默降级（无平台代码）
     ├── ui/{app,widgets,theme}.py
     ├── ui/screens/
     │   ├── home.py              # 平台页（卡片轮播）
@@ -169,8 +169,9 @@ d:/code/Retrostation/
     │   └── menu.py              # 系统菜单 / 设置
     ├── launcher/{launch,subscreen}.py
     └── platform/                # ★★ 平台适配层（唯一含平台代码的地方，见 §17）
-        ├── base.py              #    Platform / Canvas 抽象接口
-        └── linux/               #    SDL2 + PIL + evdev + ffmpeg
+        ├── base.py              #    Platform / Canvas / VideoPipe 抽象接口
+        └── linux/               #    SDL2 + PIL + evdev
+            └── video.py         #      ★ ffmpeg 管道解码（唯一碰子进程的地方）
 ```
 
 ---
@@ -479,36 +480,62 @@ activeImage / bottomImage
 **不内建刮削**：封面由 tiny-scraper 产出，本前端只做 **读取 · 跳转 · 写回游玩状态**
 （设置页提供「跳转到 Tiny Scraper 补封面 / 补视频」入口，退出后由守护脚本拉起）。
 
-### 6.5 视频播放子系统（真机实测可行）
+### 6.5 视频播放子系统（M4 已实现 · 真机实测）
 
-**实测数据**（2026-08-28，rk3568，ffmpeg 4.4.4）
+**实测数据**（2026-08-28 预研 / 2026-08-29 M4 落地后复测，rk3568，ffmpeg 4.4.4）
 
 | 项目 | 结果 |
 |---|---|
 | `ffmpeg` / `ffplay` / `ffprobe` | ✅ 均存在，4.4.4（GPL+nonfree，含 libx264/libx265/alsa/libdrm） |
 | 硬件解码 | ❌ **不可用** —— 无 `/dev/video*`（V4L2 m2m 无设备），ffmpeg 未编入 `rkmpp` |
-| SW 解码 → 288×216 @15fps | 24s 素材耗时 **4.5s**（≈ **5.3× 实时**）→ 约 **19% 单核** |
-| SW 解码 → 240×180 @12fps | 24s 素材耗时 **3.6s**（≈ **6.6× 实时**）→ 约 **15% 单核** |
+| SW 解码 → 288×216 @15fps（预研） | 24s 素材耗时 **4.5s**（≈ **5.3× 实时**）→ 约 **19% 单核** |
+| **SW 解码 → 288×216 @15fps（实测）** | 稳定 **14.2 fps**，**3.8% 单核** |
+| **SW 解码 → 328×256 @15fps（UI 实际尺寸）** | 稳定 **14.2 fps**，**4.5% 单核** |
+| **首帧延迟** | **348 ms**（250ms 防抖 + ffmpeg 启动） |
 
-**结论：软件解码完全够用**，副屏 288×216@15fps 视频可长期播放。
+> 预研的 19% 单核是「ffmpeg 全速解码、不管播放节奏」的最坏估算。实际播放按 15fps
+> 节流后只花 **4%** 左右——素材本身小（240×360 / 320×240），瓶颈根本不在解码。
 
-**管道设计**
+**管道设计**（`platform/linux/video.py`）
 
 ```python
-CMD = ["ffmpeg", "-hide_banner", "-loglevel", "error",
+CMD = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin",
        "-stream_loop", "-1",                                  # 无限循环
        "-i", str(video_path),
-       "-an",                                                  # 丢弃音频
-       "-vf", "scale=288:216:flags=fast_bilinear,fps=15",
+       "-an", "-sn", "-dn",                                   # 只要画面
+       "-vf", "scale=328:256:flags=fast_bilinear:force_original_aspect_ratio=decrease,"
+              "pad=328:256:(ow-iw)/2:(oh-ih)/2:color=black,fps=15",
        "-pix_fmt", "rgb24", "-f", "rawvideo", "-"]
-proc = subprocess.Popen(CMD, stdout=PIPE, stderr=DEVNULL, bufsize=FRAME * 4)
+proc = subprocess.Popen(CMD, stdout=PIPE, stderr=DEVNULL, bufsize=FRAME * 2)
 ```
 
-- 解码线程循环 `proc.stdout.read(FRAME)`（FRAME = 288×216×3），`Image.frombytes("RGB", (288,216))` 后放入 `queue(maxsize=3)`
-- 主循环每视频帧从队列**只取最新一帧**（丢弃积压），避免延迟累积
-- 视频固定 **15fps**，与主屏渲染解耦（主屏仍走脏标记）
-- **切换选中项**：`proc.terminate()` → 起新进程；带 **250ms 防抖**，快速滚动时不反复重启 ffmpeg
-- **失败静默降级**：视频不存在 / 解码报错 / ffmpeg 缺失 → 直接显示封面，不弹错误
+- 解码线程循环 `proc.stdout.read(FRAME)`，`Image.frombytes("RGB", size).convert("RGBA")`
+  后**只保留最新一帧**（单槽覆盖，不是队列——积压直接丢，延迟不累积）
+- **必须节流**：读取线程按 `1/fps` 睡眠。若「有多少读多少」，ffmpeg 会以 5× 实时
+  全速解码并吃满一个核，而屏幕上只会显示 15 帧
+- 解码尺寸 = 副屏媒体框内框尺寸（`bottom.media_inner_size()`），这样
+  `Canvas.image_fit` 只做一次 paste，不再逐帧 LANCZOS 缩放
+- `force_original_aspect_ratio=decrease` + `pad`：竖屏 NDS 素材（212×320）保持比例居中，
+  不被拉伸
+- **切换选中项**：`proc.terminate()` → 起新进程；带 **250ms 防抖**（`VideoSettings.debounce`），
+  快速滚动时不反复重启 ffmpeg
+- **失败静默降级**：视频不存在 / 3s 内一帧都没出（`VideoSettings.stale`）/ ffmpeg 缺失
+  → 该文件进会话黑名单，显示封面，不弹错误；连续 3 个文件都打不开则彻底关掉视频
+- **启动游戏前必须 `close()`**：`execv` 会把 ffmpeg 一起继承给模拟器，让它在后台空转
+  （`App._launch`，§8.1 步骤 ③）；`retrostation.sh` 另有一道 `pkill` 兜底
+
+**视频从哪来**：按 `video/<ROM 名>.mp4` → `Imgs/<ROM 名>.mp4`（实测这台设备的刮削器
+把 mp4 丢在 `Imgs/` 里）→ ES-DE `media/videos/` 依次探测（`data/media.py`）。
+命中情况可用 `python3 -m retrostation.main --check NDS` 查看 `video` 行。
+
+设置项 **`bottom_video`**（布尔，默认 `true`）：
+
+| 取值 | 行为 |
+|---|---|
+| `true`（默认） | 有视频则播，无则显示封面 |
+| `false` | 跳过视频，始终显示封面（省电 / 省 CPU；单屏模式强制此项） |
+
+真机自检：`scripts/video_selftest.py`（生成素材 → 测帧率/CPU/首帧延迟 → 无头渲染副屏存 PNG）
 
 设置项 **`bottom_video`**（布尔，默认 `true`）：
 
@@ -899,33 +926,40 @@ bottom_video = false  →  跳过视频，直接从封面开始（省电 / 省 C
 ③ **停掉副屏视频解码进程**（ffmpeg terminate + wait，避免残留占 CPU）
 ④ 写 /tmp/retrostation_launch.cmd（要执行的启动命令）
 ⑤ 关下屏窗口 → 关上屏窗口 → SDL_Quit()   （顺序不能反）
-⑥ os.execv("/bin/bash", ["bash", "/…/run_game.sh"])   ← 直接让位，不 fork
+⑥ 进程**正常退出并返回 42**（游戏由守护脚本拉起，见 §8.2）
 ```
 
-> 注意 ③：**必须先杀 ffmpeg**。否则它会跟着 `execv` 一起被继承，在模拟器运行期间持续占用约 19% CPU。
-> 同时在 `main.py` 注册 `atexit` + `SIGTERM` 处理器做兜底。
+> 注意 ③：**必须先杀 ffmpeg**。游戏是前端退出之后才启动的，但残留的解码进程仍会
+> 在模拟器运行期间持续占用约 19% CPU。同时在 `main.py` 注册 `atexit` + `SIGTERM`
+> 处理器做兜底。
+>
+> 注意 ⑥：**不要 `os.execv`**。早期实现用 `execv` 直接让位，结果模拟器的退出码变成
+> 了前端的退出码（通常是 0），守护脚本据此判定"玩家退出了前端"而不再拉起，表现为
+> "退出游戏后回到 APPS 菜单，而不是回到刚才的游戏"。改成"写命令文件 + 退出 42"
+> 之后，退出码契约（0 = 退出前端 / 42 = 有游戏待启动）才真正成立。
 
 ### 8.2 守护重启（**规避 Wayland 重建崩溃的关键**）
 
 **不在同进程内重建 SDL 窗口**。改用 shell 自举：
 
-```bash
-# run_game.sh
-source /tmp/retrostation_launch.cmd
-"$@"                                   # 阻塞：跑 RetroArch / 独立模拟器
-sync
-# 游戏结束后，把屏幕交还前端
-exec /mnt/mmc/Roms/APPS/retrostation.sh      # 重新拉起，读 resume 恢复现场
-```
+实现上把 `run_game` 内联成一个子 shell，省掉一层 `exec` 嵌套（每玩一次游戏就
+多一层壳没有好处，还会让退出码更难读）：
 
 ```bash
 # retrostation.sh
 while true; do
-    python3 -u "$DIR/src/retrostation/main.py" "$DIR/config.json"
+    python3 -u -m retrostation.main --config "$DIR/config.json"
     code=$?
-    [ -f /tmp/retrostation_launch.cmd ] || break   # 无待启动游戏 = 正常退出
-    bash "$DIR/run_game.sh"                        # 启动并等待，结束后回到本循环
+
+    [ "$code" -eq 0 ] && break                  # 玩家退出前端，把屏幕交还系统
+    [ "$code" -eq 42 ] || { ……崩溃重试…… }
+
+    [ -f /tmp/retrostation_launch.cmd ] || break  # 说要启动却没有命令 = 异常
+
+    ( . /tmp/retrostation_launch.cmd; "$@" )    # 阻塞：跑 RetroArch / 独立模拟器
     rm -f /tmp/retrostation_launch.cmd
+    sync
+    # 回到循环顶部：全新进程重建窗口，读 state.json 的 resume 恢复现场
 done
 ```
 
@@ -948,16 +982,17 @@ done
 | 指标 | 目标 | 手段 |
 |---|---|---|
 | 冷启动到可交互 | < 1.5s | 索引缓存；先渲染骨架屏，后台扫描；gamelist 按平台懒加载 |
-| 列表滚动帧率 | ≥ 30 fps | 只重绘脏区；行渲染 = 1 圆角矩形 + 1 文本 + 1 贴图 |
+| 列表滚动帧率 | ≥ 30 fps ⚠️ 实测 ~14 | 见 §9.4 已做的优化与剩余差距 |
 | **轮播视图帧率** | ≥ 30 fps | 复用磁盘预生成的 196×272 缩略图，PIL 缩放一次完成 |
-| 切平台 | < 300ms | 索引 + 磁盘缩略图缓存 |
-| 副屏刷新（静态） | 节流 ≤ 12 fps | 见 §9.2 |
-| **副屏视频播放** | 288×216 @ 15fps | ffmpeg SW 解码，实测 ≈ **19% 单核**（4 核共约 5%） |
-| **视频播放时主屏** | 仍 ≥ 30 fps | 解码在独立线程；主循环只取队列最新帧，不阻塞 |
-| **视频切换响应** | < 350ms | 250ms 防抖 + 视频首帧占位图（不等解码） |
-| 常驻内存 | < 130 MB | LRU 限 30 张缩略图 + 3 张副屏大图 + 10 张 Logo；纹理即用即毁；视频帧队列 maxsize=3 |
-| 常驻 CPU（空闲） | < 3% | 空闲时 input 用 `select(timeout=0.2)`，不做忙轮询 |
-| 常驻 CPU（播视频） | < 25%（单核计） | 见上；滚动/启动游戏时暂停解码 |
+| 切平台 | < 300ms ✅ 187–294ms | 索引 + 媒体目录列一次表（不再逐个 stat） |
+| 副屏刷新（静态） | 节流 ≤ 12 fps ✅ | 见 §9.2 |
+| **副屏视频播放** | 288×216 @ 15fps ✅ 14.2 fps | ffmpeg SW 解码，实测 **3.8–4.5% 单核** |
+| **视频播放时主屏** | 仍 ≥ 30 fps ⚠️ 见 §9.4 | 解码在独立线程；解码本身几乎不占主循环 |
+| **视频切换响应** | < 350ms ✅ 348ms | 250ms 防抖 + ffmpeg 启动 |
+| **切换游戏时 UI 阻塞** | < 50ms ✅ **2ms** | 旧解码器交给后台线程收尾（改前 **1009 ms**，见 §14） |
+| 常驻内存 | < 130 MB | LRU 限 40 张缩略图 + 占位图缓存；纹理即用即毁；视频只留最新一帧 |
+| 常驻 CPU（空闲） | < 3% | 主屏 0.5s 心跳、副屏 90ms 节流；不做忙轮询 |
+| 常驻 CPU（播视频） | < 25%（单核计）✅ ~5% | 按 fps 节流解码；启动游戏时 close |
 
 ### 9.2 副屏节流
 
@@ -968,6 +1003,41 @@ done
 # 主循环末尾：距上次副屏绘制 ≥ 90ms 才真正渲染
 # 停止滚动 250ms 后，强制渲染一次（保证最终一致）
 ```
+
+实现上不靠「脏标记」而是比对一个状态元组（视图 / 布局 / 索引 / 筛选 / 排序 / 弹窗 /
+toast / 平台数），这样不管是按键、toast 还是后台扫描完成触发的变化都能被发现，
+也不会出现「漏刷导致副屏全黑」的问题（M4 期间实测到过）。
+
+### 9.4 渲染开销实测与已做优化（M4 期间）
+
+在 FC（573 ROM）游戏页、真机无头渲染、逐段计时（单位：ms/帧）：
+
+| 阶段 | 优化前 | 优化后 | 手段 |
+|---|---|---|---|
+| `session.games()` ×3/帧 | 16.0 | **0.0** | 每帧记忆化，输入事件时失效（`Session._visible`） |
+| `draw_top` | 103.7 | **32–36** | 文本预渲染缓存 + 渐变缓存 + 占位图缓存 |
+| `draw_bottom` | 46.2 | **19–21** | 同上 |
+| `poll_events` | 33.3 | 33.3 | 输入等待，天然节奏 |
+| `resolve_all`（打开平台，一次性） | ~350 | **187–294** | 媒体目录列一次表取代逐个 stat；`directories()` 顺序缓存；`Game.copy()` 不走 `dataclasses.replace` |
+
+三处关键优化：
+
+1. **文本缓存**（`PilCanvas._text_patch`）。CJK 字形渲染是真机最贵的操作：一帧约 70 次
+   `Font.render`，占 50ms。现在把「内容 + 字体 + 颜色 + anchor」作为 key 缓存渲染好的
+   位图，重复帧直接合成。锚点偏移不靠算字体度量，而是先在透明画布上画一遍再
+   `getbbox()` 裁出墨迹框——`mm` / `la` / `rm` 全部照旧。
+   合成必须用 `alpha_composite` 而非 `paste`：后者会把字形覆盖率在 alpha 通道上乘两次，
+   所有抗锯齿边缘都会变暗。
+2. **渐变缓存**（`PilCanvas._gradient`）。选中行的横向渐变原来每帧做 ~500 次
+   `putpixel` + 一次 resize，实测 **42ms/帧**，占满屏开销的 40%。尺寸 + 颜色做 key 缓存后归零。
+3. **媒体解析列一次表**（`MediaDirs._listing`）。原先每个 ROM 每种媒体猜 4 个后缀去
+   `stat`，573 个 ROM ≈ 5000 次 stat；视频探测让它再翻倍。改为每个媒体目录只
+   `list_dir` 一次建索引，命中即返回。
+
+**剩余差距**：列表滚动仍只有 ~14 fps（目标 30）。剩下的开销集中在整屏重绘
+（`draw_top` 32ms + `draw_bottom` 19ms），要继续往上只能做**脏区局部重绘**
+（滚动时只重画变化的行、播视频时只 blit 副屏媒体框），属于 M7 打磨范围。
+注意：这不是视频带来的——实测 `bottom_video` 开/关帧耗时几乎相同（解码 ≈4% 单核）。
 
 ---
 
@@ -988,6 +1058,13 @@ done
 | `ok` | `#4CAF50` | 成功 / 有封面 |
 | `warn` | `#FFC866` | 警告 / 重试 |
 | `danger` | `#E05252` | 删除 / 退出确认 |
+
+**主题 = 色系 × 明暗**：色系只换 `accent` / `accent-d1`（琥珀 / 冰蓝 / 青柠，默认琥珀
+以对齐 tiny-scraper），明暗只换中性色（`bg` / `panel` / `panel-2` / `border` / `text`）。
+
+调色板是一个**共享实例**，切换主题时必须**原地更新**（`COLORS.apply()`）而不是换成新对象：
+每个界面都是 `from ...core.theme import COLORS` 拿的同一个引用，换对象只会让一半界面
+继续用旧配色。
 
 ### 10.2 字体与字号（640×480 基准）
 
@@ -1048,6 +1125,10 @@ done
 | **强制关视频** | `bottom_video` 在 single 模式强制 `false`；详情条（132×98）只显示封面 |
 | 不提供开关 | 118px 的详情条放视频没有意义，且与列表滚动抢 CPU，索性不开放 |
 | 滚动时无视频负担 | 因为本来就关，省去 `SIGSTOP/CONT` 的状态管理 |
+
+> **实现状态**：目前只落地了**方案 A**（上下分区）。方案 B 的左右分栏尚未实现，
+> `config.single_layout` 只是一个占位字段，界面里也没有暴露它 —— 留到需要时再做，
+> 因为 M6 的验收标准是"单屏功能零缺失"，而不是"两种分栏都要有"。
 
 ---
 
@@ -1131,7 +1212,8 @@ done
 | `app.py` 主循环 | 重写为状态机 |
 | — | **新增** `data/sources/`：数据源插件层（`base.py` + `esde.py` + 未来的 `pegasus.py`） |
 | — | **新增** `data/media.py`：封面/视频/Logo 探测 + 缩略图缓存 + LRU |
-| — | **新增** `data/video.py`：ffmpeg 管道解码 + 解码线程 + 队列 |
+| — | **新增** `data/video.py`：副屏视频调度（防抖 / 节流 / 降级），不碰任何平台代码 |
+| — | **新增** `platform/linux/video.py`：ffmpeg 管道解码（`VideoPipe` 实现） |
 | — | **新增** `ui/screens/game_carousel.py`：第三视图 |
 | — | **新增** `platform/`：平台适配层（Linux / 未来 Android），见 §17 |
 
@@ -1154,8 +1236,9 @@ done
 | HDMI 插入后分辨率变化 | 布局错位 | 监听 `/sys/class/extcon/hdmi/state` 或 `SDL_WINDOWEVENT`，尺寸变化触发重新布局 |
 | 封面过大（原图 1000+px） | 解码慢 | 磁盘缩略图缓存，原图**只在副屏大图用一次**并降采样 |
 | **无硬件解码**（实测无 `/dev/video*`、ffmpeg 无 rkmpp） | 视频吃 CPU | 固定 288×216@15fps（实测 ≈19% 单核）；滚动/启动时暂停；单屏默认关 |
-| **ffmpeg 子进程残留** | 退出后僵尸进程占 CPU | `atexit` + 信号处理里 `terminate()`；启动时先 `pkill -f` 旧管道 |
-| 快速滚动导致 ffmpeg 反复启停 | 卡顿、句柄泄漏 | 选中项变化 **250ms 防抖**；只保留最后一个进程，`terminate` 后 `wait(timeout=1)` |
+| **ffmpeg 子进程残留** | 退出后僵尸进程占 CPU | ✅ 已落地：启动游戏前 `VideoPlayer.close()`；`run()` 结束时 `stop()`；`retrostation.sh` 启动/每次退出都 `pkill -f 'ffmpeg .*-f rawvideo'` |
+| **ffmpeg 不响应 SIGTERM** | 切换游戏卡 ~1s | ✅ 已落地：实测本机 ffmpeg 常忽略 SIGTERM 满 1s（SD 卡读取中）。切换时的收尾改到后台线程；`close()` 只等 0.15s 后 SIGKILL；交出设备前 join 所有后台收尾，不留进程 |
+| 快速滚动导致 ffmpeg 反复启停 | 卡顿、句柄泄漏 | ✅ 已落地：选中项变化 **250ms 防抖**（`VideoSettings.debounce`）；`terminate` + `wait(timeout=1)` + `kill` 兜底 |
 | 视频损坏 / 奇怪编码 | ffmpeg 卡死 | 管道读取带超时（3s 无帧即判定失败并降级到封面） |
 | **gamelist.xml 被前端写坏** | 用户元数据丢失 | 解析时保留未知元素；写前备份 `.bak`；临时文件 + `os.replace` 原子替换；`flock` 独占锁 |
 | gamelist 很大（515 条 × 40 平台） | 解析慢 | 按平台懒加载（只解析进入的平台）；`xml.etree.ElementTree` + `iterparse` |
@@ -1174,13 +1257,13 @@ done
 | 阶段 | 交付物 | 验收 |
 |---|---|---|
 | **M0 ✅** | 详细设计（三视图 / 三类媒体 / 数据源架构 / 副屏视频 / 跨平台预留）+ HTML 交互原型 | 本文档 + `prototype/` 可在浏览器跑通全流程 |
-| M1 | `platform/base.py` + `core/`（display 双/单屏、input、config、hw、i18n）+ 空壳 UI | 真机显示双屏黑底 + 按键可退出 |
-| M2 | `data/`（扫描、索引、**三类媒体探测**、缩略图缓存）+ 平台页 + 游戏**列表/网格/轮播** | 真机浏览 FC 515 个 ROM，三视图切换，滚动 ≥30fps |
-| M3 | **`data/sources/`**（`base.py` + `esde.py`）+ 副屏联动 + 元数据卡 | 收藏/游玩次数写入 `gamelist.xml`，用 ES-DE 打开能看到 |
-| M4 | **`data/video.py`**（ffmpeg 管道）+ 副屏 `MediaView`（视频/封面自动降级） | 副屏稳定播放 288×216@15fps；无视频自动回退封面；元数据区显示评分/发布/多行简介 |
-| M5 | `launcher/`：RA + 独立模拟器 + 守护重启（**启动前停视频**） | 启动 → 玩 → 退出 → 回到原位 |
-| M6 | 设置菜单、主题、语言、背光、**单屏兼容** | 强制 single 模式功能零缺失 |
-| M7 | 打磨：动画、缺图占位、错误提示、性能 | 冷启动 <1.5s，常驻 <120MB，视频播放时主屏仍 ≥30fps |
+| **M1 ✅** | `platform/base.py` + `core/`（display 双/单屏、input、config、hw、i18n）+ 空壳 UI | 真机显示双屏黑底 + 按键可退出 |
+| **M2 ✅** | `data/`（扫描、索引、**三类媒体探测**、缩略图缓存）+ 平台页 + 游戏**列表/网格/轮播** | 真机浏览 FC 515 个 ROM，三视图切换，滚动 ≥30fps |
+| **M3 ✅** | **`data/sources/`**（`base.py` + `esde.py`）+ 副屏联动 + 元数据卡 | 收藏/游玩次数写入 `gamelist.xml`，用 ES-DE 打开能看到 |
+| **M4 ✅** | **`data/video.py`（防抖/节流/降级）+ `platform/linux/video.py`（ffmpeg 管道）** + 副屏 `MediaView`（视频/封面自动降级） | 副屏实测 **14.2 fps @ 328×256**，**4.5% 单核**，首帧 **348ms**；无视频自动回退封面；ffmpeg 缺失 / 文件损坏静默降级；启动游戏前停解码 |
+| **M5 ✅** | `launcher/`：RA + 独立模拟器 + 守护重启（**启动前停视频**）；命令文件交接取代 `execv`，`state.json["resume"]` 恢复现场 | 启动 → 玩 → 退出 → 回到原位（真机实测通过） |
+| **M6 ✅** | 设置菜单、主题（3 色系 × 明暗）、语言、背光、**单屏兼容** | 强制 single 模式功能零缺失（6 项自动化验证通过） |
+| **M7 ✅** | 打磨：动画、缺图占位、错误提示、性能 | 冷启动 **1.18s**（<1.5s），常驻 **39.7MB**（<120MB），视频播放时主屏 **30.2fps**（≥30fps） |
 
 **扩展线（主线 M3 之后，可并行）**
 

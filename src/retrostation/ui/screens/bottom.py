@@ -7,10 +7,14 @@ from dataclasses import dataclass
 from ..art import ArtProvider
 from ..painter import Painter
 from ..widgets import logo_banner
-from ...core.model import ASSET_VIDEO, Game
+from ...core.model import Game
 from ...core.theme import COLORS
+from .games import cover_art
 
 _STAR = "★"
+
+#: Gap between the media box frame and the artwork it contains.
+MEDIA_INSET = 4
 
 
 @dataclass(frozen=True)
@@ -33,7 +37,9 @@ class Meta:
 
 
 def draw(painter: Painter, art: ArtProvider, game: Game | None, meta: Meta | None, *,
-         key_label: str, hints: list[tuple[str, str]], playing_video: bool) -> None:
+         key_label: str, hints: list[tuple[str, str]],
+         video_frame=None, video_progress: float | None = None,
+         clip_pending: bool = False) -> None:
     m = painter.metrics
     painter.clear()
     _title_bar(painter, meta, key_label)
@@ -46,8 +52,8 @@ def draw(painter: Painter, art: ArtProvider, game: Game | None, meta: Meta | Non
 
     top = m.bottom_title_h + m.body_padding
     media_box = (m.u(12), top, m.media_w, m.media_h)
-    _media(painter, art, game, media_box, playing_video)
-    logo_banner(painter, game, (m.u(12), top + m.media_h + m.u(8), m.media_w, m.logo_strip_h))
+    _media(painter, art, game, media_box, video_frame, video_progress, clip_pending)
+    logo_banner(painter, art, game, (m.u(12), top + m.media_h + m.u(8), m.media_w, m.logo_strip_h))
 
     _meta(painter, meta, (m.u(12) + m.media_w + m.body_gap, top, m.meta_w, m.bottom_body_h()))
     _hints(painter, hints)
@@ -68,19 +74,51 @@ def _title_bar(painter: Painter, meta: Meta | None, key_label: str) -> None:
                  size=14, fill=COLORS.text, anchor="lm")
 
 
+def media_inner_size(m) -> tuple[int, int]:
+    """Size a video frame must be decoded at to fill the media box as drawn.
+
+    Decoding at exactly this size means :meth:`Canvas.image_fit` only pastes,
+    with no per-frame resize -- worth it at 15 fps on a 1.5 GHz core.
+    """
+    inset = m.u(MEDIA_INSET)
+    return (m.media_w - 2 * inset, m.media_h - 2 * inset)
+
+
 def _media(painter: Painter, art: ArtProvider, game: Game,
-           box: tuple[int, int, int, int], playing: bool) -> None:
+           box: tuple[int, int, int, int], frame, progress: float | None,
+           pending: bool = False) -> None:
     m = painter.metrics
     x, y, w, h = box
+    playing = frame is not None
     painter.rounded_rect(box, radius=m.u(8), fill=(14, 14, 16, 255),
                          outline=(232, 163, 61, 90) if playing else COLORS.border)
-    inset = m.u(4)
+    inset = m.u(MEDIA_INSET)
     inner = (x + inset, y + inset, w - 2 * inset, h - 2 * inset)
-    bitmap = art.thumbnail(game, inner[2], inner[3]) or art.placeholder(game.key, inner[2], inner[3])
-    painter.image_fit(bitmap, inner)
-    if playing and game.has_asset(ASSET_VIDEO):
-        painter.rect((x, y + h - m.u(3), w, m.u(3)), fill=(0, 0, 0, 140))
-        painter.rect((x, y + h - m.u(3), w // 3, m.u(3)), fill=COLORS.accent)
+    # Video first, then the cover (DESIGN §6.5).  With neither, say so: a
+    # generated tile read as artwork the game happened to have.  ``pending``
+    # covers the moment before the first frame arrives -- showing the cover
+    # then flashed it on every game that has a clip.
+    if frame is not None:
+        painter.image_fit(frame, inner)
+    elif not pending:
+        cover_art(painter, art, game, inner)
+    if playing:
+        progress_bar(painter, x, y + h - m.u(3), w, m.u(3), progress)
+
+
+def progress_bar(painter: Painter, x: int, y: int, w: int, h: int,
+                 progress: float | None) -> None:
+    """3px bar under a playing clip; plain track when the length is unknown.
+
+    Public because the single-screen detail strip draws its own clip and
+    wants the same bar.
+    """
+    m = painter.metrics
+    painter.rect((x, y, w, h), fill=(0, 0, 0, 140))
+    if progress is None:
+        return
+    filled = max(m.u(2), round(w * min(1.0, max(0.0, progress))))
+    painter.rect((x, y, filled, h), fill=COLORS.accent)
 
 
 def _meta(painter: Painter, meta: Meta, box: tuple[int, int, int, int]) -> None:

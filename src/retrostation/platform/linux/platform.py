@@ -7,20 +7,24 @@ runs against plain PIL canvases with no SDL and no input device.
 
 from __future__ import annotations
 
+import logging
 import os
-import sys
 from pathlib import Path
 from typing import Sequence
 
 from PIL import Image
 
 from ...core.theme import BASE_H, BASE_W, metrics_for
-from ..base import Canvas, FileEntry, InputEvent, Platform
+from ...launcher.launch import write_launch_cmd
+from ..base import Canvas, FileEntry, InputEvent, Platform, VideoPipe
 from .canvas import PilCanvas, save_bitmap
 from .display import SDLDisplay
 from .fonts import FontBook
 from .input import EvdevInput
 from . import hw as sysfs
+from . import video as ffmpeg_pipe
+
+log = logging.getLogger(__name__)
 
 # --------------------------------------------------------------------------- #
 # Path resolution
@@ -161,14 +165,20 @@ class LinuxPlatform(Platform):
     # -- launching -------------------------------------------------------- #
 
     def launch_game(self, argv: Sequence[str]) -> None:
-        """Replace this process.  The shell bootstrap restarts us afterwards."""
+        """Queue the command for the bootstrap instead of exec'ing it.
+
+        This used to ``os.execv`` straight into the emulator, which handed the
+        emulator's exit code to the bootstrap: it read a plain quit (0) and
+        dropped the player on the APPS menu instead of resuming the session.
+        Writing the command out and returning keeps the exit-code contract
+        intact -- the app unwinds, exits 42, and only then does the game start
+        (DESIGN §8.2).  Releasing the display is :meth:`App.run`'s job.
+        """
         args = [str(a) for a in argv]
         if not args:
             raise ValueError("launch_game() needs a command")
-        self.shutdown()
-        sys.stdout.flush()
-        sys.stderr.flush()
-        os.execv(args[0], args)  # noqa: S606 - the command comes from our own config
+        write_launch_cmd(args, self.launch_cmd_path)
+        log.info("queued launch: %s", " ".join(args))
 
     # -- fonts / media ---------------------------------------------------- #
 
@@ -182,6 +192,21 @@ class LinuxPlatform(Platform):
     def save_screenshot(self, canvas: Canvas, path: Path) -> None:
         if isinstance(canvas, PilCanvas):
             save_bitmap(canvas, path)
+
+    def open_video_pipe(self, path: Path, *, width: int, height: int, fps: int) -> VideoPipe | None:
+        """Spawn ``ffmpeg``; ``None`` when it is missing or the file is junk.
+
+        A missing binary is normal (stock firmwares ship without it), so this
+        is a debug log rather than a warning: the UI just shows cover art.
+        """
+        if not ffmpeg_pipe.available():
+            log.debug("ffmpeg not available; video disabled")
+            return None
+        try:
+            return ffmpeg_pipe.FFmpegPipe(path, width=width, height=height, fps=fps)
+        except (OSError, ValueError) as exc:
+            log.warning("cannot decode %s: %s", path, exc)
+            return None
 
     def load_metrics(self, index: int = 0) -> object:
         """Convenience helper for building :class:`Metrics` for a canvas."""

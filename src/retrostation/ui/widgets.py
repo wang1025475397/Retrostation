@@ -8,11 +8,10 @@ these; they never hand-draw chrome a widget already provides.
 from __future__ import annotations
 
 from datetime import datetime
-from pathlib import Path
 
-from ..core.model import ASSET_COVER, ASSET_LOGO, Game
+from ..core.model import Game
 from ..core.theme import COLORS, Metrics
-from ..data.media import placeholder_bitmap
+from .art import ArtProvider
 from .painter import Painter
 
 # --------------------------------------------------------------------------- #
@@ -123,7 +122,18 @@ def dialog(
     rows = rows or []
     row_h = m.u(40)
     width = m.u(470)
-    height = m.u(42) + m.u(16) + (m.u(44) if body else 0) + row_h * len(rows) + m.u(14)
+    chrome = m.u(42) + m.u(16) + (m.u(44) if body else 0) + m.u(14)
+    # A settings list only ever grows, and a dialog taller than the screen is
+    # unusable on a device with no scrolling: show a window around the cursor
+    # instead, and hint that the list continues past its edges.
+    room = max(1, (m.height - m.u(24) - chrome) // row_h)
+    visible = min(len(rows), room)
+    start = 0
+    if len(rows) > visible:
+        start = max(0, min(len(rows) - visible, selected - visible // 2))
+    shown = rows[start:start + visible]
+
+    height = chrome + row_h * visible
     x = (m.width - width) // 2
     y = (m.height - height) // 2
 
@@ -140,8 +150,9 @@ def dialog(
         )
         content_y += m.u(44)
 
-    for index, (label, value) in enumerate(rows):
-        item_y = content_y + m.u(6) + index * row_h
+    for offset, (label, value) in enumerate(shown):
+        index = start + offset
+        item_y = content_y + m.u(6) + offset * row_h
         is_selected = index == selected
         if is_selected:
             painter.hgradient(
@@ -154,9 +165,27 @@ def dialog(
         else:
             label_color = COLORS.text
             value_color = COLORS.text_dim
-        painter.text((x + m.u(16), item_y + row_h // 2 - m.u(4)), label, size=14, fill=label_color, anchor="lm")
+        # Label and value share one line: left-aligned label, right-aligned
+        # value.  Without truncating, a long pair runs the two into each other
+        # (very visible with the longer translated labels).
+        value_room = width // 2 - m.u(24)
+        shown_value = painter.ellipsize(value, size=12, max_width=value_room)
+        label_room = width - m.u(32) - painter.text_width(shown_value, size=12) - m.u(12)
         painter.text(
-            (x + width - m.u(16), item_y + row_h // 2 - m.u(4)), value, size=12, fill=value_color, anchor="rm"
+            (x + m.u(16), item_y + row_h // 2 - m.u(4)),
+            painter.ellipsize(label, size=14, max_width=max(m.u(40), label_room)),
+            size=14, fill=label_color, anchor="lm",
+        )
+        painter.text(
+            (x + width - m.u(16), item_y + row_h // 2 - m.u(4)),
+            shown_value, size=12, fill=value_color, anchor="rm",
+        )
+
+    if start > 0 or start + visible < len(rows):
+        painter.text(
+            (x + width // 2, y + height - m.u(7)),
+            "▲" if start > 0 else "▼",
+            size=9, fill=COLORS.text_dim, anchor="mm",
         )
 
 
@@ -167,6 +196,7 @@ def dialog(
 
 def game_artwork(
     painter: Painter,
+    art: ArtProvider,
     game: Game,
     box: tuple[int, int, int, int],
     *,
@@ -177,19 +207,21 @@ def game_artwork(
     ``prefer_logo`` is used by the list view (wide slot); the grid, carousel
     and bottom screen prefer the cover.  When nothing exists a deterministic
     placeholder is drawn, never a blank box.
+
+    Both bitmaps come from :class:`ArtProvider`: decoding a cover and scaling it
+    to fit costs ~14 ms on the handheld, which is most of a frame if it happens
+    per frame instead of once.
     """
     m = painter.metrics
     x, y, w, h = box
-    kind = ASSET_LOGO if prefer_logo else ASSET_COVER
-    bitmap = _decode(painter, game.asset(kind))
+    bitmap = art.thumbnail(game, w, h, prefer_logo=prefer_logo)
 
     if bitmap is not None:
         painter.image_fit(bitmap, box)
         return
 
     painter.rounded_rect(box, radius=m.u(4), fill=COLORS.panel_2, outline=COLORS.border)
-    placeholder = placeholder_bitmap(painter.platform, game.key, max(8, w), max(8, h))
-    painter.image_fit(placeholder, box)
+    painter.image_fit(art.placeholder(game.key, max(8, w), max(8, h)), box)
     painter.text(
         (x + w // 2, y + h // 2),
         game.display_name[:2] or "?",
@@ -199,29 +231,24 @@ def game_artwork(
     )
 
 
-def logo_banner(painter: Painter, game: Game, box: tuple[int, int, int, int]) -> None:
-    """Bottom-screen logo strip: the logo when present, otherwise the name."""
+def logo_banner(painter: Painter, art: ArtProvider, game: Game,
+                box: tuple[int, int, int, int]) -> None:
+    """Bottom-screen logo strip: the logo when present, otherwise the name.
+
+    The logo is redrawn on every video frame, so it has to come from the
+    thumbnail cache -- decoding the original PNG and scaling it each time
+    measured 14 ms per frame, i.e. a fifth of the frame budget.
+    """
     m = painter.metrics
     x, y, w, h = box
     painter.rounded_rect(box, radius=m.u(8), fill=COLORS.panel, outline=COLORS.border)
 
-    logo = _decode(painter, game.asset(ASSET_LOGO))
+    inner = (w - m.u(24), h - m.u(20))
+    logo = art.thumbnail(game, inner[0], inner[1], prefer_logo=True)
     if logo is not None:
-        painter.image_fit(logo, (x + m.u(12), y + m.u(10), w - m.u(24), h - m.u(20)))
+        painter.image_fit(logo, (x + m.u(12), y + m.u(10), inner[0], inner[1]))
         return
 
     painter.text(
         (x + w // 2, y + h // 2), game.display_name, size=16, fill=COLORS.text, anchor="mm"
     )
-
-
-def _decode(painter: Painter, path) -> object | None:
-    """Decode an asset path, returning ``None`` instead of raising."""
-    if path is None:
-        return None
-    try:
-        if not Path(path).is_file():
-            return None
-        return painter.platform.load_image(Path(path))
-    except OSError:
-        return None

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import ctypes
 import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -118,6 +120,67 @@ class FakePlatform(Platform):
 
     def shutdown(self) -> None:
         return None
+
+
+def _remove_untrusted_link(path: str) -> bool:
+    """Delete a Windows symlink Python refuses to traverse.
+
+    Without Developer Mode, Windows marks a symlink that points outside its own
+    directory as an *untrusted mount point*: ``Path.resolve``, ``os.unlink`` and
+    even ``os.rmdir`` all fail with ``WinError 448``.  The raw Win32 calls act on
+    the reparse point itself and do work, so try them first.
+    """
+    kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+    for call in (kernel32.RemoveDirectoryW, kernel32.DeleteFileW):
+        call.restype = ctypes.c_bool
+        if call(path):
+            return True
+    return False
+
+
+def _drop_current_links(directory: Path) -> None:
+    """Remove every ``*current`` link in ``directory``."""
+    try:
+        entries = list(directory.glob("*current"))
+    except OSError:  # noqa: BLE001 - cleanup must never break the session
+        return
+    for entry in entries:
+        # No stat() first: on Windows even asking can raise WinError 448.
+        if os.name == "nt" and _remove_untrusted_link(str(entry)):
+            continue
+        for action in (os.unlink, os.rmdir):
+            try:
+                action(entry)
+                break
+            except OSError:
+                continue
+
+
+def pytest_sessionfinish(session) -> None:
+    """Drop pytest's ``*current`` symlinks before its own cleanup runs.
+
+    Resolving them raises ``WinError 448`` on Windows, which aborts pytest's
+    tmpdir hook and takes the whole failure report down with it -- the test run
+    then looks green when it is not, and exits 1 even with zero failures.
+    Removing them first is harmless on Linux.
+    """
+    # ``_tmp_path_factory`` is current pytest; older releases used ``_tmp_path_handler``.
+    handler = getattr(session.config, "_tmp_path_factory", None)
+    if handler is None:
+        handler = getattr(session.config, "_tmp_path_handler", None)
+    if handler is None:
+        return
+    try:
+        basetemp = Path(handler.getbasetemp())
+    except Exception:  # noqa: BLE001 - never break the session over cleanup
+        return
+
+    _drop_current_links(basetemp)
+    if getattr(handler, "_given_basetemp", None) is None:
+        # pytest keeps one more "pytest-current" link above the numbered
+        # basetemp (in ``pytest-of-<user>``); it is ours only when the user did
+        # not pass ``--basetemp``.
+        _drop_current_links(basetemp.parent)
 
 
 def png_bytes(color=(200, 120, 40, 255), size=(16, 16)) -> bytes:

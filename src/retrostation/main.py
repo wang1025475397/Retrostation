@@ -23,11 +23,12 @@ import threading
 
 from .core.config import Config
 from .core.i18n import Translator
+from .core.theme import COLORS
 from .data.library import Library
 from .data.systems import display_name
 from .platform.base import Platform
 from .platform.linux.platform import LinuxPlatform
-from .ui.app import App
+from .ui.app import EXIT_OK, App
 
 log = logging.getLogger("retrostation")
 
@@ -84,22 +85,39 @@ def check_system(platform: Platform, config: Config, system_key: str) -> int:
 
 
 def run_ui(platform: Platform, config: Config, translator: Translator) -> int:
-    """Background scan, then hand over to the UI loop."""
+    """Come up on the index, then re-scan behind the UI."""
     library = Library(platform, config)
-    threading.Thread(target=_scan_in_background, args=(library,),
-                     name="retrostation-scan", daemon=True).start()
+    # Listing the ROM tree is a stat() per file -- ~0.7 s for 3.9k ROMs here --
+    # which is most of the cold start.  The index remembers the last listing,
+    # so the first frame can come up with a full library, and the real scan
+    # (which is what notices a newly copied game) runs behind it.
+    library.scan(cached_only=True)
 
     app = App(platform, config, translator, library)
-    code = app.run()
+    # Started from the first-frame callback, not here: the listing is a stat()
+    # per file and competing with the first paint for the card doubled that
+    # frame's cost (0.57 s -> 1.34 s measured on the device).
+    app.on_ready = lambda: threading.Thread(
+        target=_scan_in_background, args=(app, library),
+        name="retrostation-scan", daemon=True).start()
+    try:
+        code = app.run()
+    except KeyboardInterrupt:
+        # Ctrl+C over an SSH debug session.  ``App.run`` already shut the
+        # display down in its ``finally``, so this is a plain user quit.
+        code = EXIT_OK
     log.info("frontend exit code %s", code)
     return code
 
 
-def _scan_in_background(library: Library) -> None:
+def _scan_in_background(app: App, library: Library) -> None:
     try:
         library.scan()
     except Exception:  # noqa: BLE001 - the UI must still come up
         log.exception("library scan failed")
+        return
+    # The listing is in; tell the UI so it stops showing the index's version.
+    app.library_changed()
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -111,6 +129,9 @@ def main(argv: list[str] | None = None) -> int:
 
     platform = build_platform(args)
     config = Config.load(args.config or (platform.config_dir / "config.json"))
+    # Before anything draws: the palette is a shared instance, so loading the
+    # configured theme here is what every screen picks up.
+    COLORS.apply(config.theme, config.theme_variant)
     translator = Translator(config.language)
 
     if args.scan_only:

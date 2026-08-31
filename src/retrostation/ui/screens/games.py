@@ -15,6 +15,54 @@ from ...core.theme import COLORS
 _STAR = "★"
 
 
+def _dimmed(painter: Painter, bitmap: object, opacity: int) -> object:
+    """A cached, faded copy of ``bitmap`` (see ``_DIM_CACHE`` below).
+
+    The cover itself is dimmed -- a cross-platform alpha scale -- rather than
+    overlaid with a rect: ``rect()`` fills solid colour and would crush the card
+    to black instead of fading it.  The cache matters because the carousel
+    re-dims the same neighbour covers on every frame.
+    """
+    key = (id(bitmap), bitmap.width, bitmap.height, opacity)
+    faded = _DIM_CACHE.get(key)
+    if faded is None:
+        faded = painter.canvas.dim(bitmap, opacity)
+        if len(_DIM_CACHE) > 64:
+            _DIM_CACHE.clear()
+        _DIM_CACHE[key] = faded
+    return faded
+
+
+def cover_art(
+    painter: Painter,
+    art: ArtProvider,
+    game: Game,
+    box: tuple[int, int, int, int],
+    *,
+    prefer_logo: bool = False,
+    opacity: int = 255,
+) -> None:
+    """The game's artwork, or an empty plate that says there is none.
+
+    This used to fall back to a generated gradient tile.  It read as
+    decoration, so a missing cover was easy to mistake for an unusual one -- and
+    each view drew a different one.  An empty plate labelled "no cover" is
+    unambiguous, and the three views now agree.
+    """
+    x, y, w, h = box
+    bitmap = art.thumbnail(game, w, h, prefer_logo=prefer_logo)
+    if bitmap is None:
+        painter.rounded_rect(box, radius=painter.metrics.u(3),
+                             fill=COLORS.panel_2, outline=(255, 255, 255, 20))
+        painter.text(
+            (x + w // 2, y + h // 2),
+            painter.translator("games.no_cover"),
+            size=11 if h >= 60 else 9, fill=COLORS.text_dim, anchor="mm",
+        )
+        return
+    painter.image_fit(_dimmed(painter, bitmap, opacity) if opacity < 255 else bitmap, box)
+
+
 def header(painter: Painter, *, title: str, subtitle: str, right: str) -> None:
     page_header(painter, title=title, subtitle=subtitle, right=right)
 
@@ -44,21 +92,27 @@ def draw_list(
     index: int,
     *,
     rows_per_page: int,
+    highlight: bool = True,
+    only: int | None = None,
 ) -> int:
-    """Returns the first visible row, which the app keeps across frames."""
+    """Returns the first visible row, which the app keeps across frames.
+
+    ``highlight=False`` paints every row unselected (so the panel can be cached
+    and the selection repainted on top later); ``only`` repaints just one row.
+    """
     m = painter.metrics
-    content_h = m.content_h(single=_single(painter))
     row_step = m.row_step
 
-    first = max(0, min(index, max(0, len(games) - rows_per_page)))
+    first = (index // rows_per_page) * rows_per_page
     for row, position in enumerate(range(first, min(len(games), first + rows_per_page))):
+        if only is not None and position != only:
+            continue
         game = games[position]
         y = m.content_top + m.u(8) + row * row_step
-        selected = position == index
+        selected = highlight and position == index
         _row(painter, art, game, (m.u(8), y, m.width - m.u(24), m.row_h), selected=selected,
              position=position, total=len(games))
 
-    scrollbar(painter, index=index, total=len(games), visible=rows_per_page, content_h=content_h)
     return first
 
 
@@ -86,14 +140,8 @@ def _row(
         index_color = (92, 92, 99, 255)
 
     thumb_w, thumb_h = m.thumb_w, m.thumb_h
-    art_box = (x + m.u(4), y + (h - thumb_h) // 2, thumb_w, thumb_h)
-    bitmap = art.thumbnail(game, thumb_w, thumb_h, prefer_logo=True)
-    if bitmap is not None:
-        painter.image_fit(bitmap, art_box)
-    else:
-        painter.rounded_rect(art_box, radius=m.u(3), fill=COLORS.panel_2, outline=(255, 255, 255, 20))
-        placeholder = art.placeholder(game.key, thumb_w, thumb_h)
-        painter.image_fit(placeholder, art_box)
+    cover_art(painter, art, game, (x + m.u(4), y + (h - thumb_h) // 2, thumb_w, thumb_h),
+           prefer_logo=True)
 
     text_x = x + thumb_w + m.u(10)
     max_name_w = w - thumb_h - m.u(150)
@@ -135,6 +183,8 @@ def draw_grid(
     *,
     cols: int,
     rows: int,
+    highlight: bool = True,
+    only: int | None = None,
 ) -> int:
     m = painter.metrics
     per_page = cols * rows
@@ -148,13 +198,14 @@ def draw_grid(
         position = first + slot
         if position >= len(games):
             break
+        if only is not None and position != only:
+            continue
         col, row = slot % cols, slot // cols
         x = padding + col * (cell_w + gap)
         y = m.content_top + padding + row * (cell_h + gap)
-        _card(painter, art, games[position], (x, y, cell_w, cell_h), selected=position == index)
+        _card(painter, art, games[position], (x, y, cell_w, cell_h),
+              selected=highlight and position == index)
 
-    content_h = m.content_h(single=_single(painter))
-    scrollbar(painter, index=index, total=len(games), visible=per_page, content_h=content_h)
     return first
 
 
@@ -177,11 +228,7 @@ def _card(
         painter.rounded_rect(box, radius=m.u(7), fill=COLORS.panel, outline=COLORS.border)
 
     art_h = h - name_h
-    art_box = (x + 1, y + 1, w - 2, art_h)
-    bitmap = art.thumbnail(game, w - 2, art_h)
-    if bitmap is None:
-        bitmap = art.placeholder(game.key, w - 2, art_h)
-    painter.image_fit(bitmap, art_box)
+    cover_art(painter, art, game, (x + 1, y + 1, w - 2, art_h))
 
     if game.favorite:
         painter.text((x + w - m.u(8), y + m.u(10)), _STAR, size=12, fill=COLORS.accent, anchor="rm")
@@ -200,9 +247,14 @@ def _card(
 # --------------------------------------------------------------------------- #
 
 #: offset -> (scale, opacity).  Neighbours shrink, so their spacing must be
-#: accumulated from the *scaled* widths or the gaps grow without bound.
-_SCALE = (1.0, 0.75, 0.62, 0.62)
-_OPACITY = (255, 108, 46, 18)
+#: accumulated from the *scaled* widths or the gaps grow without bound, and each
+#: card is painted at its scaled size (not the full card_w) or they overlap.
+_SCALE = (1.0, 0.78, 0.64, 0.52)
+_OPACITY = (255, 175, 125, 90)
+
+#: ``(id(bitmap), w, h, opacity) -> dimmed bitmap`` -- the carousel re-dims the
+#: same neighbour covers on every frame, so cache the faded copies.
+_DIM_CACHE: dict[tuple[int, int, int, int], object] = {}
 
 
 def draw_carousel(
@@ -210,6 +262,9 @@ def draw_carousel(
     art: ArtProvider,
     games: list[Game],
     index: int,
+    *,
+    highlight: bool = True,
+    only: int | None = None,
 ) -> int:
     m = painter.metrics
     single = _single(painter)
@@ -219,6 +274,7 @@ def draw_carousel(
     top = m.content_top + m.u(6)
 
     widths = [round(card_w * scale) for scale in _SCALE]
+    heights = [round(card_h * scale) for scale in _SCALE]
     offsets = [0]
     for k in range(1, len(_SCALE)):
         offsets.append(offsets[-1] + (widths[k - 1] + widths[k]) // 2 + gap)
@@ -230,13 +286,16 @@ def draw_carousel(
     first = max(0, index - 3)
     last = min(len(games) - 1, index + 3)
     for position in range(first, last + 1):
+        if only is not None and position != only:
+            continue
         offset = abs(position - index)
-        scale = _SCALE[offset]
         opacity = _OPACITY[offset]
         side = 1 if position > index else (-1 if position < index else 0)
+        cw, ch = widths[offset], heights[offset]
         cx = from_center + side * offsets[offset]
-        box = (cx - card_w // 2, top, card_w, card_h)
-        _cover_card(painter, art, games[position], box, selected=offset == 0, opacity=opacity, logo_ratio=0.72)
+        box = (cx - cw // 2, top + (card_h - ch) // 2, cw, ch)
+        _cover_card(painter, art, games[position], box,
+                    selected=highlight and offset == 0, opacity=opacity, logo_ratio=0.72)
 
     banner_top = top + card_h + m.u(10)
     game = games[index]
@@ -284,23 +343,25 @@ def _cover_card(
         width=2 if selected else 1,
     )
 
-    art_box = (x + 1, y + 1, w - 2, h - 2)
-    bitmap = art.thumbnail(game, w - 2, h - 2)
-    if bitmap is None:
-        bitmap = art.placeholder(game.key, w - 2, h - 2)
-    if opacity < 255:
-        bitmap = painter.canvas.dim(bitmap, opacity)
-    painter.image_fit(bitmap, art_box)
+    # No logo overlay here: the banner below the carousel already shows one for
+    # the selected game, and repeating it on every card just covered the art.
+    cover_art(painter, art, game, (x + 1, y + 1, w - 2, h - 2), opacity=opacity)
 
     if game.favorite:
         painter.text((x + w - m.u(8), y + m.u(10)), _STAR, size=13, fill=COLORS.accent, anchor="rm")
-
-    if game.has_asset("logo"):
-        logo = art.thumbnail(game, w - m.u(20), m.u(28), prefer_logo=True)
-        if logo is not None:
-            painter.image_fit(logo, (x + m.u(10), y + h - m.u(36), w - m.u(20), m.u(28)))
 
 
 def _single(painter: Painter) -> bool:
     """Whether the top screen is in single-screen (split) mode."""
     return bool(getattr(painter, "single", False))
+
+
+def draw_scrollbar(
+    painter: Painter,
+    index: int,
+    total: int,
+    visible: int,
+    content_h: int,
+) -> None:
+    """Repaint only the scrollbar -- the rows/cells around it are unchanged."""
+    scrollbar(painter, index=index, total=total, visible=visible, content_h=content_h)

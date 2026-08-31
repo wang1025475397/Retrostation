@@ -22,6 +22,9 @@ class ArtProvider:
     def __init__(self, library: Library, platform: Platform) -> None:
         self._library = library
         self._platform = platform
+        #: Generated placeholders are deterministic, so drawing one costs a
+        #: gradient loop -- cheap once, noticeable ten times a frame.
+        self._placeholders: dict[tuple, object] = {}
 
     # ------------------------------------------------------------------ #
 
@@ -34,7 +37,14 @@ class ArtProvider:
         return self._library.thumbnail(kind, game, width, height)
 
     def placeholder(self, seed: str, width: int, height: int) -> object:
-        return placeholder_bitmap(self._platform, seed, width, height)
+        key = (seed, width, height)
+        bitmap = self._placeholders.get(key)
+        if bitmap is None:
+            bitmap = placeholder_bitmap(self._platform, seed, width, height)
+            if len(self._placeholders) >= 64:
+                self._placeholders.clear()
+            self._placeholders[key] = bitmap
+        return bitmap
 
     def has_cover(self, game: Game) -> bool:
         path = game.asset(ASSET_COVER)

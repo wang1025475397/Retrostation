@@ -17,6 +17,11 @@ from ..core.i18n import Translator
 from ..core.theme import COLORS, Metrics
 from ..platform.base import Canvas, Platform
 
+#: Truncated strings kept per painter.  Measuring CJK text is the expensive
+#: part of drawing, and the detail strip re-truncates the same four lines on
+#: every clip frame.
+_ELLIPSIS_LIMIT = 256
+
 
 class Painter:
     """Bundle of canvas + metrics + platform, with a font cache."""
@@ -27,6 +32,7 @@ class Painter:
         self.platform = platform
         self.translator = translator
         self._fonts: dict[int, object] = {}
+        self._ellipsis: dict[tuple[str, int, int], str] = {}
 
     # -- metrics shortcuts ------------------------------------------------- #
 
@@ -91,9 +97,30 @@ class Painter:
 
     def ellipsize(self, text: str, *, size: int, max_width: int) -> str:
         """Truncate with an ellipsis when the text does not fit."""
-        if self.canvas.text_width(text, font=self.font(size)) <= max_width:
+        key = (text, size, max_width)
+        cached = self._ellipsis.get(key)
+        if cached is not None:
+            return cached
+        result = self._truncate(text, size=size, max_width=max_width)
+        if len(self._ellipsis) >= _ELLIPSIS_LIMIT:
+            self._ellipsis.clear()
+        self._ellipsis[key] = result
+        return result
+
+    def _truncate(self, text: str, *, size: int, max_width: int) -> str:
+        font = self.font(size)
+        if self.canvas.text_width(text, font=font) <= max_width:
             return text
-        keep = text
-        while keep and self.canvas.text_width(keep + "…", font=self.font(size)) > max_width:
-            keep = keep[:-1]
-        return keep + "…"
+        # Binary search for the longest prefix that still fits.  Removing one
+        # character at a time re-measures the whole string every time, which is
+        # quadratic in the length: on the device a 126-character description
+        # cost 246 ms and the longest ones in a real library (~426 chars) cost
+        # seconds -- per call, and the detail strip asks four times a frame.
+        low, high = 0, len(text)
+        while low < high:
+            middle = (low + high + 1) // 2
+            if self.canvas.text_width(text[:middle] + "…", font=font) <= max_width:
+                low = middle
+            else:
+                high = middle - 1
+        return text[:low] + "…"

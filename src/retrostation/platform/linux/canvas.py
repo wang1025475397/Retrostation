@@ -20,6 +20,13 @@ def _box(box: Sequence[float]) -> tuple[int, int, int, int]:
     return (round(x), round(y), round(x + w), round(y + h))
 
 
+#: How many pre-rendered text patches / gradients one canvas keeps.  Measured
+#: on the RG DS: a full frame draws ~70 strings, and CJK glyph rendering is the
+#: single most expensive thing the UI does (~0.7 ms per call there).
+_CACHE_LIMIT = 400
+_GRADIENT_LIMIT = 32
+
+
 def _fit_size(width: int, height: int, box_w: int, box_h: int) -> tuple[int, int]:
     if width <= 0 or height <= 0 or box_w <= 0 or box_h <= 0:
         return (1, 1)
@@ -36,6 +43,10 @@ class PilCanvas(Canvas):
         self._image = Image.new("RGBA", (width, height), tuple(background))
         self._draw = ImageDraw.Draw(self._image)
         self.size = (width, height)
+        #: ``(content, font, fill, anchor) -> (patch, dx, dy)``
+        self._text_cache: dict[tuple, tuple[Image.Image, int, int]] = {}
+        #: ``(w, h, start, end) -> gradient bitmap``
+        self._gradient_cache: dict[tuple, Image.Image] = {}
 
     # -- accessors -------------------------------------------------------- #
 
@@ -95,15 +106,7 @@ class PilCanvas(Canvas):
         if w <= 0 or h <= 0:
             return
 
-        row = Image.new("RGBA", (max(1, w), 1))
-        for column in range(w):
-            t = column / max(1, w - 1)
-            row.putpixel(
-                (column, 0),
-                tuple(round(a + (b - a) * t) for a, b in zip(start, end)),
-            )
-        gradient = row.resize((w, h))
-
+        gradient = self._gradient(w, h, start, end)
         if radius > 0:
             mask = Image.new("L", (w, h), 0)
             ImageDraw.Draw(mask).rounded_rectangle([0, 0, w, h], radius=radius, fill=255)
@@ -137,13 +140,79 @@ class PilCanvas(Canvas):
         fill: Sequence[int],
         anchor: str = "la",
     ) -> None:
-        self._draw.text(
-            (round(xy[0]), round(xy[1])),
-            content,
-            font=font,  # type: ignore[arg-type]
-            fill=tuple(fill),
-            anchor=anchor,
+        patch, dx, dy = self._text_patch(content, font, tuple(fill), anchor)
+        # ``alpha_composite``, not ``paste``: paste would multiply the glyph
+        # coverage into the alpha channel twice (once as colour, once as mask)
+        # and every antialiased edge would come out too dark.
+        self._image.alpha_composite(patch, (round(xy[0]) + dx, round(xy[1]) + dy))
+
+    def _gradient(self, w: int, h: int, start, end) -> Image.Image:
+        """A cached ``w x h`` horizontal gradient.
+
+        Building one costs a ``putpixel`` per column plus a resize -- 42 ms per
+        frame on the handheld for the selected-row highlight, which is why the
+        result is kept.
+        """
+        key = (w, h, tuple(start), tuple(end))
+        cached = self._gradient_cache.get(key)
+        if cached is not None:
+            return cached
+
+        row = Image.new("RGBA", (max(1, w), 1))
+        row.putdata([
+            tuple(round(a + (b - a) * (column / max(1, w - 1))) for a, b in zip(start, end))
+            for column in range(w)
+        ])
+        gradient = row.resize((w, h))
+        if len(self._gradient_cache) >= _GRADIENT_LIMIT:
+            self._gradient_cache.clear()
+        self._gradient_cache[key] = gradient
+        return gradient
+
+    def _text_patch(self, content: str, font: object, fill: tuple, anchor: str):
+        """Render ``content`` once, then paste it on every later frame.
+
+        The trick for anchors: render into a scratch bitmap and crop to the ink
+        box.  The crop says where the glyphs actually landed relative to the
+        anchor point, so no font metrics have to be re-derived -- ``mm``, ``la``
+        and friends all keep working.
+        """
+        key = (content, font, fill, anchor)
+        cached = self._text_cache.get(key)
+        if cached is not None:
+            return cached
+
+        margin = max(8, int(getattr(font, "size", 12)))
+        length = int(font.getlength(content)) if content else 0  # type: ignore[attr-defined]
+        # PIL lays the run out *around* the anchor: a right-aligned run starts
+        # ``length`` px to its left and a centred one straddles it.  Shift the
+        # anchor inside the scratch to match, because the crop below keeps only
+        # what landed in it -- with the anchor at the left margin, everything
+        # left of it fell outside and was clipped away for good (a right-aligned
+        # two-character value rendered as just its last glyph).
+        horizontal = anchor[0] if anchor else "l"
+        if horizontal == "r":
+            origin_x = margin + length
+        elif horizontal == "m":
+            origin_x = margin + length // 2
+        else:
+            origin_x = margin
+        scratch = Image.new(
+            "RGBA", (max(1, length + 2 * margin), max(1, 3 * margin)), (0, 0, 0, 0)
         )
+        origin = (origin_x, margin)
+        ImageDraw.Draw(scratch).text(origin, content, font=font, fill=fill, anchor=anchor)
+
+        bbox = scratch.getbbox()
+        if bbox is None:  # blank text: nothing to draw, ever
+            entry = (Image.new("RGBA", (1, 1), (0, 0, 0, 0)), 0, 0)
+        else:
+            entry = (scratch.crop(bbox), bbox[0] - origin[0], bbox[1] - origin[1])
+
+        if len(self._text_cache) >= _CACHE_LIMIT:
+            self._text_cache.clear()
+        self._text_cache[key] = entry
+        return entry
 
     def text_width(self, content: str, *, font: object) -> int:
         return int(round(font.getlength(content)))  # type: ignore[attr-defined]
@@ -209,6 +278,18 @@ class PilCanvas(Canvas):
         return wrap_text(self._draw, text, font, max_width, max_lines)
 
 
+#: Wrapped lines already measured.  The bottom panel re-wraps its description
+#: on every video frame, and a 350-character blurb costs ~47 ms of ``getlength``
+#: -- at 13 fps that is most of the frame budget for text that never changes.
+_WRAP_CACHE: dict[tuple[str | int, ...], list[str]] = {}
+_WRAP_LIMIT = 512
+
+
+def _font_tag(font: object) -> tuple[str, int]:
+    """Something stable to key a cache on; falls back to 0/"" for bitmap fonts."""
+    return (str(getattr(font, "path", "") or ""), int(getattr(font, "size", 0) or 0))
+
+
 def wrap_text(
     draw: ImageDraw.ImageDraw,
     text: str,
@@ -224,26 +305,51 @@ def wrap_text(
     """
     if not text:
         return []
+    key = (text, max_width, max_lines, *_font_tag(font))
+    cached = _WRAP_CACHE.get(key)
+    if cached is not None:
+        return cached
+
+    lines = _measure(text, font, max_width, max_lines)
+    if len(_WRAP_CACHE) >= _WRAP_LIMIT:
+        _WRAP_CACHE.clear()
+    _WRAP_CACHE[key] = lines
+    return lines
+
+
+def _measure(text: str, font: object, max_width: int, max_lines: int) -> list[str]:
+    """The actual wrapping pass.
+
+    Widths are accumulated per character instead of re-measuring the whole line
+    for every character: ``getlength`` costs what the string is long, so the
+    naive version is quadratic (~350 measures of up to 350 glyphs for one
+    blurb).  Kerning differences are invisible in a 4-line, 12 px preview.
+    """
     getlength = font.getlength  # type: ignore[attr-defined]
 
     lines: list[str] = []
-    current = ""
+    current: list[str] = []
+    width = 0.0
     for char in text:
         if char == "\n":
-            lines.append(current)
-            current = ""
+            lines.append("".join(current))
+            current.clear()
+            width = 0.0
             if len(lines) == max_lines:
                 return _ellipsis(lines)
             continue
-        if getlength(current + char) > max_width and current:
-            lines.append(current)
-            current = char
+        char_width = getlength(char)
+        if current and width + char_width > max_width:
+            lines.append("".join(current))
+            current = [char]
+            width = char_width
             if len(lines) == max_lines:
                 return _ellipsis(lines)
         else:
-            current += char
+            current.append(char)
+            width += char_width
     if current:
-        lines.append(current)
+        lines.append("".join(current))
     return lines[:max_lines]
 
 

@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from ..core.config import Config
-from ..core.model import ASSET_VIDEO, Game
+from ..core.model import ASSET_VIDEO, Game, game_key
 from ..platform.base import Platform
 from . import sources as source_registry
 from .media import MediaDirs, ThumbnailCache, media_dirs_for, resolve_assets
@@ -39,6 +39,10 @@ class SystemLibrary:
     games: list[Game] = field(default_factory=list)
     media_dirs: MediaDirs | None = None
     loaded: bool = False
+    #: Asset paths are static for the lifetime of a process.  Resolving them
+    #: once matters: ``Session.games()`` runs several times *per frame*, and
+    #: re-probing every candidate file for 500 ROMs was measurable.
+    media_resolved: bool = False
 
     def game_at(self, index: int) -> Game | None:
         if 0 <= index < len(self.games):
@@ -72,19 +76,26 @@ class Library:
     # Scanning
     # ------------------------------------------------------------------ #
 
-    def scan(self, *, on_progress=None) -> ScanResult:
-        """Scan the ROM root.  Safe to call again; it merges, not replaces."""
+    def scan(self, *, on_progress=None, cached_only: bool = False) -> ScanResult:
+        """Scan the ROM root.  Safe to call again; it merges, not replaces.
+
+        ``cached_only`` reads the index instead of listing the tree, so the
+        first frame can come up populated; see
+        :func:`~retrostation.data.scanner.scan_library`.
+        """
         result = scan_library(
             self._platform,
             self._config,
             on_progress=on_progress,
+            cached_only=cached_only,
         )
         with self._lock:
             self.last_scan = result
             self._roms = result.systems
-            for key in list(self._systems):
-                if key not in self._roms:
-                    self._systems.pop(key, None)
+            # Every SystemLibrary memoises its games, and a re-scan may have
+            # changed any of them: dropping only the systems that disappeared
+            # left the rest showing the previous listing.
+            self._systems.clear()
         log.info(
             "library scan: %d systems, %d ROMs in %.2fs (%d cached / %d rescanned)",
             len(result.systems), result.total_roms, result.duration, result.cached, result.rescanned,
@@ -146,8 +157,11 @@ class Library:
         # Keep the ROM's on-disk order (already sorted by the scanner).
         ordered: list[Game] = []
         for rom in roms:
-            game = games.get(rom.path.name) or games.get(rom.name)
-            if game is None:  # pragma: no cover - build_games covers every ROM
+            # ``build_games`` keys by ``game_key``, which is system-prefixed;
+            # looking a bare file name up here silently dropped every source's
+            # metadata and left the library with filename-only games.
+            game = games.get(game_key(system_key, rom.path))
+            if game is None:
                 game = Game.from_rom(system_key, rom.path)
             ordered.append(game)
 
@@ -164,11 +178,17 @@ class Library:
         return resolve_assets(game, library.media_dirs)
 
     def resolve_all(self, system_key: str) -> list[Game]:
-        """Resolve media for every game in a system, updating the cache in place."""
+        """Resolve media for every game in a system, updating the cache in place.
+
+        Runs once per system; afterwards the resolved list is returned as-is.
+        """
         library = self.load_games(system_key)
+        if library.media_resolved:
+            return library.games
         if library.media_dirs is None:
             library.media_dirs = media_dirs_for(self._platform, self._config, system_key)
         library.games = [resolve_assets(game, library.media_dirs) for game in library.games]
+        library.media_resolved = True
         return library.games
 
     # ------------------------------------------------------------------ #

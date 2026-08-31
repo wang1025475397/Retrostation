@@ -19,10 +19,12 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, field
 from enum import Enum
+from typing import Any, Mapping
 
 from ..core.config import LAYOUTS, Config
-from ..core.i18n import Translator
+from ..core.i18n import Translator, available_builtin
 from ..core.model import Game
+from ..core.theme import THEMES, VARIANTS
 from ..data.library import Library
 from ..data.systems import AGGREGATE_KEYS, AGGREGATES, lookup
 from ..platform.base import InputAction, InputEvent, InputKind
@@ -42,6 +44,13 @@ TOAST_SECONDS = 2.0
 #: Page sizes for the list view (rows) and the carousel.
 LIST_PAGE = 10
 CAROUSEL_PAGE = 10
+
+#: Backlight range in the device's own units (0-255 per panel).  The floor
+#: matters: a screen driven to 0 looks like a crash and the player cannot find
+#: the setting again to undo it.
+BRIGHTNESS_MIN = 20
+BRIGHTNESS_MAX = 255
+BRIGHTNESS_STEP = 20
 
 
 class View(str, Enum):
@@ -78,6 +87,15 @@ class Session:
     menu_index: int = 0
     exit_selected: int = 0
 
+    #: Set when a settings row changed something that outlives the dialog: the
+    #: app applies it (palette, backlight) and writes ``config.json``.  A
+    #: Session has no business knowing where the SD card is mounted.
+    settings_dirty: bool = False
+    #: Set when a change cannot take effect without new windows (screen mode).
+    #: The app exits with ``EXIT_RESTART_UI`` and the bootstrap starts us again --
+    #: rebuilding windows inside a running process is not an option (DESIGN §4.4).
+    restart_requested: bool = False
+
     toast_message: str = ""
     toast_until: float = 0.0
     loaded: set = field(default_factory=set)
@@ -106,7 +124,27 @@ class Session:
         return self.current_system_key() in AGGREGATE_KEYS
 
     def games(self) -> list[Game]:
-        """The visible, filtered, sorted game list for the current system."""
+        """The visible, filtered, sorted game list for the current system.
+
+        Memoised for one frame: the top screen, the bottom screen and the input
+        handler each ask for it, and sorting 600 ROMs three times per frame is
+        measurable on the handheld.  Any input event drops the cache -- input is
+        the only thing that can change what is visible.
+        """
+        if self._visible is None:
+            self._visible = self._build_games()
+        return self._visible
+
+    def invalidate(self) -> None:
+        """Drop the memoised list: the library changed without any input.
+
+        Input normally invalidates it, but a background scan lands on its own
+        -- without this the list kept showing whatever it had built before the
+        scan finished.
+        """
+        self._visible = None
+
+    def _build_games(self) -> list[Game]:
         key = self.current_system_key()
         if key == "ALL":
             games = self.library.aggregate("ALL")
@@ -133,6 +171,13 @@ class Session:
             )
         else:
             games.sort(key=lambda game: game.sort_key.casefold())
+
+        if self._pending_game_key:
+            for position, game in enumerate(games):
+                if game.key == self._pending_game_key:
+                    self.game_index = position
+                    break
+            self._pending_game_key = None
         return games
 
     def current_game(self) -> Game | None:
@@ -142,11 +187,64 @@ class Session:
         return games[self.game_index % len(games)]
 
     # ------------------------------------------------------------------ #
+    # Resume (DESIGN §8.1 step ① / §8.2)
+    # ------------------------------------------------------------------ #
+
+    def capture_resume(self) -> dict[str, str | None]:
+        """Where the player is standing, in a form that survives a restart.
+
+        Keyed by system and game rather than by index: the ROM count can change
+        while the emulator is running and the aggregate views reorder
+        themselves, so an index would point at a different game by the time we
+        come back.
+        """
+        game = self.current_game() if self.view == VIEW_GAMES else None
+        return {
+            "view": self.view,
+            "layout": self.layout,
+            "filter": self.filter,
+            "sort": self.sort,
+            "system": self.current_system_key(),
+            "game": game.key if game is not None else None,
+        }
+
+    def apply_resume(self, data: Mapping[str, Any]) -> bool:
+        """Restore a :meth:`capture_resume` snapshot; False when unusable.
+
+        The system key is matched against what the scan actually found, so a
+        card that no longer holds that system lands on the home page instead of
+        on a wrong selection.
+        """
+        if not data:
+            return False
+
+        if data.get("layout") in LAYOUTS:
+            self.layout = data["layout"]
+        if data.get("filter") in FILTERS:
+            self.filter = data["filter"]
+        if data.get("sort") in SORTS:
+            self.sort = data["sort"]
+
+        keys = self.system_keys()
+        system = data.get("system")
+        if system not in keys:
+            return False
+
+        self.platform_index = keys.index(system)
+        self.view = VIEW_GAMES if data.get("view") == VIEW_GAMES else VIEW_PLATFORMS
+        if self.view == VIEW_GAMES and data.get("game"):
+            self.game_index = 0
+            self._pending_game_key = data["game"]
+        self._visible = None
+        return True
+
+    # ------------------------------------------------------------------ #
     # Event handling
     # ------------------------------------------------------------------ #
 
     def handle(self, event: InputEvent) -> Outcome:
         """Dispatch one event; the UI redraws when ``Outcome.redraw`` is set."""
+        self._visible = None  # any input may change what is on screen
         if self.modal == MODAL_EXIT:
             return self._handle_exit_modal(event)
         if self.modal == MODAL_MENU:
@@ -260,6 +358,12 @@ class Session:
     #: how many columns a grid page holds.
     _metrics: object | None = None
     _single: bool = False
+    #: One frame's worth of :meth:`games`; see that method.
+    _visible: list[Game] | None = field(default=None, init=False, repr=False, compare=False)
+    #: Game key to select as soon as :meth:`games` can be built.  A resume
+    #: snapshot is keyed, but at boot nothing is loaded yet, so the key has to
+    #: wait for the first list build rather than be resolved eagerly.
+    _pending_game_key: str | None = field(default=None, init=False, repr=False, compare=False)
 
     def attach_metrics(self, metrics, *, single: bool) -> None:
         """Give the session the metrics it needs for grid navigation."""
@@ -334,6 +438,9 @@ class Session:
             self.menu_index = (self.menu_index + 1) % len(rows)
         elif event.action is InputAction.A:
             return self._apply_menu(rows[self.menu_index][0])
+        elif event.action in (InputAction.LEFT, InputAction.RIGHT):
+            return self._adjust_menu(rows[self.menu_index][0],
+                                     -1 if event.action is InputAction.LEFT else 1)
         elif event.action is InputAction.B:
             self.modal = MODAL_NONE
         elif event.action is InputAction.MENU:
@@ -341,8 +448,15 @@ class Session:
         return Outcome(redraw=True)
 
     def _apply_menu(self, key: str) -> Outcome:
+        """Toggle the row under the cursor.
+
+        Anything that outlives the dialog -- or needs the platform, like the
+        backlight -- only raises :attr:`settings_dirty`; the app applies and
+        persists it.
+        """
         if key == "screen":
             self.config.screen_mode = "single" if self.config.screen_mode != "single" else "dual"
+            self.restart_requested = True
         elif key == "layout":
             self._cycle_layout()
         elif key == "bvideo":
@@ -351,10 +465,47 @@ class Session:
             self.sort = SORTS[(SORTS.index(self.sort) + 1) % len(SORTS)]
         elif key == "filter":
             self._cycle_filter()
-        elif key == "bottom_live":
+        elif key == "theme":
+            self.config.theme = THEMES[(THEMES.index(self.config.theme) + 1) % len(THEMES)]
+        elif key == "variant":
+            self.config.theme_variant = VARIANTS[
+                (VARIANTS.index(self.config.theme_variant) + 1) % len(VARIANTS)
+            ]
+        elif key == "language":
+            self._cycle_language()
+        elif key == "brightness":
+            self._step_brightness(BRIGHTNESS_STEP)
+        elif key == "status_bar":
             self.config.show_status_bar = not self.config.show_status_bar
+        self.settings_dirty = True
         self.modal = MODAL_NONE
         return Outcome(redraw=True)
+
+    def _adjust_menu(self, key: str, direction: int) -> Outcome:
+        """Nudge a numeric row with LEFT/RIGHT.
+
+        Only the backlight is numeric; other rows ignore it rather than leave
+        the player wondering why nothing moved.
+        """
+        if key == "brightness":
+            self._step_brightness(direction * BRIGHTNESS_STEP)
+            self.settings_dirty = True
+        return Outcome(redraw=True)
+
+    def _step_brightness(self, delta: int) -> None:
+        """Move both panels together -- they sit side by side and must match."""
+        level = int(self.config.brightness.get("top", 140)) + delta
+        level = max(BRIGHTNESS_MIN, min(BRIGHTNESS_MAX, level))
+        self.config.brightness["top"] = level
+        self.config.brightness["bottom"] = level
+
+    def _cycle_language(self) -> None:
+        """``auto`` first, then what we ship, so the default stays reachable."""
+        codes = ["auto", *available_builtin()]
+        current = self.config.language
+        following = codes[(codes.index(current) + 1) % len(codes)] if current in codes else "auto"
+        self.config.language = following
+        self.translator.set_language(following)
 
     def menu_rows(self) -> list[tuple[str, str, str]]:
         """``(key, label, value)`` triples for the settings dialog."""
@@ -364,12 +515,21 @@ class Session:
             ("screen", self.translator("menu.screen"),
              self.translator("value.single" if single else "value.dual")),
             ("layout", self.translator("menu.layout"), self.translator(f"games.layout_{self.layout}")),
+            # Video plays in the detail strip on one screen too, so this row
+            # reads the same whichever mode is active.
             ("bvideo", self.translator("menu.bvideo"),
-             self.translator("value.disabled_single" if single else
-                             ("value.on" if config.bottom_video else "value.off"))),
+             self.translator("value.on" if config.bottom_video else "value.off")),
             ("sort", self.translator("menu.sort"), self.translator(f"value.sort_{self.sort}")),
             ("filter", self.translator("menu.filter"), self.translator(f"games.filter_{self.filter}")),
-            ("language", self.translator("menu.language"), config.language),
+            ("theme", self.translator("menu.theme"), self.translator(f"value.theme_{config.theme}")),
+            ("variant", self.translator("menu.variant"),
+             self.translator(f"value.variant_{config.theme_variant}")),
+            ("language", self.translator("menu.language"),
+             self.translator("value.auto") if config.language == "auto" else config.language),
+            ("brightness", self.translator("menu.brightness"),
+             f"{int(config.brightness.get('top', 140))}"),
+            ("status_bar", self.translator("menu.status_bar"),
+             self.translator("value.on" if config.show_status_bar else "value.off")),
             ("about", self.translator("menu.about"), "v0.1.0"),
         ]
 

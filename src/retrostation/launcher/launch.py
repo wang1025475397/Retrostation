@@ -9,9 +9,12 @@ missing.
 
 from __future__ import annotations
 
+import os
 import shlex
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Sequence
 
 from ..core.config import Config
 from ..core.model import Game
@@ -77,3 +80,45 @@ def _ra_config() -> str:
         if Path(candidate).is_file():
             return candidate
     return "/.config/retroarch/retroarch.cfg"
+
+
+# --------------------------------------------------------------------------- #
+# Handing the command to the shell bootstrap (DESIGN §8.2)
+# --------------------------------------------------------------------------- #
+
+#: Where the frontend drops the pending launch command.  ``retrostation.sh``
+#: sources this file and runs it once we have exited, which is what keeps the
+#: frontend's exit-code contract meaningful.
+LAUNCH_CMD_PATH = Path("/tmp/retrostation_launch.cmd")
+
+
+def write_launch_cmd(argv: Sequence[str], path: Path | str = LAUNCH_CMD_PATH) -> Path:
+    """Record ``argv`` for the bootstrap to run after we exit.
+
+    The file is *sourced* by a POSIX shell, so it has to be valid shell.
+    ``set --`` makes the arguments the script's positional parameters, which it
+    then runs as ``"$@"`` -- every argument stays quoted, so a ROM whose name
+    contains a space or CJK characters survives the round trip (DESIGN §14).
+    """
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    body = "set -- " + " ".join(shlex.quote(str(arg)) for arg in argv) + "\n"
+
+    # Atomic: the bootstrap reads this the moment we exit, so it must never see
+    # a half-written command.
+    fd, tmp_name = tempfile.mkstemp(dir=str(target.parent), prefix=".launch-", suffix=".cmd")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(body)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_name, target)
+    except BaseException:
+        Path(tmp_name).unlink(missing_ok=True)
+        raise
+    return target
+
+
+def clear_launch_cmd(path: Path | str = LAUNCH_CMD_PATH) -> None:
+    """Drop a consumed (or stale) command file."""
+    Path(path).unlink(missing_ok=True)

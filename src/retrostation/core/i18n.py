@@ -14,6 +14,7 @@ Lookup order for a key:
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Mapping
 
@@ -21,6 +22,40 @@ FALLBACK_LANGUAGE = "en_US"
 
 #: Directory shipped with the package.
 BUILTIN_LANG_DIR = Path(__file__).resolve().parent.parent / "assets" / "lang"
+
+#: Locale environment variables, most specific first.
+_LOCALE_VARS = ("LANGUAGE", "LC_ALL", "LC_MESSAGES", "LANG")
+
+
+def available_builtin() -> list[str]:
+    """Language codes shipped with the package."""
+    if not BUILTIN_LANG_DIR.is_dir():
+        return []
+    return sorted(path.stem for path in BUILTIN_LANG_DIR.glob("*.json"))
+
+
+def detect_language(default: str = FALLBACK_LANGUAGE) -> str:
+    """What ``"auto"`` means: the system locale, when we ship it.
+
+    The handheld sets ``LANG`` (busybox firmware typically to ``zh_CN.UTF-8``).
+    An exact match wins; otherwise the language part alone is enough -- a device
+    reporting ``en_GB`` should get English rather than falling back to a guess.
+    """
+    bundles = available_builtin()
+    for variable in _LOCALE_VARS:
+        raw = os.environ.get(variable, "")
+        if not raw:
+            continue
+        tag = raw.split(".")[0].split("@")[0].split(":")[0]   # zh_CN.UTF-8 -> zh_CN
+        if not tag or tag in ("C", "POSIX"):
+            continue
+        if tag in bundles:
+            return tag
+        language = tag.split("_")[0].lower()
+        for code in bundles:
+            if code.split("_")[0].lower() == language:
+                return code
+    return default
 
 
 class Translator:
@@ -50,7 +85,7 @@ class Translator:
         """Turn ``"auto"`` into a concrete code; unknown codes fall back."""
         if language and language != "auto":
             return language
-        return FALLBACK_LANGUAGE
+        return detect_language(self.fallback)
 
     def _reload(self) -> None:
         wanted = {self.language, self.fallback}
