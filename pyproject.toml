@@ -20,7 +20,7 @@ dev = [
 where = ["src"]
 
 [tool.setuptools.package-data]
-retrostation = ["assets/lang/*.json"]
+retrostation = ["assets/lang/*.json", "assets/platforms/*/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -2,6 +2,16 @@
 
 Pure drawing -- the app prepares every string and every artwork reference, so
 this module contains no data access at all (DESIGN §7.1).
+
+Each card is the platform's **background on top, logo underneath**, in two
+stacked bands, taken from the shipped artwork (``assets/platforms/``).
+Borrowing a system's first game cover instead looked arbitrary and changed with
+scan order; this looks the same on every boot.
+
+The background band is square because the sources are (1024x1024), so nothing
+is cropped.  The logo band below it replaces the old name/count caption: the
+artwork identifies the platform, and the info line under the carousel spells
+out whichever one is selected.
 """
 
 from __future__ import annotations
@@ -13,7 +23,6 @@ from ..painter import Painter
 from ..widgets import button_bar, page_header
 from ...core.theme import COLORS
 
-
 @dataclass(frozen=True)
 class Tile:
     """One card on the carousel."""
@@ -21,8 +30,6 @@ class Tile:
     key: str
     title: str
     subtitle: str
-    #: A game whose cover can stand in for the platform, if any.
-    artwork: object | None
 
 
 def draw(
@@ -62,11 +69,10 @@ def draw(
 
 def _carousel(painter: Painter, art: ArtProvider, tiles: list[Tile], index: int) -> None:
     m = painter.metrics
-    card_w = m.u(158)
-    card_h = m.u(156)
-    art_h = m.u(100)
-    gap = m.u(12)
-    top = m.status_h + m.head_h + m.u(16)
+    art_side = m.platform_art
+    card_w = art_side + m.u(8)
+    card_h = m.platform_card_h
+    gap = m.platform_gap
 
     visible = m.width // (card_w + gap) + 2
     first = max(0, index - visible // 2)
@@ -79,34 +85,54 @@ def _carousel(painter: Painter, art: ArtProvider, tiles: list[Tile], index: int)
         tile = tiles[position]
 
         if selected:
-            box = (x - m.u(6), top - m.u(6), card_w + m.u(12), card_h + m.u(12))
+            box = (x - m.u(6), m.platform_top - m.u(6), card_w + m.u(12), card_h + m.u(12))
             outline = COLORS.accent
         else:
-            box = (x, top, card_w, card_h)
+            box = (x, m.platform_top, card_w, card_h)
             outline = COLORS.border
         painter.rounded_rect(box, radius=m.u(10), fill=COLORS.panel, outline=outline)
 
-        art_box = (box[0] + 1, box[1] + 1, box[2] - 2, art_h)
-        bitmap = art.thumbnail(tile.artwork, box[2] - 2, art_h) if tile.artwork else None
-        if bitmap is None:
-            bitmap = art.placeholder(tile.key, box[2] - 2, art_h)
-        painter.image_fit(bitmap, art_box)
+        _card_art(painter, art, tile, (box[0] + 1, box[1] + 1, box[2] - 2, box[3] - 2))
 
-        name_y = box[1] + art_h
-        painter.text(
-            (box[0] + m.u(8), name_y + m.u(16)),
-            painter.ellipsize(tile.title, size=13, max_width=box[2] - m.u(16)),
-            size=13, fill=COLORS.text, anchor="lm",
-        )
-        painter.text(
-            (box[0] + m.u(8), name_y + m.u(34)),
-            tile.subtitle, size=10, fill=(122, 122, 128, 255), anchor="lm",
-        )
+
+def _card_art(painter: Painter, art: ArtProvider, tile: Tile,
+              box: tuple[int, int, int, int]) -> None:
+    """Background on top, logo underneath -- two stacked bands, no caption."""
+    m = painter.metrics
+    x, y, w, h = box
+    art_side = m.platform_art
+    logo_h = m.platform_logo_h
+
+    # Square and centred horizontally: the selected card is wider than the
+    # others, and stretching the background to fill it would distort it.
+    background = art.platform_background(tile.key, art_side, art_side)
+    if background is None:
+        background = art.placeholder(tile.key, art_side, art_side)
+    painter.image(background, (x + (w - art_side) // 2, y, art_side, art_side))
+
+    # The logo band sits in whatever is left below the artwork, vertically
+    # centred so the selected card's extra padding is shared above and below.
+    below_top = y + art_side
+    below_h = max(logo_h, (y + h) - below_top)
+    band = (x, below_top + (below_h - logo_h) // 2, w, logo_h)
+
+    logo = art.platform_logo(tile.key, w - m.u(10), logo_h)
+    if logo is not None:
+        painter.image_fit(logo, band)
+        return
+
+    # A handful of platforms ship no logo (RECENT, PORTS, ...).  Name them
+    # rather than leave a blank strip under the artwork.
+    painter.text(
+        (band[0] + w // 2, band[1] + logo_h // 2),
+        painter.ellipsize(tile.title, size=11, max_width=w - m.u(10)),
+        size=11, fill=COLORS.text_dim, anchor="mm",
+    )
 
 
 def _info(painter: Painter, title: str, subtitle: str, right: str) -> None:
     m = painter.metrics
-    y = m.status_h + m.u(206)
+    y = m.platform_info_y
     painter.text((m.u(16), y), title, size=15, fill=COLORS.text, anchor="lm")
     painter.text((m.u(16), y + m.u(20)), subtitle, size=12, fill=COLORS.text_dim, anchor="lm")
     if right:
@@ -115,7 +141,7 @@ def _info(painter: Painter, title: str, subtitle: str, right: str) -> None:
 
 def _preview(painter: Painter, art: ArtProvider, previews: list[object]) -> None:
     m = painter.metrics
-    y = m.status_h + m.u(250)
+    y = m.platform_preview_y
     painter.text((m.u(16), y + m.u(14)), painter.translator("home.preview"), size=11,
                  fill=(122, 122, 128, 255), anchor="lm")
 

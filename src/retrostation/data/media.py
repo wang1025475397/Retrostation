@@ -15,7 +15,9 @@ scanner never mistakes them for media.
 
 from __future__ import annotations
 
+import functools
 import hashlib
+import io
 import logging
 import queue
 import threading
@@ -321,11 +323,59 @@ _STAT_TTL = 5.0
 _STAT_LIMIT = 4000
 
 
+#: How to encode a thumbnail for each suffix.  Format-specific on purpose:
+#: passing ``quality`` to PNG does nothing, and PNG ignores it silently.
+_SAVE_ARGS: dict[str, dict[str, object]] = {
+    ".webp": {"format": "WEBP", "quality": 86, "method": 4},
+    ".jpg": {"format": "JPEG", "quality": 86},
+    ".jpeg": {"format": "JPEG", "quality": 86},
+    ".png": {"format": "PNG", "optimize": True},
+}
+
+#: Tried in order by :func:`cache_suffix`.
+_CACHE_FORMATS: tuple[tuple[str, str], ...] = (
+    (".webp", "WEBP"),
+    (".png", "PNG"),
+    (".jpg", "JPEG"),
+)
+
+
+@functools.lru_cache(maxsize=1)
+def cache_suffix() -> str:
+    """Suffix this device can both write **and read back**.
+
+    The RG DS ships a Pillow built against libjpeg 9 headers but resolves
+    libjpeg 6b at runtime, so every JPEG there dies with ``Wrong JPEG library
+    version: library is 62, caller expects 90`` -- on write as well as on read.
+    The symptom was invisible: each write failed and was swallowed, each read
+    fell through, and the thumbnail cache quietly did nothing while every frame
+    re-decoded the full-size cover.
+
+    Probing once beats guessing, because a cache file we cannot read is worse
+    than having no cache at all.
+    """
+    from PIL import Image
+
+    probe = Image.new("RGB", (8, 8), (12, 34, 56))
+    for suffix, name in _CACHE_FORMATS:
+        buffer = io.BytesIO()
+        try:
+            probe.save(buffer, format=name)
+            buffer.seek(0)
+            with Image.open(buffer) as handle:
+                handle.load()
+        except Exception:  # noqa: BLE001 - any failure means "not this format"
+            continue
+        return suffix
+    return ".png"
+
+
 class ThumbnailCache:
-    """On-disk JPEG/PNG cache for scaled-down artwork.
+    """On-disk cache for scaled-down artwork.
 
     Keyed by ``(kind, source file mtime, size)`` so editing a cover invalidates
-    its thumbnails without any bookkeeping.
+    its thumbnails without any bookkeeping.  The on-disk format is whatever
+    :func:`cache_suffix` reports this device can handle.
     """
 
     def __init__(self, platform: Platform, root: Path, enabled: bool = True) -> None:
@@ -402,17 +452,17 @@ class ThumbnailCache:
         except OSError:
             return None
 
-        scaled = _fit(original, width, height)
+        scaled = fit_bitmap(original, width, height)
         if disk is not None and self._enabled:
             self._store(disk, scaled)
         return scaled
 
     def _disk_path(self, source: Path, width: int, height: int) -> Path | None:
-        """``Imgs/.cache/<hash>_<w>x<h>.jpg``; ``None`` when caching is off."""
+        """``Imgs/.cache/<hash>_<w>x<h><suffix>``; ``None`` when caching is off."""
         if not self._enabled:
             return None
         digest = hashlib.sha1(f"{source}|{width}x{height}".encode("utf-8")).hexdigest()[:16]
-        suffix = ".jpg" if source.suffix.lower() not in (".png",) else ".png"
+        suffix = cache_suffix()
         directory = source.parent / ".cache"
         # mkdir() is a round trip to the card on every miss; remember the ones
         # that already exist instead of asking again each time.
@@ -455,12 +505,15 @@ class ThumbnailCache:
 
         image: Image.Image = bitmap  # type: ignore[assignment]
         if image.mode in ("RGBA", "LA", "P"):
+            # Flatten onto the app background: the cache format is chosen for
+            # size, and keeping an alpha channel there costs more than it saves.
             image = image.convert("RGBA")
             background = Image.new("RGB", image.size, (20, 20, 20))
             background.paste(image, mask=image.split()[-1])
-            background.save(target, quality=86)
-        else:
-            image.save(target, quality=86)
+            image = background
+
+        kwargs = _SAVE_ARGS.get(target.suffix.lower()) or _SAVE_ARGS[".png"]
+        image.save(target, **kwargs)  # type: ignore[arg-type]
 
     # -- memory LRU ------------------------------------------------------- #
 
@@ -477,8 +530,12 @@ class ThumbnailCache:
         self._memory_order.clear()
 
 
-def _fit(bitmap: object, width: int, height: int) -> object:
-    """Scale to fit inside ``width x height``, never upscaling."""
+def fit_bitmap(bitmap: object, width: int, height: int) -> object:
+    """Scale to fit inside ``width x height``, never upscaling.
+
+    Shared by the game thumbnail cache and the shipped platform artwork, so
+    both end up as RGBA bitmaps ready to paste.
+    """
     from PIL import Image
 
     image: Image.Image = bitmap  # type: ignore[assignment]

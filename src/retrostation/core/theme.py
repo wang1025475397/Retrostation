@@ -244,6 +244,49 @@ class Metrics:
     def items_per_grid_page(self, *, single: bool = False) -> int:
         return self.grid_cols * self.grid_rows(single=single)
 
+    # -- platform carousel (home page) ------------------------------------ #
+
+    @property
+    def platform_art(self) -> int:
+        """Side of the square art box on a platform card.
+
+        Square because the shipped platform backgrounds are: the source art is
+        1024x1024, and a 16:10 box cropped a fifth off the top and bottom of
+        every image.  The layout follows the artwork, not the other way round.
+        """
+        return self.u(132)
+
+    @property
+    def platform_logo_h(self) -> int:
+        """Logo band underneath the background.
+
+        Platform logos are 820x330 (~2.5:1), so a card-wide band works out
+        about this tall.  It replaces the old name/count caption: the artwork
+        identifies the platform, and the info line below the carousel spells
+        out the selected one.
+        """
+        return self.u(48)
+
+    @property
+    def platform_card_h(self) -> int:
+        return self.platform_art + self.platform_logo_h
+
+    @property
+    def platform_gap(self) -> int:
+        return self.u(14)
+
+    @property
+    def platform_top(self) -> int:
+        return self.content_top + self.u(8)
+
+    @property
+    def platform_info_y(self) -> int:
+        return self.platform_top + self.platform_card_h + self.u(14)
+
+    @property
+    def platform_preview_y(self) -> int:
+        return self.platform_info_y + self.u(48)
+
     # -- game carousel view ----------------------------------------------- #
 
     @property

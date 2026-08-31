@@ -14,14 +14,19 @@ from ..core.model import ASSET_COVER, ASSET_LOGO, Game
 from ..data.library import Library
 from ..data.media import placeholder_bitmap
 from ..platform.base import Platform
+from .platform_art import PlatformArt
 
 
 class ArtProvider:
     """Cached artwork lookup used by every screen."""
 
-    def __init__(self, library: Library, platform: Platform) -> None:
+    def __init__(self, library: Library, platform: Platform,
+                 platform_art: PlatformArt | None = None) -> None:
         self._library = library
         self._platform = platform
+        #: Artwork shipped with the app (one background + logo per platform),
+        #: kept apart from the per-game media the library manages.
+        self.platform_art = platform_art if platform_art is not None else PlatformArt(platform)
         #: Generated placeholders are deterministic, so drawing one costs a
         #: gradient loop -- cheap once, noticeable ten times a frame.
         self._placeholders: dict[tuple, object] = {}
@@ -49,3 +54,13 @@ class ArtProvider:
     def has_cover(self, game: Game) -> bool:
         path = game.asset(ASSET_COVER)
         return bool(path) and Path(path).is_file()
+
+    # -- shipped platform artwork ---------------------------------------- #
+
+    def platform_background(self, key: str, width: int, height: int) -> object | None:
+        """Square art for a platform card, or ``None`` when we ship none."""
+        return self.platform_art.background(key, width, height)
+
+    def platform_logo(self, key: str, width: int, height: int) -> object | None:
+        """The platform's logo, alpha preserved, or ``None``."""
+        return self.platform_art.logo(key, width, height)

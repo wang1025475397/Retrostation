@@ -470,7 +470,8 @@ class App:
         session = self.session
         key = session.current_system_key()
         if key not in ("ALL", "FAV", "RECENT"):
-            # Load lazily so the selected platform card can show real artwork.
+            # Warm the selected system so the preview strip and the ROM count
+            # are ready before the player scrolls onto them.
             self.library.load_games(key)
 
         tiles = self._home_tiles()
@@ -651,15 +652,20 @@ class App:
     # ------------------------------------------------------------------ #
 
     def _home_tiles(self) -> list[home.Tile]:
-        tiles: list[home.Tile] = []
-        for key in self.session.system_keys():
-            tiles.append(home.Tile(
+        """One card per platform, using the artwork shipped with the app.
+
+        These used to show the cover of each system's *first* game, which looked
+        arbitrary and followed scan order.  The cards now come from
+        ``assets/platforms/`` (see ``scripts/build_platform_art.py``).
+        """
+        return [
+            home.Tile(
                 key=key,
                 title=display_name(key),
                 subtitle=self._tile_subtitle(key),
-                artwork=self._representative(key),
-            ))
-        return tiles
+            )
+            for key in self.session.system_keys()
+        ]
 
     def _tile_subtitle(self, key: str) -> str:
         if key == "ALL":
@@ -667,13 +673,6 @@ class App:
         if key in ("FAV", "RECENT"):
             return self.translator("bottom.games_total")
         return str(self.library.rom_count(key))
-
-    def _representative(self, key: str):
-        if key in ("ALL", "FAV", "RECENT"):
-            games = self.library.aggregate(key)
-            return games[0] if games else None
-        library = self.library.system(key)
-        return library.games[0] if library.games else None
 
     def _info_subtitle(self, key: str) -> str:
         if key in ("ALL", "FAV", "RECENT"):
