@@ -21,6 +21,7 @@ MEDIA_INSET = 4
 class Meta:
     """Metadata-panel content, translated by the app before it gets here."""
 
+    name: str
     system_label: str
     publisher: str
     rating_stars: int
@@ -127,6 +128,12 @@ def _meta(painter: Painter, meta: Meta, box: tuple[int, int, int, int]) -> None:
     inner = w - m.u(4)
     y = box[1]
 
+    # The panel named the system and the publisher but never the game itself --
+    # it only ever appeared baked into the cover or logo artwork, which is
+    # missing, or in a script you cannot read, often enough to matter.
+    painter.text((x, y), painter.ellipsize(meta.name, size=16, max_width=inner),
+                 size=16, fill=COLORS.text, anchor="la")
+    y += m.u(23)
     painter.text((x, y), painter.ellipsize(f"{meta.system_label} · {meta.publisher}",
                                            size=13, max_width=w), size=13, fill=COLORS.text_dim, anchor="la")
     y += m.u(21)

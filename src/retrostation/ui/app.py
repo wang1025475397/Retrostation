@@ -702,6 +702,7 @@ class App:
             self.translator("bottom.days_ago", days=_days_since(last)) if last else "-"
         )
         return bottom.Meta(
+            name=game.display_name,
             system_label=display_name(system_key),
             publisher=game.publisher or "-",
             rating_stars=stars,

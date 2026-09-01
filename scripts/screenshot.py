@@ -111,11 +111,23 @@ def shoot(app: App, platform, out: Path, tag: str) -> None:
 
 
 def main() -> int:
-    out = Path(sys.argv[1] if len(sys.argv) > 1 else "screenshots")
+    single = "--single" in sys.argv
+    positional = [arg for arg in sys.argv[1:] if not arg.startswith("--")]
+    out = Path(positional[0] if positional else "screenshots")
     build_library()
 
-    platform = LinuxPlatform(rom_root=str(LIB.resolve()), headless=True)
+    # Our own config dir, rebuilt with the library: the default one carries a
+    # ``state.json`` resume snapshot from whatever ran last, which would drop
+    # us straight into the previous game instead of the home page -- the very
+    # first thing this tool wants to shoot.
+    platform = LinuxPlatform(rom_root=str(LIB.resolve()),
+                             config_dir=str((LIB / ".config").resolve()),
+                             headless=True)
     config = Config()
+    # Force the layout the device is in; without this, "auto" always builds two
+    # panels and the single-screen strip never shows up.
+    if single:
+        config.screen_mode = "single"
     script = LIB / "RA_launch.sh"
     script.write_text("#!/bin/sh\n", encoding="utf-8")
     config.launcher.ra_script = str(script)
