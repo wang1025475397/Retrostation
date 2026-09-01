@@ -11,21 +11,29 @@ from pathlib import Path
 
 from PIL import ImageFont
 
-#: Where we look, in order.  Includes desktop OS fonts so the app can be
+#: Where we look.  Includes desktop OS fonts so the app can be
 #: developed and unit-tested off-device.
 _CANDIDATE_DIRS: tuple[str, ...] = (
     "/usr/share/fonts/source-han-sans-cn",      # RG DS (measured)
     "/usr/share/fonts/truetype/dejavu",         # Debian/Buildroot
     "/usr/share/fonts/dejavu",
     "/usr/share/fonts/truetype/noto",
+    "/roms/ports/PortMaster/resources",         # bundled CJK fonts on the device
+    "/roms/ports/PortMaster/pylibs/resources",  # alternate PortMaster layout
     "C:/Windows/Fonts",                          # Windows development
     "/System/Library/Fonts",                     # macOS development
 )
 
+#: Preferred file names, in priority order.  CJK-capable faces are listed
+#: *before* the Latin-only DejaVu so that Chinese UI text renders instead of
+#: falling back to tofu boxes.
 _CANDIDATE_NAMES: tuple[str, ...] = (
     "SourceHanSansCN-Regular.otf",
     "SourceHanSansCN-Regular.ttf",
     "NotoSansCJK-Regular.ttc",
+    "NotoSansSC-Regular.ttf",
+    "NotoSansTC-Regular.ttf",
+    "NotoSansHK-Regular.ttf",
     "msyh.ttc",
     "simhei.ttf",
     "DejaVuSans.ttf",
@@ -61,15 +69,23 @@ class FontBook:
             self._resolved = self._preferred
             return self._resolved
 
-        for directory in self._dirs:
-            if not directory.is_dir():
-                continue
-            for name in _CANDIDATE_NAMES:
+        # Try each preferred name across *every* search directory before
+        # falling back to a directory's "any font" glob.  This matters because
+        # some directories (e.g. DejaVu) only ship Latin glyphs; we must not let
+        # an arbitrary Latin font win just because its directory is listed first.
+        for name in _CANDIDATE_NAMES:
+            for directory in self._dirs:
+                if not directory.is_dir():
+                    continue
                 candidate = directory / name
                 if candidate.is_file():
                     self._resolved = candidate
                     return self._resolved
-            # Last resort inside the directory: any font at all.
+
+        # Last resort: any font at all, in directory order.
+        for directory in self._dirs:
+            if not directory.is_dir():
+                continue
             for pattern in ("*.otf", "*.ttf", "*.ttc"):
                 for candidate in sorted(directory.glob(pattern)):
                     self._resolved = candidate

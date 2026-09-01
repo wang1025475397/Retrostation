@@ -1,15 +1,21 @@
 #!/bin/bash
 # Retrostation entry point for the stock "APPS" menu.
 #
-# Install this file as /mnt/mmc/Roms/APPS/Retrostation.sh -- NOT inside the
-# Retrostation sub-directory.  The stock menu lists only *.sh directly under
+# Install this file as /mnt/mmc/Roms/APPS/<Name>.sh -- NOT inside the app's
+# sub-directory.  The stock menu lists only *.sh directly under
 # /mnt/mmc/Roms/APPS and ignores sub-directories, so this thin wrapper is what
 # makes the app appear in the menu at all.
 #
 # It sets the environment the stock launcher does not provide and then hands
 # over to the real launcher, which owns the restart loop.
+#
+# The name doubles as the install directory, so this one file serves every
+# variant: Retrostation.sh runs APPS/Retrostation/, and a copy named
+# Retrostation-Release.sh runs APPS/Retrostation-Release/ -- each with its own
+# config, index and log, so a release build can sit next to a dev build.
 
-progdir="/mnt/mmc/Roms/APPS/Retrostation"
+name="$(basename "$0" .sh)"
+progdir="/mnt/mmc/Roms/APPS/$name"
 
 # Measured on the RG DS: scripts started from the APPS menu inherit none of
 # this, unlike an interactive SSH shell.  Without XDG_RUNTIME_DIR + WAYLAND_
@@ -22,7 +28,7 @@ export WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}"
 # SDL_VIDEODRIVER unset it selects Wayland and reports two 640x480 outputs.
 
 if [ ! -x "$progdir/retrostation.sh" ]; then
-    echo "Retrostation is not installed at $progdir" >&2
+    echo "$name is not installed at $progdir" >&2
     sleep 3
     exit 1
 fi

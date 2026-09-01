@@ -438,6 +438,20 @@ class Platform(abc.ABC):
     def load_image(self, path: Path) -> object:
         """Decode an image, or raise :class:`OSError`."""
 
+    def transcode_image(self, source: Path, target: Path, width: int, height: int) -> bool:
+        """Decode ``source`` into ``target`` using an external decoder.
+
+        A fallback for files :meth:`load_image` cannot open even though the
+        file itself is fine: the RG DS links Pillow against a libjpeg it does
+        not ship, so every JPEG cover there raises on open.  ffmpeg is present
+        and decodes them, so the Linux platform overrides this.
+
+        ``target`` is written at most ``width x height``.  Returns ``True`` on
+        success.  The default says no, which keeps platforms without such a
+        decoder honest instead of pretending to have tried.
+        """
+        return False
+
     def save_screenshot(self, canvas: Canvas, path: Path) -> None:
         """Write ``canvas`` to ``path`` (development / diagnostics only)."""
         raise NotImplementedError

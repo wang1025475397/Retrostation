@@ -5,3 +5,6 @@ __pycache__/
 build/
 screenshots/
 *.egg-info/
+
+# scripts/build_release.py output: source-free, byte-compiled bundles.
+dist/

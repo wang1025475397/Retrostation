@@ -332,6 +332,14 @@ _SAVE_ARGS: dict[str, dict[str, object]] = {
     ".png": {"format": "PNG", "optimize": True},
 }
 
+#: Sub-directory (inside ``.cache``) holding readable copies of sources that
+#: Pillow on this device cannot open -- see :meth:`ThumbnailCache._readable_copy`.
+_COPY_DIR = "src"
+
+#: Upper bound for those copies.  Every slot the UI draws fits inside it, so
+#: one copy can serve every layout.
+_SOURCE_COPY_LIMIT = 512
+
 #: Tried in order by :func:`cache_suffix`.
 _CACHE_FORMATS: tuple[tuple[str, str], ...] = (
     (".webp", "WEBP"),
@@ -450,12 +458,66 @@ class ThumbnailCache:
         try:
             original = self._platform.load_image(source)
         except OSError:
-            return None
+            # This device's Pillow cannot open JPEG at all (see cache_suffix),
+            # and cover art is frequently JPEG.  Fall back to a readable copy
+            # rather than showing the placeholder.
+            readable = self._readable_copy(source)
+            if readable is None:
+                return None
+            try:
+                original = self._platform.load_image(readable)
+            except OSError:
+                return None
 
         scaled = fit_bitmap(original, width, height)
         if disk is not None and self._enabled:
             self._store(disk, scaled)
         return scaled
+
+    def _readable_copy(self, source: Path) -> Path | None:
+        """A Pillow-readable stand-in for a file Pillow cannot open.
+
+        Cached on disk, so the external decoder (ffmpeg, ~80 ms a call) runs
+        **once per cover** instead of once per layout: the per-size cache above
+        is keyed by the requested size, and a player switching between list,
+        grid and carousel would otherwise re-decode the same JPEG every time.
+
+        The copy is kept at :data:`_SOURCE_COPY_LIMIT` -- comfortably larger
+        than any slot the UI draws, small enough to stay cheap to store.
+        """
+        if not self._enabled:
+            return None
+
+        directory = source.parent / ".cache" / _COPY_DIR
+        digest = hashlib.sha1(str(source).encode("utf-8")).hexdigest()[:16]
+        target = directory / f"{digest}{cache_suffix()}"
+        if target.is_file():
+            return target
+
+        temporary = directory / f"{digest}.tmp.png"
+        try:
+            directory.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            return None
+        try:
+            if not self._platform.transcode_image(
+                source, temporary, _SOURCE_COPY_LIMIT, _SOURCE_COPY_LIMIT
+            ):
+                return None
+            image = self._platform.load_image(temporary)
+        except OSError:
+            return None
+        finally:
+            temporary.unlink(missing_ok=True)
+
+        # Through the same writer as the thumbnails, so both layers end up in a
+        # format this device can actually read back.
+        try:
+            self._write(target, image)
+        except Exception:  # noqa: BLE001 - a lost copy only costs time, not correctness
+            log.debug("could not cache readable copy of %s", source)
+            return None
+        return target
 
     def _disk_path(self, source: Path, width: int, height: int) -> Path | None:
         """``Imgs/.cache/<hash>_<w>x<h><suffix>``; ``None`` when caching is off."""
@@ -538,11 +600,18 @@ def fit_bitmap(bitmap: object, width: int, height: int) -> object:
     """
     from PIL import Image
 
+    # ``Image.Resampling`` only exists on Pillow >= 9.1.0; older builds still
+    # expose the deprecated ``Image.LANCZOS`` alias.
+    try:
+        resample = Image.Resampling.LANCZOS
+    except AttributeError:
+        resample = Image.LANCZOS
+
     image: Image.Image = bitmap  # type: ignore[assignment]
     scale = min(width / image.width, height / image.height, 1.0)
     if scale < 1.0:
         size = (max(1, round(image.width * scale)), max(1, round(image.height * scale)))
-        image = image.resize(size, Image.Resampling.LANCZOS)
+        image = image.resize(size, resample)
     if image.mode != "RGBA":
         image = image.convert("RGBA")
     return image

@@ -163,6 +163,70 @@ SELECT=BTN_TL(310)  START=BTN_TR(311)  FUNC=BTN_TL2(312) / L3(313) / R3(316)
 `gamelist.xml` 里的 `<video>` 标签优先级最高（数据源已解析的不会被覆盖）。
 覆盖率用 `python3 -m retrostation.main --check NDS` 看 `video` 那一行。
 
+## 发布：不提供源码的打包
+
+把所有 `.py` 编译成字节码，只发 `.pyc`，源码一个都不带走。
+
+```bash
+# 推荐：在设备上编译（设备自带 Python 3.11，天然版本匹配，本地不用装任何东西）
+python scripts/build_release.py --on-device root@192.168.31.205
+
+# 或者本地用 3.11 编译
+python scripts/build_release.py --python /path/to/python3.11
+
+# 常用组合
+python scripts/build_release.py --on-device root@192.168.31.205 --zip   # 再打个 zip
+python scripts/build_release.py --keep-scripts                          # 连诊断脚本一起发
+python scripts/build_release.py --deploy root@192.168.31.205            # 构建完直接推上去
+```
+
+产物在 `dist/Retrostation/`（以及可选的 `dist/Retrostation.zip`）：
+
+```
+dist/Retrostation/
+├── src/retrostation/**/*.pyc     # 41 个模块，全是字节码
+├── src/retrostation/assets/      # 平台图 + 翻译，原样（数据是数据，不是代码）
+├── scripts/*.pyc                 # --keep-scripts 时才有
+├── retrostation.sh               # 启动器（明文，本来就是 shell）
+├── APPS-Retrostation.sh          # APPS 菜单入口
+└── VERSION
+```
+
+推到设备：
+
+```bash
+python scripts/deploy.py --source dist/Retrostation root@192.168.31.205
+```
+
+### 三条必须知道的限制
+
+1. **字节码不能跨 Python 大版本。**
+   CPython 给每个 `.pyc` 打 magic number，3.11 系列是 `3495`（`a70d`），3.12 是 `3531`。
+   3.12 编译的东西在 3.11 上直接 `RuntimeError: Bad magic number`，**反向也一样**。
+   所以：设备是 3.11.8 → 编译端必须是 **3.11.x**（3.11.0~3.11.9 互通），
+   3.10 / 3.12 / 3.13 都不行。脚本会检查版本，对不上直接报错，
+   不会静默产出一个跑不起来的包。
+
+2. **这是混淆，不是加密。**
+   字节码理论上能反编译回可读代码。挡得住随手拷，挡不住真想扒的人。
+   真要强保护得上 PyArmor 之类（要装依赖、有启动开销），或编译成真正的二进制
+   （需要 aarch64 工具链，体积也会涨几倍）—— 对一个掌机前端不太值。
+
+3. **启动器和素材是明文的。**
+   `retrostation.sh` 是 shell 脚本，本来就得给设备执行；平台图 / 翻译是数据文件。
+
+### 验证一个包
+
+```bash
+# 推到设备的临时位置，不碰正式安装
+scp -r dist/Retrostation/src root@<host>:/tmp/rel_test/src
+ssh root@<host> '
+  cd /tmp/rel_test
+  find src -name "*.py" | wc -l                    # 必须是 0
+  PYTHONPATH=/tmp/rel_test/src python3 -m retrostation.main --scan-only
+'
+```
+
 ## 本地开发
 
 ```bash

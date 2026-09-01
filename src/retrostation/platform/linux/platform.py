@@ -20,6 +20,7 @@ from ..base import Canvas, FileEntry, InputEvent, Platform, VideoPipe
 from .canvas import PilCanvas, save_bitmap
 from .display import SDLDisplay
 from .fonts import FontBook
+from . import ffmpeg as ffmpeg_codec
 from .input import EvdevInput
 from . import hw as sysfs
 from . import video as ffmpeg_pipe
@@ -217,6 +218,16 @@ class LinuxPlatform(Platform):
     def load_image(self, path: Path) -> object:
         with Image.open(path) as handle:
             return handle.convert("RGBA").copy()
+
+    def transcode_image(self, source: Path, target: Path, width: int, height: int) -> bool:
+        """Decode a file Pillow cannot open itself -- see :mod:`.ffmpeg`.
+
+        Only formats we know Pillow is broken for are worth the ~80 ms of
+        shelling out; a PNG that fails to open is simply a corrupt file.
+        """
+        if not ffmpeg_codec.is_recoverable(source):
+            return False
+        return ffmpeg_codec.transcode(source, target, width, height)
 
     def save_screenshot(self, canvas: Canvas, path: Path) -> None:
         if isinstance(canvas, PilCanvas):

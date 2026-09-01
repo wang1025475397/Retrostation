@@ -229,7 +229,11 @@ class PilCanvas(Canvas):
             return
         source: Image.Image = bitmap  # type: ignore[assignment]
         if source.size != (w, h):
-            source = source.resize((w, h), Image.Resampling.LANCZOS)
+            try:
+                resample = Image.Resampling.LANCZOS
+            except AttributeError:
+                resample = Image.LANCZOS
+            source = source.resize((w, h), resample)
         if source.mode != "RGBA":
             source = source.convert("RGBA")
         self._image.paste(source, (x, y), source)

@@ -34,21 +34,73 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 APPS_DIR = "/mnt/mmc/Roms/APPS"
-INSTALL_DIR = f"{APPS_DIR}/Retrostation"
+#: ``Retrostation`` for development, ``Retrostation-Release`` for a built
+#: bundle.  The menu entry takes its name from the install directory, so both
+#: can sit side by side, each with its own config, index and log.
+DEFAULT_VARIANT = "Retrostation"
 
-# (local path, remote path) -- order matters: the menu entry is copied last
-# so a half-deployed frontend never appears in the menu.
-ARTIFACTS: tuple[tuple[Path, str], ...] = (
-    (ROOT / "src", f"{INSTALL_DIR}/src"),
-    (ROOT / "retrostation.sh", f"{INSTALL_DIR}/retrostation.sh"),
-    (ROOT / "scripts" / "screenshot.py", f"{INSTALL_DIR}/scripts/screenshot.py"),
-    (ROOT / "scripts" / "device_selftest.py", f"{INSTALL_DIR}/scripts/device_selftest.py"),
-    (ROOT / "scripts" / "video_selftest.py", f"{INSTALL_DIR}/scripts/video_selftest.py"),
-    (ROOT / "scripts" / "probe_input.py", f"{INSTALL_DIR}/scripts/probe_input.py"),
-    (ROOT / "packaging" / "APPS" / "Imgs" / "Retrostation.png",
-     f"{APPS_DIR}/Imgs/Retrostation.png"),
-    (ROOT / "packaging" / "APPS" / "Retrostation.sh", f"{APPS_DIR}/Retrostation.sh"),
-)
+
+def artifact_paths(variant: str) -> tuple[tuple[str, str], ...]:
+    """(path relative to the source root, remote path) for one variant.
+
+    Order matters: the menu entry goes last, so a half-finished deployment
+    never shows up in the APPS menu.
+    """
+    install = f"{APPS_DIR}/{variant}"
+    return (
+        ("src", f"{install}/src"),
+        ("retrostation.sh", f"{install}/retrostation.sh"),
+        ("scripts/screenshot.py", f"{install}/scripts/screenshot.py"),
+        ("scripts/device_selftest.py", f"{install}/scripts/device_selftest.py"),
+        ("scripts/video_selftest.py", f"{install}/scripts/video_selftest.py"),
+        ("scripts/probe_input.py", f"{install}/scripts/probe_input.py"),
+        # A variant may bring its own icon; otherwise reuse the default one.
+        (f"packaging/APPS/Imgs/{variant}.png", f"{APPS_DIR}/Imgs/{variant}.png"),
+        ("packaging/APPS/Imgs/Retrostation.png", f"{APPS_DIR}/Imgs/{variant}.png"),
+        ("packaging/APPS/Retrostation.sh", f"{APPS_DIR}/{variant}.sh"),
+    )
+
+
+def artifacts(source_root: Path, variant: str = DEFAULT_VARIANT) -> list[tuple[Path, str]]:
+    """Existing artifacts under ``source_root``, in deployment order.
+
+    ``source_root`` is the repository during development and a built bundle for
+    a release (see ``scripts/build_release.py``), where every ``.py`` has been
+    replaced by a ``.pyc`` and the diagnostics may have been left out.
+    """
+    # Keyed by remote path so the first match wins: a variant icon beats the
+    # shared one, and a bundle's .pyc replaces the .py rather than adding to it.
+    found: dict[str, Path] = {}
+    for relative, remote in artifact_paths(variant):
+        if remote in found:
+            continue
+        candidate = source_root / relative
+        local = candidate if candidate.exists() else candidate.with_suffix(".pyc")
+        if not local.exists():
+            continue  # a bundle without diagnostics is perfectly deployable
+        if local.suffix == ".pyc":
+            remote = remote[: -len(".py")] + ".pyc"
+        found[remote] = local
+    return [(local, remote) for remote, local in found.items()]
+
+
+def sweep_local_caches(source_root: Path) -> int:
+    """Drop ``__pycache__`` under ``source_root/src`` before pushing.
+
+    A Windows dev machine leaves behind ``.pyc`` files built by *its*
+    interpreter (3.12 here, say) which the device's 3.11 will never load --
+    dead weight that also makes the installed tree look like it ships
+    bytecode.  They are a cache, so deleting them costs nothing; Python
+    rebuilds them on the next run.
+    """
+    removed = 0
+    src = source_root / "src"
+    if not src.is_dir():
+        return 0
+    for cache in sorted(src.rglob("__pycache__")):
+        shutil.rmtree(cache, ignore_errors=True)
+        removed += 1
+    return removed
 
 
 def _quote(args: list[str]) -> str:
@@ -137,30 +189,45 @@ def main() -> int:
     parser.add_argument("host", help="SSH target, e.g. root@192.168.0.55")
     parser.add_argument("--password", default=os.environ.get("RETROSTATION_SSH_PASSWORD"),
                         help="SSH password; enables paramiko (no key needed)")
+    parser.add_argument("--source", type=Path, default=ROOT,
+                        help="directory to deploy from; defaults to the repository, "
+                             "or point it at a bundle from scripts/build_release.py")
+    parser.add_argument("--variant", default=DEFAULT_VARIANT,
+                        help=f"install directory / menu entry name "
+                             f"(default: {DEFAULT_VARIANT}; use Retrostation-Release "
+                             f"for a built bundle, so both can coexist)")
     parser.add_argument("--dry-run", action="store_true",
                         help="print what would happen, don't touch the device")
     parser.add_argument("--reset", action="store_true",
                         help="also nuke /tmp/retrostation_* on the device (debug cruft)")
     args = parser.parse_args()
 
+    variant = args.variant
+    install_dir = f"{APPS_DIR}/{variant}"
+    pending = artifacts(args.source, variant)
+    if not pending:
+        print(f"nothing to deploy from {args.source}", file=sys.stderr)
+        return 1
+
     transport = build_transport(args.host, args.password, args.dry_run)
     try:
-        print(f"deploying to {args.host} -> {INSTALL_DIR}")
-        transport.run(["mkdir", "-p", f"{INSTALL_DIR}/scripts", f"{APPS_DIR}/Imgs"])
+        swept = sweep_local_caches(args.source)
+        if swept:
+            print(f"  swept {swept} stale __pycache__ directories")
+
+        print(f"deploying to {args.host} -> {install_dir}")
+        transport.run(["mkdir", "-p", f"{install_dir}/scripts", f"{APPS_DIR}/Imgs"])
 
         # Delete the old src/ and launcher so we never mix versions.
-        transport.run(["rm", "-rf", f"{INSTALL_DIR}/src", f"{INSTALL_DIR}/retrostation.sh"])
+        transport.run(["rm", "-rf", f"{install_dir}/src", f"{install_dir}/retrostation.sh"])
 
-        for local, remote in ARTIFACTS:
-            if not local.exists():
-                print(f"missing local artifact: {local}", file=sys.stderr)
-                return 1
+        for local, remote in pending:
             transport.push(local, remote)
 
         # Ensure executability: scp/sftp does not preserve the mode.
         transport.run(["chmod", "+x",
-                       f"{INSTALL_DIR}/retrostation.sh",
-                       f"{APPS_DIR}/Retrostation.sh"])
+                       f"{install_dir}/retrostation.sh",
+                       f"{APPS_DIR}/{variant}.sh"])
 
         if args.reset:
             transport.run(["sh", "-c", "rm -rf /tmp/retrostation_* /tmp/shots 2>/dev/null || true"])
@@ -170,14 +237,14 @@ def main() -> int:
             return 0
 
         # Confirm what actually landed.
-        transport.run(["ls", "-la", f"{APPS_DIR}/Retrostation.sh",
-                       f"{APPS_DIR}/Imgs/Retrostation.png"], check=False)
+        transport.run(["ls", "-la", f"{APPS_DIR}/{variant}.sh",
+                       f"{APPS_DIR}/Imgs/{variant}.png"], check=False)
     finally:
         if hasattr(transport, "close"):
             transport.close()
     print()
-    print("Now open the device's APPS menu and tap Retrostation.sh.")
-    print("If nothing happens, read:  /mnt/mmc/Roms/APPS/Retrostation/log.txt")
+    print(f"Now open the device's APPS menu and tap {variant}.sh.")
+    print(f"If nothing happens, read:  {install_dir}/log.txt")
     return 0
 
 
