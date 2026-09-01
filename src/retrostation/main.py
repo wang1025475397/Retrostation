@@ -27,14 +27,20 @@ from .core.theme import COLORS
 from .data.library import Library
 from .data.systems import display_name
 from .platform.base import Platform
-from .platform.linux.platform import LinuxPlatform
+from .platform.linux.platform import LinuxPlatform, resolve_config_dir
 from .ui.app import EXIT_OK, App
 
 log = logging.getLogger("retrostation")
 
 
-def build_platform(args: argparse.Namespace) -> Platform:
-    return LinuxPlatform(rom_root=args.rom_root, headless=args.headless)
+def build_platform(args: argparse.Namespace, config: Config) -> Platform:
+    """Choose the ROM root: command line first, then the card in the config.
+
+    ``config.rom_root`` stays ``"auto"`` until the player picks a card; anything
+    else is a path they chose, and wins over probing.
+    """
+    explicit = args.rom_root or (None if config.rom_root == "auto" else config.rom_root)
+    return LinuxPlatform(rom_root=explicit, headless=args.headless)
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -127,12 +133,16 @@ def main(argv: list[str] | None = None) -> int:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
 
-    platform = build_platform(args)
-    config = Config.load(args.config or (platform.config_dir / "config.json"))
+    # Config before platform: it names the card in use, and the platform needs
+    # that to resolve the ROM root.  The config directory does not depend on
+    # which card is active, so resolving it on its own is safe.
+    config = Config.load(args.config or (resolve_config_dir(None) / "config.json"))
     # Before anything draws: the palette is a shared instance, so loading the
     # configured theme here is what every screen picks up.
     COLORS.apply(config.theme, config.theme_variant)
     translator = Translator(config.language)
+
+    platform = build_platform(args, config)
 
     if args.scan_only:
         return scan_only(platform, config)

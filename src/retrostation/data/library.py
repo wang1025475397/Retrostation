@@ -14,6 +14,7 @@ first time the user opens FC we parse 515 gamelist entries then and there.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import threading
 from dataclasses import dataclass, field
@@ -76,6 +77,20 @@ class Library:
     # Scanning
     # ------------------------------------------------------------------ #
 
+    def _index_path(self) -> Path:
+        """Where this card's scan cache lives.
+
+        One file per ROM root.  The cards are separate libraries, and a shared
+        ``index.json`` would hand the card you just switched to the previous
+        card's listing -- which is exactly what ``cached_only`` paints on the
+        first frame, so you would see the wrong systems until the background
+        scan caught up.
+        """
+        root = self._platform.rom_root
+        stem = root.parent.name or "root"
+        digest = hashlib.sha1(str(root).encode("utf-8")).hexdigest()[:6]
+        return self._platform.config_dir / f"index-{stem}-{digest}.json"
+
     def scan(self, *, on_progress=None, cached_only: bool = False) -> ScanResult:
         """Scan the ROM root.  Safe to call again; it merges, not replaces.
 
@@ -88,6 +103,7 @@ class Library:
             self._config,
             on_progress=on_progress,
             cached_only=cached_only,
+            index_path=self._index_path(),
         )
         with self._lock:
             self.last_scan = result

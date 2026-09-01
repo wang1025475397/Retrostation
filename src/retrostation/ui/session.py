@@ -358,6 +358,15 @@ class Session:
     #: how many columns a grid page holds.
     _metrics: object | None = None
     _single: bool = False
+    #: Storage cards present on this device, as ``(path, label)``, injected by
+    #: the app.  Fewer than two means there is nothing to switch between and
+    #: the row stays out of the menu.
+    rom_roots: list[tuple[Path, str]] = field(default_factory=list)
+    #: Which of :attr:`rom_roots` the library was built from.
+    current_rom_root: Path | None = None
+    #: Raised when the player picked the other card: the resume snapshot names
+    #: a game on the card we are leaving, so the app has to drop it.
+    card_changed: bool = False
     #: One frame's worth of :meth:`games`; see that method.
     _visible: list[Game] | None = field(default=None, init=False, repr=False, compare=False)
     #: Game key to select as soon as :meth:`games` can be built.  A resume
@@ -457,6 +466,8 @@ class Session:
         if key == "screen":
             self.config.screen_mode = "single" if self.config.screen_mode != "single" else "dual"
             self.restart_requested = True
+        elif key == "card":
+            self._switch_card()
         elif key == "layout":
             self._cycle_layout()
         elif key == "bvideo":
@@ -507,13 +518,48 @@ class Session:
         self.config.language = following
         self.translator.set_language(following)
 
+    def _card_label(self) -> str:
+        """Label of the card in use (TF1 / TF2)."""
+        for path, label in self.rom_roots:
+            if path == self.current_rom_root:
+                return label
+        return "-"
+
+    def _switch_card(self) -> None:
+        """Browse the other card.
+
+        The library is built around one ROM root, so this cannot be applied in
+        place: the choice goes into the config and the app restarts us against
+        it -- exit code 43, the same route the screen mode takes, for the same
+        reason (DESIGN §4.4: rebuilding these inside a live process is what
+        crashes under Wayland).
+        """
+        paths = [path for path, _label in self.rom_roots]
+        if len(paths) < 2:
+            return
+        try:
+            index = paths.index(self.current_rom_root)
+        except ValueError:
+            index = -1
+        self.config.rom_root = str(paths[(index + 1) % len(paths)])
+        # The resume snapshot names a game on the card we are leaving; keeping
+        # it would restore us onto a ROM that is not mounted.
+        self.card_changed = True
+        self.restart_requested = True
+
     def menu_rows(self) -> list[tuple[str, str, str]]:
         """``(key, label, value)`` triples for the settings dialog."""
         config = self.config
         single = config.screen_mode == "single"
-        return [
+        rows = [
             ("screen", self.translator("menu.screen"),
              self.translator("value.single" if single else "value.dual")),
+        ]
+        # Only worth a row when there is somewhere to switch to: with one card
+        # there is no alternative, and the row would just taunt the player.
+        if len(self.rom_roots) > 1:
+            rows.append(("card", self.translator("menu.card"), self._card_label()))
+        rows += [
             ("layout", self.translator("menu.layout"), self.translator(f"games.layout_{self.layout}")),
             # Video plays in the detail strip on one screen too, so this row
             # reads the same whichever mode is active.
@@ -532,6 +578,7 @@ class Session:
              self.translator("value.on" if config.show_status_bar else "value.off")),
             ("about", self.translator("menu.about"), "v0.1.0"),
         ]
+        return rows
 
     def _handle_exit_modal(self, event: InputEvent) -> Outcome:
         if not event.is_press:

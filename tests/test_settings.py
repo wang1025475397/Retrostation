@@ -166,3 +166,78 @@ class TestPersistence:
 
         saved = json.loads((Path(platform.config_dir) / "config.json").read_text(encoding="utf-8"))
         assert saved["show_status_bar"] is False
+
+
+class TestStorageCard:
+    """Two cards are browsed separately, never merged into one library.
+
+    The row only exists when there is somewhere to switch to, and the switch
+    itself is a restart: the library is built around a single ROM root, and
+    rebuilding it in a live process is what crashes under Wayland (§4.4).
+    """
+
+    @staticmethod
+    def _two_cards(app: App, tmp_path: Path) -> tuple[Path, Path]:
+        first, second = tmp_path / "card1", tmp_path / "card2"
+        app.session.rom_roots = [(first, "TF1"), (second, "TF2")]
+        return first, second
+
+    def test_one_card_hides_the_row(self, rom_root: Path) -> None:
+        app, _platform, _config = settings_app(rom_root)
+        app.run(max_frames=1)
+        app.session.rom_roots = app.session.rom_roots[:1]
+        keys = [key for key, _label, _value in app.session.menu_rows()]
+        assert "card" not in keys
+
+    def test_two_cards_name_the_active_one(self, rom_root: Path, tmp_path: Path) -> None:
+        app, _platform, _config = settings_app(rom_root)
+        app.run(max_frames=1)
+        first, _second = self._two_cards(app, tmp_path)
+        app.session.current_rom_root = first
+        values = {key: value for key, _label, value in app.session.menu_rows()}
+        assert values["card"] == "TF1"
+
+    def test_switching_picks_the_next_card(self, rom_root: Path, tmp_path: Path) -> None:
+        app, _platform, config = settings_app(rom_root)
+        app.run(max_frames=1)
+        first, second = self._two_cards(app, tmp_path)
+        app.session.current_rom_root = first
+
+        app.session._apply_menu("card")  # noqa: SLF001 - the menu handler itself
+
+        assert config.rom_root == str(second)
+        assert app.session.restart_requested is True
+        assert app.session.card_changed is True
+
+    def test_switching_wraps_back_to_the_first(self, rom_root: Path, tmp_path: Path) -> None:
+        app, _platform, config = settings_app(rom_root)
+        app.run(max_frames=1)
+        first, second = self._two_cards(app, tmp_path)
+        app.session.current_rom_root = second
+        app.session._apply_menu("card")  # noqa: SLF001
+        assert config.rom_root == str(first)
+
+    def test_each_card_keeps_its_own_index(self, tmp_path: Path) -> None:
+        """A shared index would paint the old card's systems on the first frame.
+
+        ``cached_only`` is what brings the first frame up populated, so with one
+        index file a switch would show the wrong library until the background
+        scan finished.
+        """
+        one, two = tmp_path / "card1", tmp_path / "card2"
+        one.mkdir()
+        two.mkdir()
+        first = Library(FakePlatform(one), Config())
+        second = Library(FakePlatform(two), Config())
+        assert first._index_path() != second._index_path()  # noqa: SLF001
+
+    def test_switching_restarts_and_is_persisted(self, rom_root: Path, tmp_path: Path) -> None:
+        app, platform, _config = settings_app(rom_root)
+        app.run(max_frames=1)
+        first, second = self._two_cards(app, tmp_path)
+        app.session.current_rom_root = first
+        app.session._apply_menu("card")  # noqa: SLF001
+
+        assert app.run(max_frames=1) == EXIT_RESTART_UI
+        saved = json.loads((Path(platform.config_dir) / "config.json").read_text(encoding="utf-8"))
+        assert saved["rom_root"] == str(second)

@@ -381,6 +381,21 @@ class Platform(abc.ABC):
     def rom_root(self) -> Path:
         """Root directory that holds one sub-directory per system."""
 
+    def available_rom_roots(self) -> list[tuple[Path, str]]:
+        """ROM roots present on this device, with a short label each.
+
+        One entry means there is nothing to switch between; two means the
+        cards are browsed separately rather than merged.
+        """
+        return [(self.rom_root, self.rom_root.name)]
+
+    def rom_root_label(self) -> str:
+        """Short label for the root in use ("TF1"), else its folder name."""
+        for path, label in self.available_rom_roots():
+            if path == self.rom_root:
+                return label
+        return self.rom_root.name
+
     @property
     @abc.abstractmethod
     def config_dir(self) -> Path:

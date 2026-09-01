@@ -30,10 +30,30 @@ log = logging.getLogger(__name__)
 # Path resolution
 # --------------------------------------------------------------------------- #
 
-_ROM_ROOT_CANDIDATES: tuple[str, ...] = (
-    "/mnt/mmc/Roms",   # SD1 / TF1 (measured, primary)
-    "/mnt/sdcard/Roms",  # SD2
+#: Every ROM root this device may have, with the label the settings menu shows.
+#: Two cards are browsed as two separate libraries, never merged: the scan is
+#: ``rom_root/<system>`` against a single root, and a game's key is
+#: ``<system>/<file name>``, so merging would make the same title on both cards
+#: collide -- and re-keying would orphan every existing favourite.
+_ROM_ROOTS: tuple[tuple[str, str], ...] = (
+    ("/mnt/mmc/Roms", "TF1"),     # SD1 / TF1 (measured, primary)
+    ("/mnt/sdcard/Roms", "TF2"),  # SD2
 )
+_ROM_ROOT_CANDIDATES: tuple[str, ...] = tuple(path for path, _label in _ROM_ROOTS)
+
+
+def available_rom_roots() -> list[tuple[Path, str]]:
+    """The ROM roots that actually exist here, with their labels.
+
+    Empty on a dev machine, one entry on a single-card device (nothing to
+    switch between) and two when a second card is installed.
+    """
+    found: list[tuple[Path, str]] = []
+    for candidate, label in _ROM_ROOTS:
+        path = Path(candidate)
+        if path.is_dir():
+            found.append((path, label))
+    return found
 
 _CONFIG_DIR_CANDIDATES: tuple[str, ...] = (
     "/mnt/mmc/Roms/APPS/Retrostation",
@@ -141,6 +161,15 @@ class LinuxPlatform(Platform):
     @property
     def rom_root(self) -> Path:
         return self._rom_root
+
+    def available_rom_roots(self) -> list[tuple[Path, str]]:
+        return available_rom_roots()
+
+    def rom_root_label(self) -> str:
+        for path, label in available_rom_roots():
+            if path == self._rom_root:
+                return label
+        return self._rom_root.name
 
     @property
     def config_dir(self) -> Path:

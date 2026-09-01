@@ -18,7 +18,7 @@ from pathlib import Path
 from ..core.config import Config
 from ..core.i18n import Translator
 from ..core.model import Game
-from ..core.state import read_state, update_state
+from ..core.state import read_state, update_state, update_state
 from typing import Callable
 
 from ..core.theme import COLORS, metrics_for
@@ -98,6 +98,10 @@ class App:
         self.library = library
         self.art = ArtProvider(library, platform)
         self.session = Session(library, config, translator)
+        # The library is already scoped to one root, so the session only needs
+        # these to offer a switch -- and only when there is more than one card.
+        self.session.rom_roots = platform.available_rom_roots()
+        self.session.current_rom_root = platform.rom_root
         # Injected by tests and by the screenshot tool (which wants no ffmpeg).
         self._video = video or VideoPlayer(platform, VideoSettings.from_config(config))
         self._canvases: list = []
@@ -810,9 +814,14 @@ class App:
         self.config.save(Path(self.platform.config_dir) / "config.json")
 
         if self.session.restart_requested:
-            # Screen mode changed: we need new windows, and the only safe way to
-            # get them is a fresh process.  Saved above, so the bootstrap brings
-            # us back with the new setting already in place.
+            if self.session.card_changed:
+                # The snapshot names a game on the card we are leaving; keeping
+                # it would restore us onto a ROM that is no longer mounted.
+                update_state(self._state_path, resume=None)
+                self.session.card_changed = False
+            # Screen mode (or card) changed: we need new windows, and the only
+            # safe way to get them is a fresh process.  Saved above, so the
+            # bootstrap brings us back with the new setting already in place.
             self.session.restart_requested = False
             self._restart_ui = True
             self._running = False
