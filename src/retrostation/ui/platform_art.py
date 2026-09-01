@@ -46,36 +46,53 @@ class PlatformArt:
         root: Path | None = None,
         *,
         cache_limit: int = _CACHE_LIMIT,
+        user_root: Path | None = None,
     ) -> None:
         self._platform = platform
         self._root = Path(root) if root is not None else (
             Path(__file__).resolve().parent.parent / "assets" / "platforms"
         )
+        if user_root is not None:
+            self._user_root: Path | None = Path(user_root)
+        elif platform is not None and platform.config_dir:
+            # Per-user overrides, keyed by system directory name.  Sitting next
+            # to config.json / systems.json keeps all SD-card customization in
+            # one place.  Skipped when the platform reports no usable config
+            # dir (e.g. a test with ``config_dir = Path()``), so ``user_root``
+            # never degrades into a relative path that could match the working
+            # directory.
+            self._user_root = platform.config_dir / "platform-art"
+        else:
+            self._user_root = None
         self._cache: dict[tuple[str, str, int, int], object] = {}
         self._order: list[tuple[str, str, int, int]] = []
         self._cache_limit = cache_limit
         self._known: dict[str, bool] | None = None
 
-    # ------------------------------------------------------------------ #
-    # Lookup
-    # ------------------------------------------------------------------ #
-
     @property
     def root(self) -> Path:
         return self._root
 
-    def directory_for(self, kind: str) -> Path:
-        return self._root / (_BACKGROUND_DIR if kind == "background" else _LOGO_DIR)
+    def _roots(self, kind: str) -> list[Path]:
+        """Search roots for ``kind``; the user directory is first so a user
+        file overrides the shipped artwork for the same key."""
+        sub = _BACKGROUND_DIR if kind == "background" else _LOGO_DIR
+        roots: list[Path] = []
+        if self._user_root is not None:
+            roots.append(self._user_root / sub)
+        roots.append(self._root / sub)
+        return roots
 
     def candidates(self, kind: str, key: str) -> list[Path]:
         """Every existing file that could hold ``kind`` artwork for ``key``."""
-        directory = self.directory_for(kind)
         stem = key.casefold()
-        return [
-            candidate
-            for suffix in _SUFFIXES.get(kind, ())
-            if (candidate := directory / f"{stem}{suffix}").is_file()
-        ]
+        found: list[Path] = []
+        for directory in self._roots(kind):
+            for suffix in _SUFFIXES.get(kind, ()):
+                candidate = directory / f"{stem}{suffix}"
+                if candidate.is_file():
+                    found.append(candidate)
+        return found
 
     def path_for(self, kind: str, key: str) -> Path | None:
         """The first existing file for ``kind``/``key``, or ``None``."""
@@ -88,11 +105,15 @@ class PlatformArt:
             # One walk up front; the carousel asks on every frame.
             known: dict[str, bool] = {}
             for kind in _SUFFIXES:
-                directory = self._root / (_BACKGROUND_DIR if kind == "background" else _LOGO_DIR)
-                if not directory.is_dir():
-                    continue
-                for candidate in directory.iterdir():
-                    known[candidate.stem.casefold()] = True
+                sub = _BACKGROUND_DIR if kind == "background" else _LOGO_DIR
+                for base in (self._user_root, self._root):
+                    if base is None:
+                        continue
+                    directory = base / sub
+                    if not directory.is_dir():
+                        continue
+                    for candidate in directory.iterdir():
+                        known[candidate.stem.casefold()] = True
             self._known = known
         return key.casefold() in self._known
 

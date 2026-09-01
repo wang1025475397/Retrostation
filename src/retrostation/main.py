@@ -25,7 +25,7 @@ from .core.config import Config
 from .core.i18n import Translator
 from .core.theme import COLORS
 from .data.library import Library
-from .data.systems import display_name
+from .data.systems import USER_SYSTEMS_FILE, apply_user_systems, display_name
 from .platform.base import Platform
 from .platform.linux.platform import LinuxPlatform, resolve_config_dir
 from .ui.app import EXIT_OK, App
@@ -143,6 +143,11 @@ def main(argv: list[str] | None = None) -> int:
     translator = Translator(config.language)
 
     platform = build_platform(args, config)
+    # Systems can be added or retuned from the config directory, so a player
+    # dropping in a new core never has to edit the installed package.  This has
+    # to land before anything resolves a key: the scan filters directories by
+    # ``lookup(...).hidden`` and every screen asks for labels and cores.
+    apply_user_systems(platform.config_dir / USER_SYSTEMS_FILE)
 
     if args.scan_only:
         return scan_only(platform, config)

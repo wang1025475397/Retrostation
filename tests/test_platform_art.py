@@ -190,3 +190,38 @@ class TestPackaging:
         root = Path(__file__).resolve().parent.parent / "src" / "retrostation" / "ui" / "platform_art.py"
         assets = root.parent.parent / "assets" / "platforms"
         assert assets.is_dir(), f"missing: {assets}"
+
+
+class TestUserOverrides:
+    """A user-supplied file in ``platform-art/`` overrides the shipped one."""
+
+    def test_user_background_wins_over_shipped(self, tmp_path: Path) -> None:
+        shipped = tmp_path / "shipped"
+        _seed(shipped)
+        user = tmp_path / "user"
+        (user / "background").mkdir(parents=True)
+        Image.new("RGB", (64, 64), (10, 200, 10)).save(user / "background" / "fc.jpg")
+
+        art = PlatformArt(_FakePlatform(), root=shipped, user_root=user)
+        assert art.path_for("background", "FC") == user / "background" / "fc.jpg"
+
+    def test_missing_user_art_falls_back_to_shipped(self, tmp_path: Path) -> None:
+        shipped = tmp_path / "shipped"
+        _seed(shipped)
+        user = tmp_path / "user"
+        (user / "logo").mkdir(parents=True)  # no logo file placed
+
+        art = PlatformArt(_FakePlatform(), root=shipped, user_root=user)
+        assert art.path_for("logo", "FC") == shipped / "logo" / "fc.png"
+
+    def test_new_platform_matches_by_key(self, tmp_path: Path) -> None:
+        """A platform with no shipped art is found via the user directory."""
+        user = tmp_path / "user"
+        (user / "background").mkdir(parents=True)
+        (user / "logo").mkdir(parents=True)
+        Image.new("RGB", (64, 64), (10, 200, 10)).save(user / "background" / "gw.jpg")
+        Image.new("RGBA", (80, 32), (255, 255, 255, 220)).save(user / "logo" / "gw.png")
+
+        art = PlatformArt(_FakePlatform(), root=tmp_path / "empty", user_root=user)
+        assert art.has_art("GW") is True
+        assert art.path_for("background", "GW") == user / "background" / "gw.jpg"

@@ -1,0 +1,43 @@
+{
+  "_readme": [
+    "Optional file: copy this to <config dir>/systems.json to add systems or",
+    "retune the built-in ones.  <config dir> is /mnt/mmc/Roms/APPS/Retrostation",
+    "on the device, or ~/.retrostation on a desktop.",
+    "",
+    "The built-in table is never replaced.  Each entry either ADDS a system the",
+    "table lacks, or sets individual fields on one it has -- so changing one",
+    "core here still leaves every other system on its built-in value.",
+    "",
+    "key          matches the ROM directory name (case-insensitive)",
+    "label        English name            label_zh    Chinese name",
+    "extensions   file suffixes, no dot   core        RetroArch core file name",
+    "alt_cores    fallback cores          standalone  launcher command, {rom} substituted",
+    "order        home-page sort weight (lower = earlier)",
+    "hidden       true to hide a built-in system entirely (it is not scanned either)",
+    "",
+    "A malformed entry is skipped with a log line; the frontend always starts."
+  ],
+  "version": 1,
+  "systems": [
+    {
+      "_note": "ADD: a directory the built-in table has never heard of.",
+      "key": "GW",
+      "label": "Handheld",
+      "label_zh": "小霸王",
+      "extensions": ["gw", "bin"],
+      "core": "gw_libretro.so",
+      "order": 62
+    },
+    {
+      "_note": "REPLACE ONE FIELD: GBA keeps its name and art, only the core changes.",
+      "key": "gba",
+      "core": "mgba_libretro.so",
+      "alt_cores": ["vba_next_libretro.so"]
+    },
+    {
+      "_note": "HIDE: Virtual Boy stays in the table but is never scanned or shown.",
+      "key": "vb",
+      "hidden": true
+    }
+  ]
+}

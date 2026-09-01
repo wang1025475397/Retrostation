@@ -486,7 +486,7 @@ class App:
             self.art,
             tiles=tiles,
             index=index,
-            info_title=display_name(key),
+            info_title=display_name(key, self.translator.language),
             info_subtitle=self._info_subtitle(key),
             info_right=self._info_right(key),
             previews=self._previews(key),
@@ -644,7 +644,7 @@ class App:
             self.art,
             game,
             meta,
-            key_label=display_name(session.current_system_key()),
+            key_label=display_name(session.current_system_key(), self.translator.language),
             hints=self._bottom_hints(),
             video_frame=frame,
             video_progress=self._video.progress() if frame is not None else None,
@@ -665,7 +665,7 @@ class App:
         return [
             home.Tile(
                 key=key,
-                title=display_name(key),
+                title=display_name(key, self.translator.language),
                 subtitle=self._tile_subtitle(key),
             )
             for key in self.session.system_keys()
@@ -681,7 +681,7 @@ class App:
     def _info_subtitle(self, key: str) -> str:
         if key in ("ALL", "FAV", "RECENT"):
             return ""
-        return lookup(key).label
+        return display_name(key, self.translator.language)
 
     def _info_right(self, key: str) -> str:
         if key in ("ALL", "FAV", "RECENT"):
@@ -695,7 +695,7 @@ class App:
         return self.library.resolve_all(key)[:6]
 
     def _system_title(self) -> str:
-        return display_name(self.session.current_system_key())
+        return display_name(self.session.current_system_key(), self.translator.language)
 
     def _meta(self, game: Game) -> bottom.Meta | None:
         system_key = self.session.current_system_key()
@@ -707,7 +707,7 @@ class App:
         )
         return bottom.Meta(
             name=game.display_name,
-            system_label=display_name(system_key),
+            system_label=display_name(system_key, self.translator.language),
             publisher=game.publisher or "-",
             rating_stars=stars,
             rating_value=f"{(game.rating or 0) * 5:.1f}",
