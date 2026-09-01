@@ -223,7 +223,9 @@ class Library:
         for system_key in self.system_keys():
             if lookup(system_key).is_standalone:
                 continue
-            games.extend(self.load_games(system_key).games)
+            # resolve_all 而非 load_games：聚合视图的预览也要有解析过的封面
+            # 路径，否则预览全部落到「无封面」占位。
+            games.extend(self.resolve_all(system_key))
         if key == "FAV":
             games = [game for game in games if game.favorite]
         elif key == "RECENT":

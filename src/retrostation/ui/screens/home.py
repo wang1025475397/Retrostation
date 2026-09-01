@@ -22,6 +22,7 @@ from ..art import ArtProvider
 from ..painter import Painter
 from ..widgets import button_bar, page_header
 from ...core.theme import COLORS
+from .games import cover_art
 
 @dataclass(frozen=True)
 class Tile:
@@ -42,9 +43,11 @@ def draw(
     info_subtitle: str,
     info_right: str,
     previews: list[object],
-    hints: list[tuple[str, str]],
+    preview_index: int = -1,
+    hints: list[tuple[str, str]] | None = None,
 ) -> None:
     m = painter.metrics
+    hints = hints or []
     page_header(
         painter,
         title=painter.translator("home.title"),
@@ -63,7 +66,10 @@ def draw(
 
     _carousel(painter, art, tiles, index)
     _info(painter, info_title, info_subtitle, info_right)
-    _preview(painter, art, previews)
+    # 单屏模式下预览画在底部 detail strip（见 App._draw_detail_strip），
+    # 这里跳过以免与 strip 重叠；双屏顶部屏仍照常显示预览。
+    if not getattr(painter, "single", False):
+        _preview(painter, art, previews, preview_index)
     button_bar(painter, hints)
 
 
@@ -139,7 +145,8 @@ def _info(painter: Painter, title: str, subtitle: str, right: str) -> None:
         painter.text((m.width - m.u(16), y), right, size=12, fill=COLORS.text_dim, anchor="rm")
 
 
-def _preview(painter: Painter, art: ArtProvider, previews: list[object]) -> None:
+def _preview(painter: Painter, art: ArtProvider, previews: list[object],
+             selected: int = -1) -> None:
     m = painter.metrics
     y = m.platform_preview_y
     painter.text((m.u(16), y + m.u(14)), painter.translator("home.preview"), size=11,
@@ -153,10 +160,14 @@ def _preview(painter: Painter, art: ArtProvider, previews: list[object]) -> None
         )
         return
 
-    x = m.u(66)
-    for game in previews:
-        bitmap = art.thumbnail(game, m.u(62), m.u(46))
-        if bitmap is None:
-            bitmap = art.placeholder(game.key, m.u(62), m.u(46))
-        painter.image_fit(bitmap, (x, y, m.u(62), m.u(46)))
-        x += m.u(70)
+    x = m.u(78)
+    for position, game in enumerate(previews):
+        box = (x, y, m.u(84), m.u(63))
+        # 无封面直接画「无封面」空板，不再生成假占位图（与游戏列表一致）。
+        cover_art(painter, art, game, box)
+        if position == selected:
+            painter.rounded_rect(
+                (x - m.u(2), y - m.u(2), m.u(84) + m.u(4), m.u(63) + m.u(4)),
+                radius=m.u(5), outline=COLORS.accent,
+            )
+        x += m.u(92)

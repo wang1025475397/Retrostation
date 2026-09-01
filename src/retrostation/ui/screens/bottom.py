@@ -40,14 +40,26 @@ class Meta:
 def draw(painter: Painter, art: ArtProvider, game: Game | None, meta: Meta | None, *,
          key_label: str, hints: list[tuple[str, str]],
          video_frame=None, video_progress: float | None = None,
-         clip_pending: bool = False) -> None:
+         clip_pending: bool = False, system_desc: str = "",
+         game_count: int | None = None) -> None:
     m = painter.metrics
     painter.clear()
-    _title_bar(painter, meta, key_label)
+    _title_bar(painter, meta, key_label, game_count)
 
     if game is None or meta is None:
-        painter.text((m.width // 2, m.height // 2), painter.translator("games.empty"),
-                     size=14, fill=(74, 74, 80, 255), anchor="mm")
+        # 平台总览（游戏库）：显示当前平台的介绍（多语言 desc），而非内部游戏。
+        # games.empty 只在进入某个平台、且该平台确实没有任何游戏时才出现。
+        desc = (system_desc or "").strip()
+        if desc:
+            y = m.bottom_title_h + m.body_padding
+            for line in painter.wrap_text(desc, size=13,
+                                          max_width=m.width - 2 * m.u(12), max_lines=10):
+                painter.text((m.u(12), y), line, size=13, fill=COLORS.text_dim, anchor="la")
+                y += m.u(22)
+        else:
+            painter.text((m.width // 2, (m.bottom_title_h + m.height) // 2),
+                         painter.translator("home.empty"),
+                         size=14, fill=(74, 74, 80, 255), anchor="mm")
         _hints(painter, hints)
         return
 
@@ -60,7 +72,8 @@ def draw(painter: Painter, art: ArtProvider, game: Game | None, meta: Meta | Non
     _hints(painter, hints)
 
 
-def _title_bar(painter: Painter, meta: Meta | None, key_label: str) -> None:
+def _title_bar(painter: Painter, meta: Meta | None, key_label: str,
+               game_count: int | None = None) -> None:
     m = painter.metrics
     painter.rect((0, 0, m.width, m.bottom_title_h), fill=COLORS.panel)
     painter.rect((0, m.bottom_title_h - 1, m.width, 1), fill=COLORS.border)
@@ -71,7 +84,12 @@ def _title_bar(painter: Painter, meta: Meta | None, key_label: str) -> None:
         painter.text((x + m.u(32), m.u(16)), _STAR + " " + painter.translator("btn.favorite"),
                      size=10, fill=COLORS.accent, anchor="mm")
         x += m.u(74)
-    painter.text((x, m.bottom_title_h // 2), f"{key_label} · {painter.translator('bottom.detail')}",
+    # 平台总览（无游戏选中）时标题栏显示该平台的游戏数量。
+    if meta is None and game_count is not None:
+        label = f"{key_label} · {painter.translator('bottom.game_count', count=game_count)}"
+    else:
+        label = f"{key_label} · {painter.translator('bottom.detail')}"
+    painter.text((x, m.bottom_title_h // 2), label,
                  size=14, fill=COLORS.text, anchor="lm")
 
 

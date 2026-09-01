@@ -83,6 +83,12 @@ class Session:
     filter: str = "all"
     sort: str = "name"
 
+    #: 平台总览的预览条选中状态（SELECT 进入/退出，左右移动，A 进入游戏）。
+    preview_mode: bool = False
+    preview_index: int = 0
+    #: preview_games() 的每帧缓存；任何输入都会走 invalidate() 清掉。
+    _preview_cache: list | None = None
+
     modal: str = MODAL_NONE
     menu_index: int = 0
     exit_selected: int = 0
@@ -143,6 +149,7 @@ class Session:
         scan finished.
         """
         self._visible = None
+        self._preview_cache = None
 
     def _build_games(self) -> list[Game]:
         key = self.current_system_key()
@@ -185,6 +192,27 @@ class Session:
         if not games:
             return None
         return games[self.game_index % len(games)]
+
+    # -- preview strip ----------------------------------------------------- #
+
+    def preview_games(self) -> list[Game]:
+        """预览条内容：当前列表的前 6 个，按 最近游玩 > 收藏 > 名称 排序。
+
+        与 ``games()`` 同源（尊重筛选），但独立重排：预览优先露出玩家
+        最近玩过的和收藏的。返回副本，不影响游戏列表自身的顺序。
+        """
+        if self._preview_cache is None:
+            games = sorted(self.games(), key=self._preview_order)
+            self._preview_cache = games[:6]
+        return self._preview_cache
+
+    @staticmethod
+    def _preview_order(game: Game) -> tuple[int, float, str]:
+        if game.last_played:
+            return (0, -game.last_played.timestamp(), "")
+        if game.favorite:
+            return (1, 0.0, game.sort_key.casefold())
+        return (2, 0.0, game.sort_key.casefold())
 
     # ------------------------------------------------------------------ #
     # Resume (DESIGN §8.1 step ① / §8.2)
@@ -245,6 +273,7 @@ class Session:
     def handle(self, event: InputEvent) -> Outcome:
         """Dispatch one event; the UI redraws when ``Outcome.redraw`` is set."""
         self._visible = None  # any input may change what is on screen
+        self._preview_cache = None  # 换平台后预览条必须换成新平台的预览
         if self.modal == MODAL_EXIT:
             return self._handle_exit_modal(event)
         if self.modal == MODAL_MENU:
@@ -266,8 +295,34 @@ class Session:
         if not event.is_press:
             return Outcome()
 
-        if action in (InputAction.UP, InputAction.DOWN):
-            return self._move_platform(1 if action is InputAction.DOWN else -1)
+        if self.preview_mode:
+            # 预览行：左右移动选中，上键回平台行，A 进入游戏。
+            if action in (InputAction.LEFT, InputAction.RIGHT, InputAction.L1, InputAction.R1):
+                step = 1 if action in (InputAction.RIGHT, InputAction.R1) else -1
+                count = len(self.preview_games())
+                if count:
+                    self.preview_index = max(0, min(count - 1, self.preview_index + step))
+                return Outcome(redraw=True)
+            if action is InputAction.A:
+                return self._enter_preview_game()
+            if action in (InputAction.UP, InputAction.B):
+                self.preview_mode = False
+                return Outcome(redraw=True)
+            if action is InputAction.START:
+                return self._open_menu()
+            if action is InputAction.MENU:
+                return self._open_exit_dialog()
+            return Outcome()
+
+        # 平台行：上/左右切换平台，下键进入预览选择。
+        if action is InputAction.DOWN:
+            if self.preview_games():
+                self.preview_mode = True
+                self.preview_index = 0
+                return Outcome(redraw=True)
+            return Outcome()
+        if action is InputAction.UP:
+            return self._move_platform(-1)
         if action in (InputAction.LEFT, InputAction.RIGHT, InputAction.L1, InputAction.R1):
             step = 1 if action in (InputAction.RIGHT, InputAction.R1) else -1
             return self._move_platform(step)
@@ -277,6 +332,26 @@ class Session:
             return self._open_menu()
         if action is InputAction.MENU:
             return self._open_exit_dialog()
+        return Outcome()
+
+    def _enter_preview_game(self) -> Outcome:
+        """直接启动预览选中的游戏。
+
+        仍然先把视图切到该游戏（view / game_index），这样退出模拟器后的
+        「回到上次玩的地方」记录的是这个游戏，而不是平台轮播。
+        """
+        previews = self.preview_games()
+        if not previews:
+            return Outcome()
+        target = previews[min(self.preview_index, len(previews) - 1)]
+        games = self.games()
+        for position, game in enumerate(games):
+            if game.path == target.path:
+                self.view = VIEW_GAMES
+                self.layout = self.config.layout
+                self.game_index = position
+                self.preview_mode = False
+                return Outcome(launch=game)
         return Outcome()
 
     def _move_platform(self, step: int) -> Outcome:

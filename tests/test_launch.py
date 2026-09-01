@@ -48,12 +48,13 @@ def _enter_fc(app: App) -> None:
     """Walk the home page to FC and open it.
 
     The aggregates (ALL / FAV / RECENT) come first, so plain "press A" lands on
-    ALL -- tests that care which system they are in have to walk down.
+    ALL -- tests that care which system they are in have to walk right.
+    (DOWN now enters the preview strip, so platform navigation is horizontal.)
     """
     platform = app.platform
     steps = app.session.system_keys().index("FC")
     platform.send(
-        *(InputEvent(InputAction.DOWN) for _ in range(steps)),
+        *(InputEvent(InputAction.RIGHT) for _ in range(steps)),
         InputEvent(InputAction.A),
     )
     app.run(max_frames=1)

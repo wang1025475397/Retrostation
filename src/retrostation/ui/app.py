@@ -29,7 +29,7 @@ from ..launcher.launch import LaunchError, build_plan
 from ..platform.base import InputAction, InputEvent, InputKind, Platform
 from .art import ArtProvider
 from .painter import Painter
-from .session import MODAL_EXIT, MODAL_MENU, Session, VIEW_GAMES
+from .session import MODAL_EXIT, MODAL_MENU, Session, VIEW_GAMES, VIEW_PLATFORMS
 from .screens import bottom, games, home, menu
 from .widgets import button_bar, dialog, status_bar, toast
 
@@ -252,7 +252,14 @@ class App:
         """
         # The settings dialog can switch video off while we are running.
         self._video.configure(enabled=self.config.bottom_video)
-        game = self.session.current_game() if self.session.view == VIEW_GAMES else None
+        game = None
+        if self.session.view == VIEW_GAMES:
+            game = self.session.current_game()
+        elif self.session.preview_mode and self.session.view == VIEW_PLATFORMS:
+            # 双屏预览选中：下屏的游戏详情面板同样播放该游戏的片段。
+            previews = self.session.preview_games()
+            if previews:
+                game = previews[min(self.session.preview_index, len(previews) - 1)]
         self._video.select(game)
 
     def _fire_ready(self) -> None:
@@ -490,12 +497,19 @@ class App:
             info_subtitle=self._info_subtitle(key),
             info_right=self._info_right(key),
             previews=self._previews(key),
-            hints=[
-                ("A", self.translator("btn.enter")),
-                ("Y", self.translator("btn.favorite")),
-                ("START", self.translator("btn.menu")),
-            ],
+            preview_index=session.preview_index if session.preview_mode else -1,
+            hints=self._platform_hints(),
         )
+
+    def _platform_hints(self) -> list[tuple[str, str]]:
+        """平台总览的按键提示；预览选中模式换成预览操作的提示。"""
+        if self.session.preview_mode:
+            return [("A", self.translator("btn.enter")),
+                    ("UP", self.translator("btn.back")),
+                    ("START", self.translator("btn.menu"))]
+        return [("A", self.translator("btn.enter")),
+                ("DOWN", self.translator("home.preview")),
+                ("START", self.translator("btn.menu"))]
 
     def _draw_games(self, painter: Painter, *, highlight: bool = True) -> int:
         session = self.session
@@ -568,8 +582,32 @@ class App:
                              fill=COLORS.panel, outline=COLORS.border)
 
         if session.view != VIEW_GAMES:
-            painter.text((x + w // 2, y + h // 2), painter.translator("games.empty"),
-                         size=13, fill=COLORS.text_dim, anchor="mm")
+            # 平台总览（游戏库）：显示当前选中平台的预览，而非「这里还没有游戏」。
+            # games.empty 只在进入某个平台、且该平台确实没有任何游戏时才应出现。
+            key = session.current_system_key()
+            painter.text((x + m.u(14), y + m.u(22)),
+                         display_name(key, self.translator.language),
+                         size=14, fill=COLORS.text, anchor="lm")
+            count = self._tile_subtitle(key)
+            if count:
+                painter.text((x + m.u(14), y + m.u(44)), str(count),
+                             size=12, fill=COLORS.text_dim, anchor="lm")
+            previews = self._previews(key)
+            selected = session.preview_index if session.preview_mode else -1
+            px = x + m.u(14)
+            py = y + m.u(60)
+            pw, ph = m.u(88), m.u(50)
+            gap = m.u(8)
+            for position, preview_game in enumerate(previews[:6]):
+                games.cover_art(painter, self.art, preview_game, (px, py, pw, ph))
+                if position == selected:
+                    painter.rounded_rect(
+                        (px - m.u(2), py - m.u(2), pw + m.u(4), ph + m.u(4)),
+                        radius=m.u(5), outline=COLORS.accent,
+                    )
+                px += pw + gap
+                if px + pw > x + w:
+                    break
             return
 
         game = session.current_game()
@@ -635,20 +673,35 @@ class App:
 
     def _draw_bottom(self, painter: Painter) -> None:
         session = self.session
-        game = session.current_game() if session.view == VIEW_GAMES else None
+        key = session.current_system_key()
+        # 双屏预览选中：详情面板展示预览选中的游戏（渲染路径与游戏详情相同）。
+        previewing = session.preview_mode and session.view == VIEW_PLATFORMS
+        if previewing:
+            previews = session.preview_games()
+            game = previews[min(session.preview_index, len(previews) - 1)] if previews else None
+        else:
+            game = session.current_game() if session.view == VIEW_GAMES else None
+
         meta = self._meta(game) if game is not None else None
         frame = self._video.frame() if game is not None else None
+        # 平台总览的工具栏标题带上该平台的游戏数量；聚合视图没有单一数量。
+        game_count = (
+            self.library.rom_count(key)
+            if game is None and key not in ("ALL", "FAV", "RECENT") else None
+        )
 
         bottom.draw(
             painter,
             self.art,
             game,
             meta,
-            key_label=display_name(session.current_system_key(), self.translator.language),
-            hints=self._bottom_hints(),
+            key_label=display_name(key, self.translator.language),
+            hints=self._platform_hints() if previewing else self._bottom_hints(),
             video_frame=frame,
             video_progress=self._video.progress() if frame is not None else None,
             clip_pending=(game is not None and self._video.is_pending(game.key)),
+            system_desc=self._system_desc(key),
+            game_count=game_count,
         )
 
     # ------------------------------------------------------------------ #
@@ -679,9 +732,10 @@ class App:
         return str(self.library.rom_count(key))
 
     def _info_subtitle(self, key: str) -> str:
+        """信息行副标题：标题已是平台名，这里改显该平台游戏数量，不再重复。"""
         if key in ("ALL", "FAV", "RECENT"):
             return ""
-        return display_name(key, self.translator.language)
+        return self.translator("bottom.game_count", count=self.library.rom_count(key))
 
     def _info_right(self, key: str) -> str:
         if key in ("ALL", "FAV", "RECENT"):
@@ -690,9 +744,29 @@ class App:
         return "standalone" if definition.is_standalone else "RetroArch"
 
     def _previews(self, key: str) -> list[Game]:
+        """预览条：与游戏列表同源（尊重筛选），按 最近游玩 > 收藏 > 名称 排序。"""
+        return self.session.preview_games()
+
+    def _system_desc(self, key: str) -> str:
+        """平台总览文本：简介（多语言 ``system.desc.*``）+ 核心 + 支持格式。
+
+        简介取自 ``assets/lang/*.json``：当前语言缺失时 Translator 自动回退到
+        ``en_US``，新增语言只需补一份翻译。核心与支持格式始终附加在后。
+        """
         if key in ("ALL", "FAV", "RECENT"):
-            return self.library.aggregate(key)[:6]
-        return self.library.resolve_all(key)[:6]
+            return ""  # 聚合视图没有单一平台介绍
+        lines: list[str] = []
+        # 固件目录名是大写（如 ``FC``），lang 里的 key 是表内小写（``fc``）。
+        missing = f"system.desc.{key.casefold()}"
+        desc = self.translator.t(missing)
+        if desc != missing:
+            lines.append(desc)
+        definition = lookup(key)
+        lines.append(f"{self.translator('bottom.core')}: {definition.core_label}")
+        lines.append(
+            f"{self.translator('bottom.formats')}: {', '.join(definition.extensions)}"
+        )
+        return "\n".join(lines)
 
     def _system_title(self) -> str:
         return display_name(self.session.current_system_key(), self.translator.language)
