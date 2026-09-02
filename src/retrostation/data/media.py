@@ -666,3 +666,35 @@ def fit_bitmap(bitmap: object, width: int, height: int) -> object:
     if image.mode != "RGBA":
         image = image.convert("RGBA")
     return image
+
+
+def cover_bitmap(bitmap: object, width: int, height: int) -> object:
+    """Scale to *fill* ``width x height``, cropping whatever overflows.
+
+    The counterpart of :func:`fit_bitmap`, which letterboxes.  A backdrop has to
+    fill its panel: one that leaves the background colour showing along two
+    edges reads as a broken picture rather than as a wide one.
+
+    Upscaling is allowed here on purpose.  It is the one place a slightly soft
+    image cannot be told from a sharp one -- it sits behind everything, heavily
+    dimmed -- and a pack's screenshot is often smaller than the panel anyway.
+    """
+    from PIL import Image
+
+    try:
+        resample = Image.Resampling.LANCZOS
+    except AttributeError:
+        resample = Image.LANCZOS
+
+    image: Image.Image = bitmap  # type: ignore[assignment]
+    scale = max(width / image.width, height / image.height)
+    if scale != 1.0:
+        size = (max(1, round(image.width * scale)), max(1, round(image.height * scale)))
+        image = image.resize(size, resample)
+    if image.width > width or image.height > height:
+        left = max(0, (image.width - width) // 2)
+        top = max(0, (image.height - height) // 2)
+        image = image.crop((left, top, left + width, top + height))
+    if image.mode != "RGBA":
+        image = image.convert("RGBA")
+    return image

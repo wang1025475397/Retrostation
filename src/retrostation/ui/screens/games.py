@@ -63,6 +63,57 @@ def cover_art(
     painter.image_fit(_dimmed(painter, bitmap, opacity) if opacity < 255 else bitmap, box)
 
 
+#: ``(game key, w, h) -> dimmed backdrop``.  Kept apart from ``_DIM_CACHE``
+#: below: these are panel-sized, so a handful of them would crowd out the small
+#: cover copies the carousel re-dims on every frame.
+_BACKDROP_DIM: dict[tuple, object] = {}
+_BACKDROP_LIMIT = 4
+
+#: How far the backdrop is faded.  It sits under text, so it has to stay quiet:
+#: bright enough to read as a picture, dim enough to read the list on top.
+_BACKDROP_OPACITY = 96
+
+#: Alpha of a row / card while a backdrop is showing through it.  Opaque would
+#: simply hide the backdrop; much lower and the text loses its ground.
+_PANEL_OVER_BACKDROP = 214
+
+
+def draw_backdrop(painter: Painter, art: ArtProvider, game: Game) -> None:
+    """Fill the panel with the game's own art, dimmed, behind everything else.
+
+    Called straight after the panel is cleared: the header, the rows and the
+    cards are then composited on top of it.  ``painter.backdrop`` records
+    whether there is one, which is how the panels below know to let it through.
+    """
+    width, height = painter.width, painter.height
+    bitmap = art.backdrop(game, width, height)
+    painter.backdrop = bitmap is not None
+    if bitmap is None:
+        return
+
+    key = (game.key, width, height)
+    faded = _BACKDROP_DIM.get(key)
+    if faded is None:
+        faded = painter.canvas.dim(bitmap, _BACKDROP_OPACITY)
+        if len(_BACKDROP_DIM) >= _BACKDROP_LIMIT:
+            _BACKDROP_DIM.clear()
+        _BACKDROP_DIM[key] = faded
+    painter.image(faded, (0, 0, width, height))
+
+
+def panel_fill(painter: Painter):
+    """What a row or card fills itself with.
+
+    Translucent only while a backdrop is in play: over the plain background it
+    would just be a slightly different shade of the same dark, and the text
+    would sit on nothing.
+    """
+    if not getattr(painter, "backdrop", False):
+        return COLORS.panel
+    red, green, blue, _alpha = COLORS.panel
+    return (red, green, blue, _PANEL_OVER_BACKDROP)
+
+
 def header(painter: Painter, *, title: str, subtitle: str, right: str) -> None:
     page_header(painter, title=title, subtitle=subtitle, right=right)
 
@@ -134,7 +185,7 @@ def _row(
         meta_color = (90, 66, 16, 255)
         index_color = (110, 82, 22, 255)
     else:
-        painter.rounded_rect(box, radius=m.u(6), fill=COLORS.panel)
+        painter.rounded_rect(box, radius=m.u(6), fill=panel_fill(painter))
         name_color = COLORS.text
         meta_color = COLORS.text_dim
         index_color = (92, 92, 99, 255)
@@ -223,9 +274,9 @@ def _card(
 
     if selected:
         box = (x - m.u(3), y - m.u(3), w + m.u(6), h + m.u(6))
-        painter.rounded_rect(box, radius=m.u(7), fill=COLORS.panel, outline=COLORS.accent, width=2)
+        painter.rounded_rect(box, radius=m.u(7), fill=panel_fill(painter), outline=COLORS.accent, width=2)
     else:
-        painter.rounded_rect(box, radius=m.u(7), fill=COLORS.panel, outline=COLORS.border)
+        painter.rounded_rect(box, radius=m.u(7), fill=panel_fill(painter), outline=COLORS.border)
 
     art_h = h - name_h
     cover_art(painter, art, game, (x + 1, y + 1, w - 2, art_h))
@@ -338,7 +389,7 @@ def _cover_card(
     x, y, w, h = box
     painter.rounded_rect(
         box, radius=m.u(8),
-        fill=COLORS.panel,
+        fill=panel_fill(painter),
         outline=COLORS.accent if selected else COLORS.border,
         width=2 if selected else 1,
     )

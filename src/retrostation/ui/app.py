@@ -392,7 +392,34 @@ class App:
     def _struct_key(self) -> tuple:
         """State signature with the selection cursor removed."""
         key = self._state_key()
-        return key[:3] + key[4:]  # drop session.game_index (position 3)
+        # Drop session.game_index (position 3) -- moving the cursor within a
+        # page is cheap and repainted on top.  But the backdrop (if any) is
+        # painted under everything, so it must go in the key: a different game
+        # means a different backdrop, and without it the cached panel would
+        # simply hide the new one.
+        return key[:3] + key[4:] + (self._backdrop_key(),)
+
+    def _backdrop_key(self) -> object:
+        """The backdrop behind the current game, or None when there is none.
+
+        Cheap to recompute: it reads two asset paths already resolved on the
+        game, never decodes.  Returning the asset path (not just a flag) means
+        two games that both have a fanart invalidate the cache only when the
+        actual picture changes.
+        """
+        if self.session.view != VIEW_GAMES:
+            return None
+        games = self.session.games()
+        if not games:
+            return None
+        index = self.session.game_index
+        if not (0 <= index < len(games)):
+            return None
+        game = games[index]
+        for kind in ("fanart", "screenshot"):
+            if game.asset(kind) is not None:
+                return (kind, game.asset(kind))
+        return ("none", game.key)
 
     def _struct_changed(self) -> bool:
         return self._top_struct != self._struct_key()
@@ -517,6 +544,7 @@ class App:
         all_games = session.games()
         title = self._system_title()
         hints = games.footer_hints(painter, session.layout, self.translator)
+        painter.backdrop = False
 
         if not all_games:
             games.header(painter, title=title, subtitle="0", right="")
@@ -531,6 +559,10 @@ class App:
         subtitle = str(len(all_games))
         right = (f"{self.translator('games.filter_' + session.filter)} · "
                  f"{self.translator('games.layout_' + session.layout)}")
+
+        index = session.game_index
+        if 0 <= index < len(all_games):
+            games.draw_backdrop(painter, self.art, all_games[index])
         games.header(painter, title=title, subtitle=subtitle, right=right)
 
         m = painter.metrics

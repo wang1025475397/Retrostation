@@ -33,6 +33,9 @@ class Painter:
         self.translator = translator
         self._fonts: dict[int, object] = {}
         self._ellipsis: dict[tuple[str, int, int], str] = {}
+        #: Set while a game's backdrop is in play, so panels know to go
+        #: translucent instead of hiding it (see ``ui.screens.games``).
+        self.backdrop = False
 
     # -- metrics shortcuts ------------------------------------------------- #
 
