@@ -274,6 +274,15 @@ class Session:
         """Dispatch one event; the UI redraws when ``Outcome.redraw`` is set."""
         self._visible = None  # any input may change what is on screen
         self._preview_cache = None  # 换平台后预览条必须换成新平台的预览
+
+        # The rocker works everywhere, menus included: it is the one control a
+        # player reaches for without looking at which screen they are on.
+        if event.is_press and event.action in (
+            InputAction.VOLUME_UP, InputAction.VOLUME_DOWN
+        ):
+            step = 1 if event.action is InputAction.VOLUME_UP else -1
+            return self._adjust_volume(step)
+
         if self.modal == MODAL_EXIT:
             return self._handle_exit_modal(event)
         if self.modal == MODAL_MENU:
@@ -489,6 +498,26 @@ class Session:
         self.notify(self.translator(f"games.layout_{self.layout}"))
         return Outcome(redraw=True)
 
+    #: Volume step for the rocker.  A hundred steps is far too fine for a button
+    #: you hold down, and 5 lands on the round numbers people expect.
+    _VOLUME_STEP = 5
+
+    def _adjust_volume(self, direction: int) -> Outcome:
+        """Move the preview volume and say where it landed.
+
+        The number on screen is the point: a rocker that changes nothing
+        audible right now (no clip on the selection) still has to answer, or it
+        reads as broken -- which is exactly how it felt before it was wired up.
+        """
+        current = int(self.config.video_volume)
+        value = max(0, min(100, current + direction * self._VOLUME_STEP))
+        if value != current:
+            self.config.video_volume = value
+            # Outlives the session, so the app persists it with the rest.
+            self.settings_dirty = True
+        self.notify(self.translator("toast.volume", value=value))
+        return Outcome(redraw=True)
+
     def _cycle_filter(self) -> Outcome:
         self.filter = FILTERS[(FILTERS.index(self.filter) + 1) % len(FILTERS)]
         self.game_index = 0
@@ -559,6 +588,8 @@ class Session:
             ]
         elif key == "language":
             self._cycle_language()
+        elif key == "video_sound":
+            self.config.video_sound = not self.config.video_sound
         elif key == "brightness":
             self._step_brightness(BRIGHTNESS_STEP)
         elif key == "status_bar":
@@ -570,12 +601,16 @@ class Session:
     def _adjust_menu(self, key: str, direction: int) -> Outcome:
         """Nudge a numeric row with LEFT/RIGHT.
 
-        Only the backlight is numeric; other rows ignore it rather than leave
-        the player wondering why nothing moved.
+        The backlight and the preview volume are the numeric rows; every other
+        row ignores this rather than leave the player wondering why nothing
+        moved.
         """
         if key == "brightness":
             self._step_brightness(direction * BRIGHTNESS_STEP)
             self.settings_dirty = True
+        elif key == "video_volume":
+            # Same path as the rocker, so both stay in step.
+            self._adjust_volume(direction)
         return Outcome(redraw=True)
 
     def _step_brightness(self, delta: int) -> None:
@@ -640,6 +675,12 @@ class Session:
             # reads the same whichever mode is active.
             ("bvideo", self.translator("menu.bvideo"),
              self.translator("value.on" if config.bottom_video else "value.off")),
+            # Sound belongs with the video rows: it is the soundtrack of the
+            # clip this pair of rows is about.
+            ("video_sound", self.translator("menu.video_sound"),
+             self.translator("value.on" if config.video_sound else "value.off")),
+            ("video_volume", self.translator("menu.video_volume"),
+             f"{int(config.video_volume)}"),
             ("sort", self.translator("menu.sort"), self.translator(f"value.sort_{self.sort}")),
             ("filter", self.translator("menu.filter"), self.translator(f"games.filter_{self.filter}")),
             ("theme", self.translator("menu.theme"), self.translator(f"value.theme_{config.theme}")),

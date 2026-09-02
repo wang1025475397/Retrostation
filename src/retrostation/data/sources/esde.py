@@ -28,6 +28,7 @@ from ...core.model import (
     Game,
     PartialDate,
 )
+from ..systems import esde_system_name
 from .base import MetadataSource, RawEntry
 
 # --------------------------------------------------------------------------- #
@@ -47,14 +48,35 @@ _MEDIA_BY_TAG: dict[str, str] = {
 }
 
 #: Elements we model.  Everything else is passed through untouched.
+#:
+#: ES-DE writes the singular ``<player>``; other frontends (and the scrapers
+#: that follow them) write ``<players>``.  Both have to be known, otherwise
+#: whichever we do not model is merely replayed verbatim on save and never
+#: reaches the UI.
 _KNOWN_TAGS = frozenset(
     {
         "path", "name", "sortname", "desc", "rating", "releasedate",
-        "developer", "publisher", "genre", "players",
+        "developer", "publisher", "genre", "players", "player",
         "playcount", "lastplayed", "favorite", "completed", "hidden",
         "kidgame", "broken",
         *_MEDIA_BY_TAG.keys(),
     }
+)
+
+#: Player count is spelled two ways; the singular one is ES-DE's own.
+_PLAYER_TAGS: tuple[str, ...] = ("players", "player")
+
+#: Order a ``<game>`` we write from scratch lists its elements in.
+#:
+#: Replaying an existing entry keeps whatever order the file already had, so
+#: this only applies to games we add ourselves -- and there it follows ES-DE's
+#: own ordering, because a gamelist that opens with ``<broken>`` and buries
+#: ``<path>`` halfway down may be valid XML but reads like nothing wrote it.
+_NEW_ENTRY_ORDER: tuple[str, ...] = (
+    "path", "name", "sortname", "desc",
+    "rating", "releasedate", "developer", "publisher", "genre", "players", "player",
+    "playcount", "lastplayed", "favorite", "completed", "hidden", "kidgame", "broken",
+    *(tag for tags in _MEDIA_TAGS.values() for tag in tags),
 )
 
 #: Provenance elements copied into ``Game.extra``.
@@ -109,7 +131,21 @@ class _GameElement:
 
 
 class ESDESource(MetadataSource):
-    """Reads and writes ``<system>/gamelist.xml``."""
+    """Reads and writes ``gamelist.xml``.
+
+    Two layouts, and the difference between them is only *where the root is*:
+
+    * **ES-DE root configured** (``config.metadata.esde_root`` points at the
+      folder holding ``gamelists/`` and ``downloaded_media/``) -- the gamelist
+      lives in ``<root>/gamelists/<system>/`` and media in
+      ``<root>/downloaded_media/<system>/``, both outside the ROM tree;
+    * **no root** (the normal case) -- the gamelist sits next to the ROMs in
+      ``<SYS>/gamelist.xml`` and media under ``<SYS>/media/``.
+
+    The sub-folder names are ES-DE's either way (``covers/``, ``screenshots/``,
+    ``videos/``, ``marquees/``, ``fanart/``), so a card moved from one layout
+    to the other needs no renaming.
+    """
 
     name = "esde"
     display_name = "ES-DE / EmulationStation"
@@ -118,15 +154,55 @@ class ESDESource(MetadataSource):
 
     FILENAME = "gamelist.xml"
 
+    def __init__(self, esde_root: Path | str | None = None) -> None:
+        """``esde_root`` is the ES-DE folder; ``None`` keeps everything in-ROM."""
+        self.esde_root = Path(esde_root) if esde_root else None
+
+    # ------------------------------------------------------------------ #
+    # Layout
+    # ------------------------------------------------------------------ #
+
+    def _esde_system(self, system: str) -> str:
+        """ES-DE's own spelling of ``system`` (``ps`` -> ``psx``)."""
+        return esde_system_name(system)
+
+    def gamelist_path(self, system_dir: Path) -> Path:
+        """Where this system's gamelist lives.
+
+        Without an ES-DE root that is the ROM directory.  With one, the
+        ES-DE tree wins -- but only once it actually holds a file: a card that
+        only ever had ``<SYS>/gamelist.xml`` keeps using it, and the very first
+        save is what creates the ES-DE copy.
+        """
+        local = system_dir / self.FILENAME
+        if self.esde_root is None:
+            return local
+        esde = self.esde_root / "gamelists" / self._esde_system(system_dir.name) / self.FILENAME
+        if esde.is_file() or not local.is_file():
+            return esde
+        return local
+
+    def media_roots(self, system: str, rom: Path) -> tuple[Path, ...]:
+        """Bases a relative media path is resolved against, best first.
+
+        ES-DE writes paths relative to the ROM directory, so that stays first;
+        a shared ES-DE tree is the second guess for the tools that write paths
+        relative to ``downloaded_media/<system>`` instead.
+        """
+        bases = [rom.parent]
+        if self.esde_root is not None:
+            bases.append(self.esde_root / "downloaded_media" / self._esde_system(system))
+        return tuple(dict.fromkeys(bases))
+
     # ------------------------------------------------------------------ #
     # Discovery / reading
     # ------------------------------------------------------------------ #
 
     def detect(self, system_dir: Path) -> bool:
-        return (system_dir / self.FILENAME).is_file()
+        return self.gamelist_path(system_dir).is_file()
 
     def load(self, system_dir: Path) -> dict[str, RawEntry]:
-        path = system_dir / self.FILENAME
+        path = self.gamelist_path(system_dir)
         try:
             tree = ET.parse(path)
         except (OSError, ET.ParseError):
@@ -194,7 +270,7 @@ class ESDESource(MetadataSource):
         game.developer = str(raw.get("developer", "") or "").strip() or None
         game.publisher = str(raw.get("publisher", "") or "").strip() or None
         game.genres = self._split_list(raw.get("genre"))
-        game.players = str(raw.get("players", "") or "").strip() or None
+        game.players = str(raw.get("players") or raw.get("player") or "").strip() or None
 
         game.favorite = self._bool(raw.get("favorite"))
         game.play_count = self._int(raw.get("playcount"), 0)
@@ -202,11 +278,13 @@ class ESDESource(MetadataSource):
         game.completed = self._bool(raw.get("completed"))
         game.hidden = self._bool(raw.get("hidden"))
 
-        # ES-DE media paths are relative to the ROM's own directory.
+        # ES-DE media paths are relative to the ROM's own directory; with a
+        # shared ES-DE tree they may instead sit under downloaded_media/<sys>.
+        bases = self.media_roots(system, rom)
         for kind, text in raw.media.items():
             if not text:
                 continue
-            game.set_asset(kind, _resolve_path(rom.parent, text))
+            game.set_asset(kind, _resolve_path(bases, text))
 
         for tag in _PROVENANCE_TAGS:
             value = str(raw.get(tag, "") or "").strip()
@@ -240,8 +318,18 @@ class ESDESource(MetadataSource):
             fields["publisher"] = game.publisher
         if game.genres:
             fields["genre"] = ", ".join(game.genres)
+        # Keep whichever spelling the file already used, so an edit lands in the
+        # tag that is really there instead of adding a second, ignored one.
+        player_tags = [tag for tag in _PLAYER_TAGS if previous and tag in previous.fields]
         if game.players:
-            fields["players"] = game.players
+            for tag in player_tags or _PLAYER_TAGS[:1]:
+                fields[tag] = game.players
+        else:
+            # Cleared: blank every spelling, otherwise the stale value is
+            # replayed verbatim from the stored element list.
+            for tag in _PLAYER_TAGS:
+                if tag in fields:
+                    fields[tag] = ""
         if game.completed:
             fields["completed"] = "true"
         if game.hidden:
@@ -261,8 +349,8 @@ class ESDESource(MetadataSource):
     # ------------------------------------------------------------------ #
 
     def save(self, system_dir: Path, entries: dict[str, RawEntry]) -> None:
-        target = system_dir / self.FILENAME
-        backup = system_dir / f"{self.FILENAME}.bak"
+        target = self.gamelist_path(system_dir)
+        backup = target.with_name(f"{self.FILENAME}.bak")
 
         root = ET.Element("gameList")
         for key in sorted(entries):
@@ -271,7 +359,7 @@ class ESDESource(MetadataSource):
         _indent(root)
         tree = ET.ElementTree(root)
 
-        system_dir.mkdir(parents=True, exist_ok=True)
+        target.parent.mkdir(parents=True, exist_ok=True)
         if target.is_file():
             try:
                 backup.write_bytes(target.read_bytes())
@@ -279,7 +367,7 @@ class ESDESource(MetadataSource):
                 pass  # a failed backup must not block the save
 
         payload = ET.tostring(root, encoding="utf-8", xml_declaration=True)
-        fd, tmp_name = tempfile.mkstemp(dir=str(system_dir), prefix=".gamelist-", suffix=".tmp")
+        fd, tmp_name = tempfile.mkstemp(dir=str(target.parent), prefix=".gamelist-", suffix=".tmp")
         try:
             with os.fdopen(fd, "wb") as handle:
                 handle.write(payload + b"\n")
@@ -318,8 +406,12 @@ class ESDESource(MetadataSource):
                     written.add(tag)
                     break
 
-        # Newly added fields go last, in a stable order.
-        for tag in sorted(_KNOWN_TAGS - set(written)):
+        # Fields we add ourselves go last, in ES-DE's own order rather than
+        # alphabetically: a gamelist we generate should read like one it wrote.
+        pending = set(_KNOWN_TAGS) - written
+        for tag in (*_NEW_ENTRY_ORDER, *sorted(pending - set(_NEW_ENTRY_ORDER))):
+            if tag not in pending:
+                continue
             value = raw.fields.get(tag)
             if value not in (None, ""):
                 ET.SubElement(element, tag).text = str(value)
@@ -332,11 +424,15 @@ class ESDESource(MetadataSource):
 # --------------------------------------------------------------------------- #
 
 
-def _resolve_path(base: Path, text: str) -> Path | None:
+def _resolve_path(bases: tuple[Path, ...], text: str) -> Path | None:
     """Resolve a media path the way ES-DE does, keeping sub-directories.
 
-    Returns ``None`` for paths that do not exist on disk: a stale gamelist
-    entry must not shadow our own media directories (DESIGN §6.8.5 level 2).
+    ``bases`` are tried in order -- the ROM directory first, then the ES-DE
+    ``downloaded_media/<system>`` folder when one is configured -- because
+    tools disagree on what the paths in ``gamelist.xml`` are relative to.
+
+    Returns ``None`` when nothing exists on disk: a stale gamelist entry must
+    not shadow our own media directories (DESIGN §6.8.5 level 2).
     """
     text = text.strip()
     if not text:
@@ -346,8 +442,13 @@ def _resolve_path(base: Path, text: str) -> Path | None:
         return expanded if expanded.is_file() else None
 
     path = Path(text)
-    resolved = path if path.is_absolute() else (base / path).resolve()
-    return resolved if resolved.is_file() else None
+    if path.is_absolute():
+        return path if path.is_file() else None
+    for base in bases:
+        resolved = (base / path).resolve()
+        if resolved.is_file():
+            return resolved
+    return None
 
 
 def _relative(asset: Path, rom_dir: Path) -> str:

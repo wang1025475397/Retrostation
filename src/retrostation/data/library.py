@@ -163,7 +163,9 @@ class Library:
 
         try:
             bundles = source_registry.load_system(
-                system_dir, names=self._config.metadata.sources
+                system_dir,
+                names=self._config.metadata.sources,
+                esde_root=self._config.metadata.esde_root,
             )
             games = source_registry.build_games(system_key, [rom.path for rom in roms], system_dir, bundles)
         except Exception:  # noqa: BLE001 - metadata must never break browsing
@@ -251,7 +253,7 @@ class Library:
             return False
 
         system_dir = self._platform.rom_root / system_key
-        source = source_registry.source_by_name(metadata.primary_write_source)
+        source = source_registry.source_by_name(metadata.primary_write_source, metadata.esde_root)
         if source is None or not source.writable:
             return self._save_sidecar(game, system_key)
 
@@ -259,10 +261,12 @@ class Library:
         # first save is what creates ``gamelist.xml`` on a card that never had
         # one (DESIGN §6.4, level 4 of the lookup order).
         entries = source.load(system_dir)
-        entry = entries.get(game.path.name)
         try:
-            updated = source.to_raw(game, entry)
-            source.save(system_dir, {game.path.name: updated})
+            entries[game.path.name] = source.to_raw(game, entries.get(game.path.name))
+            # Write the whole set back, never just this one entry: ``save``
+            # rebuilds the document from what it is handed, so a single entry
+            # would silently delete every other game in the system.
+            source.save(system_dir, entries)
         except Exception:  # noqa: BLE001 - a failed save must not kill the app
             log.exception("failed to write metadata for %s", game.key)
             return False

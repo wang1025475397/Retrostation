@@ -12,10 +12,11 @@ The top screen (DSI-1) is the interactive main view; the bottom screen (DSI-2) i
 
 - **True dual-screen experience**: top screen shows the game list / grid / cover-flow; bottom screen prioritizes video and falls back to cover for media linkage.
 - **Three game views**: list / grid / cover-flow, cycled with the `X` button.
-- **Three media types**: cover `Imgs/` · video `video/` · Logo `logo/`; bottom-screen media area prefers video and automatically falls back to cover on failure.
-- **Interoperable metadata**: uses **`gamelist.xml` (ES-DE compatible)**; favorites / play count / last played are written back to gamelist, interoperable with ES-DE / Batocera.
-- **Pluggable data sources**: `data/sources/` plugin layer, currently with built-in ES-DE (read-write) and reserved Pegasus (read-only); adding a new format only needs one new file, UI and scanner unchanged.
-- **Bottom-screen video**: ffmpeg pipeline software decoding; automatic fallback to cover when no video / decode fails; measured ~4.5% single core.
+- **Two metadata formats**: **ES-DE `gamelist.xml` (read + write)** and **Pegasus `metadata.pegasus.txt` (read-only)**, merged by priority; the bottom panel names the file the current entry actually came from.
+- **ES-DE media layout**: cover · video · logo · screenshot · fanart, in ES-DE's own folder names (`covers/`, `videos/`, `marquees/`, `screenshots/`, `fanart/`). Works with ES-DE's separate tree (`gamelists/` + `downloaded_media/`) or with everything inside the ROM directory (`<SYS>/gamelist.xml` + `<SYS>/media/`) — **same folder names either way, so moving between the two needs no renaming**.
+- **Interoperable play state**: favorites / play count / last played are written back to `gamelist.xml`, interoperable with ES-DE / Batocera.
+- **Pluggable data sources**: `data/sources/` plugin layer; a new format is one new file, with the UI and scanner untouched.
+- **Bottom-screen video with sound**: ffmpeg pipeline software decoding; the soundtrack plays through ALSA and the **volume rocker** adjusts it (±5, takes effect at once); automatic fallback to cover when there is no video or decoding fails; measured ~4.5% single core.
 - **Fast cold start, light footprint**: index cache + thumbnail cache, cold start to first frame ~1.2 s, resident memory ~40 MB.
 - **Instant settings persistence**: theme / brightness / language / status bar written immediately, no restart needed.
 - **Cross-platform ready**: only `platform/` is allowed platform-specific code; all dimensions go through theme tokens, preparing for a future Android app.
@@ -165,7 +166,7 @@ PYTHONPATH=src python3 -X utf8 scripts/video_selftest.py --system FC --ui /tmp/s
 | `RETROSTATION_KILL_OVERLAY` | 0 | Set to 1 to `pkill` leftover stock processes |
 | `RETROSTATION_FONT` | auto | Custom font path, overrides default source-han-sans-cn |
 
-### Video-related config (`config.json`)
+### Video / sound / metadata config (`config.json`)
 
 | Key | Default | Description |
 |---|---|---|
@@ -173,8 +174,16 @@ PYTHONPATH=src python3 -X utf8 scripts/video_selftest.py --system FC --ui /tmp/s
 | `video_size` | `[288, 216]` | ffmpeg output size (decodes at actual bottom-screen media box size at runtime) |
 | `video_fps` | `15` | Decode/playback frame rate |
 | `bottom_refresh_ms` | `90` | Minimum redraw interval for static bottom-screen content |
+| `video_sound` | `true` | Preview sound switch; `false` mutes the bottom-screen clip |
+| `video_volume` | `70` | Preview volume 0–100, adjustable with the **volume rocker** (±5) |
+| `metadata.esde_root` | `""` | ES-DE root (the folder holding `gamelists/` and `downloaded_media/`); empty reads the in-ROM `<SYS>/gamelist.xml` + `<SYS>/media/` |
+| `metadata.sources` | `["esde", "pegasus"]` | Enabled data sources, in priority order |
 
-Video is probed in order `<system>/video/<rom>.mp4|webm|mkv|avi` → `Imgs/` → `media/videos/`; `gamelist.xml`'s `<video>` has highest priority.
+Media lookup order: the explicit path in `gamelist.xml` → the ES-DE type folders under the media
+root (`covers/`, `videos/`, …) → the older convention `Imgs/` · `video/` · `logo/` →
+one-folder-per-game packs (`media/<game>/`).
+
+> Full directory layouts and volume controls: sections 5 and 6 of [docs/USAGE.en.md](docs/USAGE.en.md).
 
 ---
 
@@ -248,6 +257,11 @@ Full guide see [docs/USAGE.md](docs/USAGE.md). The two most common things:
 
 ### Custom platform background & Logo (home carousel cards)
 
+> **Where the built-in art comes from**: the shipped platform backgrounds and logos come from the
+> **NeoStation frontend**'s theme art (sources: 1024×1024 square backgrounds, 820×330 transparent
+> logos), converted by `scripts/build_platform_art.py` into the formats this handheld decodes
+> fastest before being packed in: backgrounds as `256×256` WebP, logos as `256×103` PNG with alpha.
+
 Put files in SD card `retrostation/platform-art/`, auto-matched by system directory name (key), no config needed:
 
 ```
@@ -287,7 +301,7 @@ Cross-platform (Android) is a continuation of the reserved architecture directio
 |---|---|
 | [docs/DESIGN.md](docs/DESIGN.md) | Detailed design: real-device env test, architecture, dual-screen, render pipeline, input system, data layer & **data source plugin architecture**, launcher, visual spec, **cross-platform/Android reservation**, risks & milestones |
 | [docs/PROTOTYPE.md](docs/PROTOTYPE.md) | UI prototype: page state machine, key mapping, layout values, prototype→real mapping |
-| [docs/USAGE.md](docs/USAGE.md) | Player guide: UI overview, config files, core swap, platform art customization, default core mapping, multi-card switch |
+| [docs/USAGE.md](docs/USAGE.md) | Player guide: UI overview, config files, core swap, **media directory layout (ES-DE / Pegasus)**, **preview sound & volume**, platform art customization, default core mapping, multi-card switch |
 | [docs/USAGE.en.md](docs/USAGE.en.md) | English version of the player guide |
 
 ---
@@ -300,7 +314,7 @@ Cross-platform (Android) is a continuation of the reserved architecture directio
 | Display | `card0-DSI-1` + `card0-DSI-2`, both 640×480; compositor Weston(DRM) |
 | Runtime | Python 3.11.8 · Pillow 10.2.0 · SDL2 2.0.32 (**no evdev / requests**) |
 | Video decode | ffmpeg 4.4.4 (no hard decode) → SW decode 288×216@15fps ≈ 4.5% single core |
-| ROM | `/mnt/mmc/Roms/<SYS>/`; cover `Imgs/` · video `video/` · Logo `logo/` · `gamelist.xml` |
+| ROM | `/mnt/mmc/Roms/<SYS>/`; media `<SYS>/media/{covers,screenshots,videos,marquees,fanart}/`; metadata `gamelist.xml` (ES-DE) / `metadata.pegasus.txt` (Pegasus) |
 | Launch | `/mnt/mod/ctrl/RA_launch.sh <core.so> <rom>`; NDS/PSP/SATURN/DC use standalone emulators |
 | Input | Gamepad `/dev/input/event4`, touch `/dev/input/event1` |
 

@@ -26,13 +26,19 @@ __all__ = [
 ]
 
 
-def SOURCES() -> list[MetadataSource]:  # noqa: N802 - reads like a constant
-    """All registered sources, ordered by priority."""
-    return sorted((ESDESource(), PegasusSource()), key=lambda s: s.priority)
+def SOURCES(esde_root: str | Path | None = None) -> list[MetadataSource]:  # noqa: N802
+    """All registered sources, ordered by priority.
+
+    ``esde_root`` is the player's ES-DE folder (the one holding ``gamelists/``
+    and ``downloaded_media/``); it is handed to the sources that understand it
+    and ignored by the rest.  ``None`` means "no ES-DE installed", in which
+    case everything is read from inside the ROM directories.
+    """
+    return sorted((ESDESource(esde_root), PegasusSource()), key=lambda s: s.priority)
 
 
-def source_by_name(name: str) -> MetadataSource | None:
-    for source in SOURCES():
+def source_by_name(name: str, esde_root: str | Path | None = None) -> MetadataSource | None:
+    for source in SOURCES(esde_root):
         if source.name == name:
             return source
     return None
@@ -51,14 +57,18 @@ class _SourceBundle:
     entries: dict[str, RawEntry]
 
 
-def load_system(system_dir: Path, names: list[str] | None = None) -> list[_SourceBundle]:
+def load_system(
+    system_dir: Path,
+    names: list[str] | None = None,
+    esde_root: str | Path | None = None,
+) -> list[_SourceBundle]:
     """Load every enabled source for one system directory.
 
     A source that fails to parse is skipped, never fatal: one corrupt
     ``metadata.pegasus.txt`` must not hide the gamelist data.
     """
     bundles: list[_SourceBundle] = []
-    for source in SOURCES():
+    for source in SOURCES(esde_root):
         if names and source.name not in names:
             continue
         if not source.detect(system_dir):

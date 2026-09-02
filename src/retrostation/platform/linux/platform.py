@@ -16,7 +16,7 @@ from PIL import Image
 
 from ...core.theme import BASE_H, BASE_W, metrics_for
 from ...launcher.launch import write_launch_cmd
-from ..base import Canvas, FileEntry, InputEvent, Platform, VideoPipe
+from ..base import AudioPipe, Canvas, FileEntry, InputEvent, Platform, VideoPipe
 from .canvas import PilCanvas, save_bitmap
 from .display import SDLDisplay
 from .fonts import FontBook
@@ -255,6 +255,24 @@ class LinuxPlatform(Platform):
             return ffmpeg_pipe.FFmpegPipe(path, width=width, height=height, fps=fps)
         except (OSError, ValueError) as exc:
             log.warning("cannot decode %s: %s", path, exc)
+            return None
+
+    def open_audio_pipe(self, path: Path, *, volume: float = 1.0) -> AudioPipe | None:
+        """Sound the clip's track through ALSA; ``None`` when that is impossible.
+
+        Missing ``aplay``/``ffmpeg`` and clips with no audio track at all are
+        both ordinary, so every failure here is a debug log: the preview simply
+        stays silent, which is what it always used to be.
+        """
+        from .audio import AlsaAudioPipe, available
+
+        if not available():
+            log.debug("aplay/ffmpeg not available; preview stays silent")
+            return None
+        try:
+            return AlsaAudioPipe(path, volume=volume)
+        except (OSError, ValueError) as exc:
+            log.warning("cannot play audio for %s: %s", path, exc)
             return None
 
     def load_metrics(self, index: int = 0) -> object:

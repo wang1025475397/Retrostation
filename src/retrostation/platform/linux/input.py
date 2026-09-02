@@ -92,6 +92,10 @@ DEFAULT_KEYMAP: dict[int, InputAction] = {
     108: InputAction.DOWN,
     105: InputAction.LEFT,
     106: InputAction.RIGHT,
+    # Volume rocker (KEY_VOLUMEDOWN / KEY_VOLUMEUP).  These reach the frontend
+    # as ordinary key events, so without this the rocker does nothing at all.
+    114: InputAction.VOLUME_DOWN,
+    115: InputAction.VOLUME_UP,
 }
 
 #: Hat axis code -> ``(action when value < 0, action when value > 0)``.

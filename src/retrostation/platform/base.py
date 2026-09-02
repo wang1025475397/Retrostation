@@ -49,6 +49,12 @@ class InputAction(str, enum.Enum):
     SELECT = "select"
     MENU = "menu"    # long press = quit
 
+    #: The device's own volume rocker.  Not game buttons: while the frontend is
+    #: up they move the preview volume, which is the only thing here that makes
+    #: a sound of its own.
+    VOLUME_UP = "volume_up"
+    VOLUME_DOWN = "volume_down"
+
 
 class InputKind(str, enum.Enum):
     PRESS = "press"
@@ -318,6 +324,28 @@ class FileEntry:
     mtime: float = 0.0
 
 
+class AudioPipe(abc.ABC):
+    """A player that is sounding one clip's track (DESIGN §6.5).
+
+    Much smaller than :class:`VideoPipe`: there is no per-frame work to do, only
+    "stop".  A platform that cannot play sound never hands one out, and the
+    video then plays silently exactly as it always has.
+    """
+
+    @abc.abstractmethod
+    def close(self) -> None:
+        """Stop sounding.  Must be safe to call twice and must not raise."""
+
+    def set_volume(self, volume: float) -> None:
+        """Change the loudness of what is playing, 0.0-1.0.
+
+        Optional.  The default does nothing, which is right for a platform that
+        would have to rebuild its pipe to change volume: rebuilding means
+        waiting for the audio device again, and that stalls the frame loop -- so
+        the old volume simply stays until the next clip starts.
+        """
+
+
 # --------------------------------------------------------------------------- #
 # Platform
 # --------------------------------------------------------------------------- #
@@ -470,6 +498,16 @@ class Platform(abc.ABC):
         be opened): the caller then silently falls back to cover art, which is
         the behaviour DESIGN §6.5 asks for.  Implementations must return
         quickly -- this runs on the UI thread.
+        """
+        return None
+
+    def open_audio_pipe(self, path: Path, *, volume: float = 1.0) -> AudioPipe | None:
+        """Sound the track of ``path`` while its clip is being previewed.
+
+        ``None`` means this platform has no way to play sound, which is the
+        default and keeps every other platform (and the test double) exactly as
+        silent as before.  Implementations must return quickly -- this runs on
+        the UI thread, next to :meth:`open_video_pipe`.
         """
         return None
 

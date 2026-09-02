@@ -12,10 +12,11 @@ Linux 掌机**双屏游戏前端**，兼容单屏。基于 SDL2 + Pillow 渲染�
 
 - **真双屏体验**：上屏游戏列表 / 网格 / 封面轮播，下屏视频优先、缺则封面的媒体联动。
 - **游戏页三视图**：列表 / 网格 / 封面轮播，按 `X` 键循环切换。
-- **媒体三类**：封面 `Imgs/` · 视频 `video/` · Logo `logo/`；下屏媒体区视频优先，播放失败自动回退封面。
-- **互通的元数据**：使用 **`gamelist.xml`（ES-DE 兼容）**，收藏 / 游玩次数 / 上次游玩写回 gamelist，与 ES-DE / Batocera 互通。
-- **数据源可插拔**：`data/sources/` 插件层，当前内置 ES-DE（读写）、预留 Pegasus（只读）；新增格式只加一个文件，UI 与扫描器不动。
-- **副屏视频**：ffmpeg 管道软件解码，无视频 / 解码失败自动回退封面；实测约 4.5% 单核。
+- **两套元数据格式**：**ES-DE `gamelist.xml`（读 + 写）** 与 **Pegasus `metadata.pegasus.txt`（只读）**，按优先级合并，下屏标注当前条目实际来自哪个文件。
+- **ES-DE 媒体布局**：封面 · 视频 · Logo · 截图 · 背景图，目录名与 ES-DE 一致（`covers/`、`videos/`、`marquees/`、`screenshots/`、`fanart/`）。既支持 ES-DE 的独立目录树（`gamelists/` + `downloaded_media/`），也支持放在 ROM 目录内（`<SYS>/gamelist.xml` + `<SYS>/media/`）——**两者内部目录名相同，互相搬家不用改文件名**。
+- **互通的游玩状态**：收藏 / 游玩次数 / 上次游玩写回 `gamelist.xml`，与 ES-DE / Batocera 互通。
+- **数据源可插拔**：`data/sources/` 插件层，新增格式只加一个文件，UI 与扫描器不动。
+- **副屏视频带声音**：ffmpeg 管道软件解码，音轨经 ALSA 同步播放，**机身音量键**可直接调（±5，即时生效）；无视频 / 解码失败自动回退封面；实测约 4.5% 单核。
 - **冷启动快、常驻轻**：索引缓存 + 缩略图缓存，冷启动到首帧约 1.2 s，常驻内存约 40 MB。
 - **设置即时落盘**：主题 / 明暗 / 语言 / 背光 / 状态栏改完即写，无需重启。
 - **跨平台预留**：只有 `platform/` 允许平台代码，尺寸全走 theme token，为后续 Android App 做准备。
@@ -164,7 +165,7 @@ PYTHONPATH=src python3 -X utf8 scripts/video_selftest.py --system FC --ui /tmp/s
 | `RETROSTATION_KILL_OVERLAY` | 0 | 设为 1 会 `pkill` 残留原厂进程 |
 | `RETROSTATION_FONT` | 自动 | 自定义字体路径，覆盖默认 source-han-sans-cn |
 
-### 视频相关配置（`config.json`）
+### 视频 / 声音 / 元数据相关配置（`config.json`）
 
 | 键 | 默认 | 说明 |
 |---|---|---|
@@ -172,8 +173,15 @@ PYTHONPATH=src python3 -X utf8 scripts/video_selftest.py --system FC --ui /tmp/s
 | `video_size` | `[288, 216]` | ffmpeg 输出尺寸（运行中按副屏媒体框实际尺寸解码） |
 | `video_fps` | `15` | 解码/播放帧率 |
 | `bottom_refresh_ms` | `90` | 副屏静态内容最小重绘间隔 |
+| `video_sound` | `true` | 预览声音开关；`false` 时副屏视频静音 |
+| `video_volume` | `70` | 预览音量 0–100，**机身音量键**可直接调（±5） |
+| `metadata.esde_root` | `""` | ES-DE 根目录（含 `gamelists/` 与 `downloaded_media/` 的那个文件夹）；留空则读 ROM 目录内的 `gamelist.xml` + `media/` |
+| `metadata.sources` | `["esde", "pegasus"]` | 启用的数据源与优先级 |
 
-视频按 `<系统>/video/<rom>.mp4|webm|mkv|avi` → `Imgs/` → `media/videos/` 顺序探测；`gamelist.xml` 的 `<video>` 优先级最高。
+媒体查找顺序：`gamelist.xml` 里显式写的路径 → 媒体根下的 ES-DE 类型目录（`covers/`、`videos/` …）
+→ 旧约定 `Imgs/` · `video/` · `logo/` → 每游戏一个目录的包（`media/<游戏名>/`）。
+
+> 完整目录结构、两种布局示例与音量操作见 [docs/USAGE.md](docs/USAGE.md) 第五、六节。
 
 ---
 
@@ -247,6 +255,10 @@ python scripts/deploy.py root@<掌机IP> --password root
 
 ### 自定义平台背景图与 Logo（首页轮播卡片）
 
+> **内置素材来源**：App 内置的平台背景图与 Logo 取自 **NeoStation 前端**的主题美术资源
+> （原始素材为背景 1024×1024 方形图、Logo 820×330 透明图），经 `scripts/build_platform_art.py`
+> 转换为掌机上解码更快的格式后随 App 打包：背景 `256×256` WebP、Logo `256×103` PNG（保留透明通道）。
+
 在 SD 卡 `retrostation/platform-art/` 下放文件，按机种目录名（key）自动匹配，无需任何配置：
 
 ```
@@ -286,7 +298,7 @@ retrostation/
 |---|---|
 | [docs/DESIGN.md](docs/DESIGN.md) | 详细设计：真机环境实测、架构、双屏方案、渲染管线、输入系统、数据层与**数据源插件架构**、启动器、视觉规范、**跨平台/Android 预留**、风险与里程碑 |
 | [docs/PROTOTYPE.md](docs/PROTOTYPE.md) | UI 原型说明：页面状态机、键位、布局数值、原型→真机映射 |
-| [docs/USAGE.md](docs/USAGE.md) | 玩家向使用与配置：界面一览、配置文件、换核心、平台艺术自定义、默认核心对照、多卡切换 |
+| [docs/USAGE.md](docs/USAGE.md) | 玩家向使用与配置：界面一览、配置文件、换核心、**媒体目录结构（ES-DE / Pegasus）**、**预览声音与音量**、平台艺术自定义、默认核心对照、多卡切换 |
 | [docs/USAGE.en.md](docs/USAGE.en.md) | 上文的英文版 |
 
 ---
@@ -301,7 +313,7 @@ retrostation/
 | 显示 | `card0-DSI-1` + `card0-DSI-2`，均 640×480；合成器 Weston(DRM) |
 | 运行时 | Python 3.11.8 · Pillow 10.2.0 · SDL2 2.0.32（**无 evdev / requests**） |
 | 视频解码 | ffmpeg 4.4.4（无硬解）→ SW 解码 288×216@15fps ≈ 4.5% 单核 |
-| ROM | `/mnt/mmc/Roms/<SYS>/`；封面 `Imgs/` · 视频 `video/` · Logo `logo/` · `gamelist.xml` |
+| ROM | `/mnt/mmc/Roms/<SYS>/`；媒体 `<SYS>/media/{covers,screenshots,videos,marquees,fanart}/`；元数据 `gamelist.xml`（ES-DE）/ `metadata.pegasus.txt`（Pegasus） |
 | 启动 | `/mnt/mod/ctrl/RA_launch.sh <core.so> <rom>`；NDS/PSP/SATURN/DC 走独立模拟器 |
 | 输入 | 手柄 `/dev/input/event4`，触摸 `/dev/input/event1` |
 

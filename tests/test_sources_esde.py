@@ -233,3 +233,60 @@ class TestFormatting:
         game.release = PartialDate(1985)
         raw = source.to_raw(game, entries["超级马力欧兄弟.nes"])
         assert raw.fields["releasedate"] == "19850101T000000"
+
+
+class TestPlayerCount:
+    """ES-DE writes ``<players>``; a fair few scrapers write ``<player>``."""
+
+    def _system(self, tmp_path: Path, extra: str) -> tuple[Path, Path]:
+        directory = tmp_path / "FC"
+        directory.mkdir()
+        (directory / "gamelist.xml").write_text(
+            '<?xml version="1.0"?>\n<gameList>\n  <game>\n'
+            '    <path>./魂斗罗.nes</path>\n    <name>魂斗罗</name>\n'
+            f"{extra}\n  </game>\n</gameList>\n",
+            encoding="utf-8",
+        )
+        rom = directory / "魂斗罗.nes"
+        rom.write_bytes(b"nes")
+        return directory, rom
+
+    def test_plural_is_read(self, tmp_path: Path) -> None:
+        directory, rom = self._system(tmp_path, "    <players>1-2</players>")
+        source = ESDESource()
+        entry = source.load(directory)["魂斗罗.nes"]
+        assert source.to_game("FC", rom, entry).players == "1-2"
+
+    def test_singular_is_read(self, tmp_path: Path) -> None:
+        """The bug: a scraper writing ``<player>`` left the field empty."""
+        directory, rom = self._system(tmp_path, "    <player>1-2</player>")
+        source = ESDESource()
+        entry = source.load(directory)["魂斗罗.nes"]
+        assert source.to_game("FC", rom, entry).players == "1-2"
+
+    def test_the_original_spelling_is_written_back(self, tmp_path: Path) -> None:
+        directory, rom = self._system(tmp_path, "    <player>1-2</player>")
+        source = ESDESource()
+
+        entries = source.load(directory)
+        game = source.to_game("FC", rom, entries["魂斗罗.nes"])
+        game.players = "1-4"
+        entries["魂斗罗.nes"] = source.to_raw(game, entries["魂斗罗.nes"])
+        source.save(directory, entries)
+
+        text = (directory / "gamelist.xml").read_text(encoding="utf-8")
+        assert "<player>1-4</player>" in text
+        # No second spelling is invented next to the one that was there.
+        assert "<players>" not in text
+
+    def test_clearing_drops_every_spelling(self, tmp_path: Path) -> None:
+        directory, rom = self._system(tmp_path, "    <player>1-2</player>")
+        source = ESDESource()
+
+        entries = source.load(directory)
+        game = source.to_game("FC", rom, entries["魂斗罗.nes"])
+        game.players = None
+        entries["魂斗罗.nes"] = source.to_raw(game, entries["魂斗罗.nes"])
+        source.save(directory, entries)
+
+        assert "<player>" not in (directory / "gamelist.xml").read_text(encoding="utf-8")

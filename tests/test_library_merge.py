@@ -62,6 +62,90 @@ class TestMetadataReachesGames:
         assert unnamed.sources == {}
 
 
+class TestSavingState:
+    """Saving one game's state must not cost the rest of the system theirs."""
+
+    MANY = """<?xml version="1.0"?>
+<gameList>
+  <game>
+    <path>./超级马力欧兄弟.nes</path>
+    <name>超级马力欧兄弟</name>
+    <desc>经典平台跳跃。</desc>
+    <rating>0.85</rating>
+  </game>
+  <game>
+    <path>./魂斗罗.nes</path>
+    <name>魂斗罗</name>
+    <genre>射击</genre>
+  </game>
+  <game>
+    <path>./冒險島 [T-Eng].nes</path>
+    <name>冒險島</name>
+    <developer>Hudson</developer>
+  </game>
+</gameList>
+"""
+
+    def _library(self, root: Path) -> Library:
+        library = Library(FakePlatform(root), Config())
+        library.scan()
+        return library
+
+    def test_favouriting_one_game_keeps_the_other_entries(self, rom_root: Path) -> None:
+        """Regression: saving only the one entry wiped every other game."""
+        (rom_root / "FC" / "gamelist.xml").write_text(self.MANY, encoding="utf-8")
+        library = self._library(rom_root)
+
+        games = library.resolve_all("FC")
+        mario = next(game for game in games if game.path.name == "超级马力欧兄弟.nes")
+        mario.favorite = True
+
+        assert library.save_state(mario, "FC") is True
+
+        text = (rom_root / "FC" / "gamelist.xml").read_text(encoding="utf-8")
+        assert "<name>魂斗罗</name>" in text
+        assert "<name>冒險島</name>" in text
+        assert "<developer>Hudson</developer>" in text  # untouched fields too
+        assert "<favorite>true</favorite>" in text
+
+    def test_every_game_is_still_there_after_a_save(self, rom_root: Path) -> None:
+        (rom_root / "FC" / "gamelist.xml").write_text(self.MANY, encoding="utf-8")
+        first = self._library(rom_root)
+        mario = next(g for g in first.resolve_all("FC") if g.path.name == "超级马力欧兄弟.nes")
+        mario.favorite = True
+        first.save_state(mario, "FC")
+
+        again = self._library(rom_root).resolve_all("FC")
+        names = {game.name for game in again}
+        assert names == {"超级马力欧兄弟", "魂斗罗", "冒險島"}
+
+    def test_a_brand_new_gamelist_is_well_formed(self, rom_root: Path) -> None:
+        """A card with no gamelist at all: the one we create must be usable."""
+        library = self._library(rom_root)
+        contra = next(g for g in library.resolve_all("FC") if g.path.name == "魂斗罗.nes")
+        contra.favorite = True
+
+        assert library.save_state(contra, "FC") is True
+
+        text = (rom_root / "FC" / "gamelist.xml").read_text(encoding="utf-8")
+        assert text.startswith("<?xml")
+        assert "<gameList>" in text
+        assert "<path>./魂斗罗.nes</path>" in text
+        assert "<favorite>true</favorite>" in text
+
+    def test_a_new_entry_reads_like_esde_wrote_it(self, rom_root: Path) -> None:
+        """Alphabetical order would put <broken> first and bury <path>."""
+        library = self._library(rom_root)
+        contra = next(g for g in library.resolve_all("FC") if g.path.name == "魂斗罗.nes")
+        contra.favorite = True
+        contra.play_count = 2
+
+        library.save_state(contra, "FC")
+
+        text = (rom_root / "FC" / "gamelist.xml").read_text(encoding="utf-8")
+        assert text.find("<path>") < text.find("<name>") < text.find("<playcount>")
+
+
 class TestPegasusReachesGames:
     PEGASUS = """collection: FC
 extensions: nes

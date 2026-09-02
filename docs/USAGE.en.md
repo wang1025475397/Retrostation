@@ -10,7 +10,7 @@
 
 ## 1. UI Overview
 
-Retrostation mainly targets **dual-screen handhelds**: the **top screen** shows the game, the **bottom screen** shows the menu and info (on single-screen devices a bottom detail bar replaces the bottom screen — see Section 9). Below are screenshots of every built-in screen.
+Retrostation mainly targets **dual-screen handhelds**: the **top screen** shows the game, the **bottom screen** shows the menu and info (on single-screen devices a bottom detail bar replaces the bottom screen — see Section 11). Below are screenshots of every built-in screen.
 
 ### Home (carousel)
 
@@ -35,7 +35,7 @@ Retrostation mainly targets **dual-screen handhelds**: the **top screen** shows 
 ![Settings top](../screenshots/en_US/05-menu_top.png)
 ![Settings bottom](../screenshots/en_US/05-menu_bottom.png)
 
-> The screenshots above are from a **single-card** environment. After inserting a second card, the settings menu gains a **"Storage Card"** row for switching the current card and restarting (see Section 7).
+> The screenshots above are from a **single-card** environment. After inserting a second card, the settings menu gains a **"Storage Card"** row for switching the current card and restarting (see Section 9).
 
 ### FC system home & list
 
@@ -128,6 +128,12 @@ It's the ROM directory name. Whichever directory you want to swap cores for, use
 
 The square background and transparent Logo of the home carousel cards default to the app's built-in packed art, matched by **system directory name (key)**.
 
+> **Where the built-in art comes from**: the shipped platform backgrounds and logos come from the
+> **NeoStation frontend**'s theme art (sources: 1024×1024 square backgrounds, 820×330 transparent
+> logos). `scripts/build_platform_art.py` converts them into the formats this handheld decodes
+> fastest before they are packed into the app: backgrounds as `256×256` WebP, logos as `256×103`
+> PNG with alpha. The sources are square, so the card's art box is square too — nothing is cropped.
+
 If you want to give a platform your own image, or give a **newly added platform** a dedicated image, just drop files in the SD card config dir — **auto-matched by folder name (the system directory key), no config needed**:
 
 ```
@@ -146,11 +152,126 @@ Rules:
 - Formats: background supports `jpg` / `png` / `webp`; Logo supports `png` / `webp` (transparent background recommended).
 - Priority: **your files override the built-in same-key art**. Platforms you didn't customize keep the built-in art; new platforms with no built-in art show a program-generated placeholder (gradient + system name), no error.
 
-> Game covers / screenshots are a separate mechanism (auto-scanned from the ROM directory's `Imgs/`, `logo/`), unrelated to this directory.
+> Game covers / screenshots are a separate mechanism — see the next section, "Media Directory Layout" — unrelated to this directory.
 
 ---
 
-## 5. System → Default Core Mapping (common)
+## 5. Media Directory Layout (ES-DE / Pegasus)
+
+Retrostation reads two metadata formats, and the media folders follow **ES-DE**'s naming:
+
+| Source | File | Access |
+|---|---|---|
+| ES-DE | `gamelist.xml` | **read + write** (favorites / play count / last played are written back to it) |
+| Pegasus | `metadata.pegasus.txt` | read-only |
+
+Both can be present at once and are merged with **ES-DE taking priority**: fields ES-DE has come
+from ES-DE, and Pegasus fills the gaps. The bottom of the screen names the file the current entry
+actually came from, e.g. "Metadata: gamelist.xml (ES-DE)".
+
+### The two places a gamelist can live
+
+**① No ES-DE root (the default)** — metadata sits in the ROM directory, media under `media/`:
+
+```
+Roms/
+└── PS/
+    ├── gamelist.xml                    ← metadata
+    ├── GEAR战士电童.chd
+    └── media/                          ← media root
+        ├── covers/GEAR战士电童.png
+        ├── screenshots/GEAR战士电童.png
+        ├── videos/GEAR战士电童.mp4
+        ├── marquees/GEAR战士电童.png
+        └── fanart/GEAR战士电童.jpg
+```
+
+**② An ES-DE root is configured** — metadata and media live outside the ROM tree, which is what
+ES-DE itself does. Point `metadata.esde_root` in `config.json` at the folder that holds both
+`gamelists/` and `downloaded_media/`:
+
+```json
+{ "metadata": { "esde_root": "/mnt/mmc/ES-DE" } }
+```
+
+```
+ES-DE/                                  ← esde_root
+├── gamelists/psx/gamelist.xml          ← metadata (ES-DE's own system name)
+└── downloaded_media/psx/               ← media root
+    ├── covers/GEAR战士电童.png
+    ├── videos/GEAR战士电童.mp4
+    └── ...
+```
+
+The **folder names inside are identical** in both layouts — only the root moves — so a card can be
+moved between them without renaming a single file. Leaving `esde_root` empty uses layout ①.
+
+> ES-DE spells systems differently from this frontend; the mapping is automatic
+> (`PS` → `psx`, `FC` → `nes`, `SFC` → `snes`, `MD` → `megadrive`, …).
+
+### Media type folders
+
+| Purpose | Folder (aliases) | gamelist element |
+|---|---|---|
+| Cover | `covers/` (`box2d/`, `2dbox/`) | `<cover>` / `<image>` / `<thumbnail>` |
+| Logo | `marquees/` (`wheel/`) | `<marquee>` / `<wheel>` |
+| Screenshot | `screenshots/` (`titleshots/`) | `<screenshot>` / `<titleshot>` |
+| Video | `videos/` | `<video>` |
+| Fanart | `fanart/` | `<fanart>` |
+
+A file is named after the ROM's base name (extension dropped):
+`GEAR战士电童.chd` → `covers/GEAR战士电童.png`.
+
+### Lookup order when media is missing
+
+1. The explicit path written in `gamelist.xml` (highest priority)
+2. The ES-DE type folders under the media root (in the table's order)
+3. The older convention: `Imgs/` (cover), `video/` (video), `logo/` (logo)
+4. One-folder-per-game packs: `media/<game>/cover.png` and similar
+5. Nothing found → a generated placeholder (gradient tile + system name)
+
+From step 2 on, **each kind looks in its own folders**: the cover folder never answers a logo
+lookup, so artwork cannot be matched to the wrong slot.
+
+### Pegasus notes
+
+`metadata.pegasus.txt` is **read-only**: favorites and play counts are not written into it, they go
+to `gamelist.xml`. If a card has only Pegasus and no `gamelist.xml`, one is created in that system
+directory the first time you favorite something.
+
+---
+
+## 6. Preview Sound & Volume
+
+Games that have a video clip play its **soundtrack** along with the picture (on by default).
+
+**Two ways to adjust it:**
+
+- **The device's volume rocker**: ±5 per press; the current value shows on screen and is saved to
+  `config.json`. Works on any screen, including inside the settings menu.
+- **The settings menu** (press START):
+  - **Preview sound** — press A to toggle (off means the bottom-screen clip is silent)
+  - **Preview volume** — LEFT / RIGHT for ±5
+
+Changes take effect **immediately**: a clip that is already sounding changes at once, with no
+effect on the picture.
+
+The matching `config.json` keys:
+
+| Key | Default | Role |
+|---|---|---|
+| `video_sound` | `true` | Preview sound master switch; `false` mutes it |
+| `video_volume` | `70` | Preview volume 0–100 |
+
+> **Why sound can be a few tens of milliseconds late after switching games**: the sound card can only
+> be held by one player process at a time, so Retrostation waits for the outgoing clip to let go of
+> it before starting the next one. That is what keeps *every* game audible instead of leaving one
+> mysteriously silent. Audio is fully released before a game launches, so the emulator's own sound
+> is unaffected.
+
+---
+
+## 7. System → Default Core Mapping (common)
 
 > Full list (with alternate cores `alt_cores`, extensions) is in [`../systems.reference.json`](../systems.reference.json). Below only lists mainstream systems and default cores.
 
@@ -178,21 +299,21 @@ Rules:
 
 ---
 
-## 6. Other Configurable Items
+## 8. Other Configurable Items
 
 `config.json` can also hold these (restart to take effect):
 
 | Key | Role | Example |
 |---|---|---|
 | `theme` | Theme color | `"dark"` |
-| `volume` | Volume 0–100 | `80` |
+| `video_volume` | Preview volume 0–100 (see section 6, "Preview Sound & Volume") | `70` |
 | `per_system_sort` | Per-system sort order | `{"FC": "filename"}` |
 | `per_system_filter` | Per-system filter | `{"FC": "all"}` |
 | `available_rom_roots` | Manually specify ROM card roots (multi-card) | `["/mnt/mmc/Roms", "/mnt/sdcard/Roms"]` |
 
 ---
 
-## 7. Multi-card / Storage Card Switch
+## 9. Multi-card / Storage Card Switch
 
 When the system detects more than one card (e.g. `TF1` / `TF2`), the settings menu gains a **"Storage Card"** row showing the **label of the current card**:
 
@@ -204,7 +325,7 @@ Press **A** to switch between the two cards; this restarts Retrostation and load
 
 ---
 
-## 8. Notes
+## 10. Notes
 
 1. **Core must really exist**: the `.so` in `core` must exist in the device's core directory (default `/mnt/vendor/deep/retro/cores`, fallback `/oem/retro/cores`). A non-existent core shows "no core configured" when launching that game. `ls` that directory before editing.
 2. **Restart to take effect**: both `config.json` and `systems.json` are reloaded only after restarting Retrostation.
@@ -213,7 +334,7 @@ Press **A** to switch between the two cards; this restarts Retrostation and load
 
 ---
 
-## 9. Single-screen Mode
+## 11. Single-screen Mode
 
 Retrostation is also compatible with **single-screen devices**. The dual-screen split merges onto one screen:
 
@@ -225,7 +346,7 @@ Single-screen mode is auto-detected from the number of connected displays; no ma
 
 ---
 
-## 10. Interface Language (Chinese / English switch)
+## 12. Interface Language (Chinese / English switch)
 
 The Retrostation UI supports switching between **Chinese / English / Auto** at runtime:
 

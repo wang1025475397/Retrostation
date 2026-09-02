@@ -24,6 +24,11 @@ Four rules keep this from eating the handheld:
   the SD card, and waiting for that on the UI thread froze the whole frontend
   on every game switch.  :meth:`VideoPlayer.stop` still waits for those
   background teardowns, so nothing survives a launch.
+
+Sound rides along with the pictures: starting a clip also asks the platform for
+an :class:`~retrostation.platform.base.AudioPipe`, and it is closed by the very
+same teardown -- so a game switch cannot leave a soundtrack playing behind the
+emulator, and a platform with no audio support simply stays silent.
 """
 
 from __future__ import annotations
@@ -36,7 +41,7 @@ from pathlib import Path
 
 from ..core.config import Config
 from ..core.model import ASSET_VIDEO, Game
-from ..platform.base import Platform, VideoPipe
+from ..platform.base import AudioPipe, Platform, VideoPipe
 
 log = logging.getLogger(__name__)
 
@@ -44,6 +49,12 @@ log = logging.getLogger(__name__)
 #: decoder returns ``None`` for *every* file, and probing device after device is
 #: pure waste.
 _UNSUPPORTED_AFTER = 3
+
+#: Seconds the next clip waits for the outgoing soundtrack to let go of the
+#: card.  The teardown is nearly always instantaneous -- the fade-out is 40 ms
+#: -- so this is only paid when a switch really does overlap, and it is far
+#: cheaper than the alternative: losing the race means silence.
+_AUDIO_HANDOVER = 0.5
 
 
 @dataclass(frozen=True)
@@ -57,11 +68,23 @@ class VideoSettings:
     debounce: float = 0.25
     #: Seconds without a single frame before a file is treated as broken.
     stale: float = 3.0
+    #: Whether the clip's soundtrack is played.  ``False`` keeps the preview
+    #: silent, which is all it ever was before sound existed.
+    sound: bool = True
+    #: Preview volume, 0.0-1.0.  A game clip at full scale is startling on a
+    #: handheld speaker, so the factory default is well below it.
+    volume: float = 0.7
 
     @classmethod
     def from_config(cls, config: Config) -> VideoSettings:
         width, height = config.video_size
-        return cls(width=int(width), height=int(height), fps=int(config.video_fps))
+        return cls(
+            width=int(width),
+            height=int(height),
+            fps=int(config.video_fps),
+            sound=bool(config.video_sound),
+            volume=max(0.0, min(1.0, config.video_volume / 100.0)),
+        )
 
     def resized(self, width: int, height: int) -> VideoSettings:
         """Same settings, decoded straight at the size the UI will draw."""
@@ -93,12 +116,19 @@ class VideoPlayer:
         #: What is actually decoding.
         self._current: tuple[str, Path] | None = None
         self._pipe: VideoPipe | None = None
+        #: The clip's soundtrack, owned by whatever :meth:`_start_locked` got
+        #: from the platform.  ``None`` on every platform that cannot play it.
+        self._audio: AudioPipe | None = None
         self._thread: threading.Thread | None = None
         self._stop_event: threading.Event | None = None
         self._generation = 0
         #: Decoders being torn down in the background.  Joined before the device
         #: is handed over to a game, so nothing survives under the emulator.
         self._reapers: list[threading.Thread] = []
+        #: Teardown of the outgoing soundtrack, kept separately from the video
+        #: reapers because the next clip's sound has to wait for exactly this
+        #: one -- see :meth:`_start_locked`.
+        self._audio_reaper: threading.Thread | None = None
 
         self._frame = None
         self._frame_seq = 0
@@ -120,14 +150,39 @@ class VideoPlayer:
     def enabled(self) -> bool:
         return self._enabled
 
-    def configure(self, *, size: tuple[int, int] | None = None, enabled: bool | None = None) -> None:
-        """Set the decode size and/or switch playback on and off.
+    def configure(
+        self,
+        *,
+        size: tuple[int, int] | None = None,
+        enabled: bool | None = None,
+        sound: bool | None = None,
+        volume: float | None = None,
+    ) -> None:
+        """Set the decode size, switch playback on/off, or change the sound.
 
         Decoding at the exact size the media box will draw skips a per-frame
         LANCZOS resize in the canvas (measurable at 15 fps on this CPU).
+
+        Volume is retuned on the clip that is sounding rather than left for the
+        next selection -- but *without* rebuilding the pipe, since a rebuild has
+        to wait for the audio device and that wait lands on the UI thread as a
+        stutter.  The rocker would otherwise either appear dead or cost a hitch
+        every time it moves.
         """
-        if size is not None:
-            self._settings = self._settings.resized(*size)
+        with self._lock:
+            if size is not None:
+                self._settings = self._settings.resized(*size)
+            if sound is not None and sound != self._settings.sound:
+                self._settings = replace(self._settings, sound=sound)
+                if not sound:
+                    self._drop_audio()
+                elif self._current is not None:
+                    self._open_audio(self._current[1])
+            if volume is not None and volume != self._settings.volume:
+                self._settings = replace(self._settings, volume=volume)
+                if self._audio is not None:
+                    self._audio.set_volume(volume)
+
         if enabled is None or self._closed or enabled == self._enabled:
             return
         self._enabled = enabled
@@ -261,6 +316,38 @@ class VideoPlayer:
     # Internals (all called with the lock held, except the pump)
     # ------------------------------------------------------------------ #
 
+    def _drop_audio(self) -> None:
+        """Stop the soundtrack without touching the pictures.
+
+        Runs with the lock held or on the UI thread: changing the volume
+        replaces the player outright, and the card can only be held by one.
+        """
+        audio, self._audio = self._audio, None
+        if audio is None:
+            return
+        reaper = threading.Thread(
+            target=self._close_pipes, args=(None, audio),
+            name="retrostation-audio-reap", daemon=True,
+        )
+        self._reapers.append(reaper)
+        self._audio_reaper = reaper
+        reaper.start()
+
+    def _open_audio(self, path: Path) -> None:
+        """Start the soundtrack for ``path``; silence is an acceptable outcome."""
+        if not self._settings.sound:
+            return
+        # Take the card over from the clip being replaced: it cannot be opened
+        # twice, and the one that loses the race stays silent on screen.
+        handover = self._audio_reaper
+        if handover is not None:
+            handover.join(timeout=_AUDIO_HANDOVER)
+            self._audio_reaper = None
+        try:
+            self._audio = self._platform.open_audio_pipe(path, volume=self._settings.volume)
+        except Exception:  # noqa: BLE001 - silence is an acceptable outcome
+            log.debug("no audio for %s", path, exc_info=True)
+
     def _start_locked(self, target: tuple[str, Path], now: float) -> None:
         key, path = target
         settings = self._settings
@@ -284,12 +371,17 @@ class VideoPlayer:
         generation = self._generation
         self._current = target
         self._pipe = pipe
+        self._audio = None
         self._frames_decoded = 0
         self._duration = 0.0
         self._started_at = now
         self._last_frame_at = now
         stop = threading.Event()
         self._stop_event = stop
+
+        # Sound comes up last: it waits for the outgoing clip to let go of the
+        # card, and failing to get it must never stop the pictures.
+        self._open_audio(path)
 
         self._thread = threading.Thread(
             target=self._pump,
@@ -309,6 +401,7 @@ class VideoPlayer:
         """
         self._generation += 1
         pipe, self._pipe = self._pipe, None
+        audio, self._audio = self._audio, None
         stop, self._stop_event = self._stop_event, None
         thread, self._thread = self._thread, None
         self._current = None
@@ -318,12 +411,27 @@ class VideoPlayer:
 
         if stop is not None:
             stop.set()
+
+        # Sound goes on its own thread even when the pictures do not: the next
+        # clip's player must be able to wait for this one alone.
+        if audio is not None:
+            if reap:
+                self._close_pipes(None, audio)
+                self._audio_reaper = None
+            else:
+                self._audio_reaper = threading.Thread(
+                    target=self._close_pipes, args=(None, audio),
+                    name="retrostation-audio-reap", daemon=True,
+                )
+                self._reapers.append(self._audio_reaper)
+                self._audio_reaper.start()
+
         if pipe is not None:
             if reap:
-                self._close_pipe(pipe)
+                self._close_pipes(pipe, None)
             else:
                 reaper = threading.Thread(
-                    target=self._close_pipe, args=(pipe,),
+                    target=self._close_pipes, args=(pipe, None),
                     name="retrostation-video-reap", daemon=True,
                 )
                 self._reapers.append(reaper)
@@ -331,11 +439,20 @@ class VideoPlayer:
         return thread
 
     @staticmethod
-    def _close_pipe(pipe: VideoPipe) -> None:
-        try:
-            pipe.close()  # terminates ffmpeg, which unblocks read_frame()
-        except Exception:  # noqa: BLE001 - never leak a process over a bug
-            log.debug("closing the video pipe failed", exc_info=True)
+    def _close_pipes(pipe: VideoPipe | None, audio: AudioPipe | None) -> None:
+        """Tear one clip's decoders down; never raises, never leaks a process.
+
+        Both halves go through the same reaper on purpose: a game switch that
+        closed the pictures but not the sound would leave a clip playing behind
+        the emulator, which is exactly what DESIGN §8.1 step ③ forbids.
+        """
+        for target in (pipe, audio):
+            if target is None:
+                continue
+            try:
+                target.close()  # terminates ffmpeg, which unblocks read_frame()
+            except Exception:  # noqa: BLE001 - never leak a process over a bug
+                log.debug("closing a media pipe failed", exc_info=True)
 
     def _join_reapers(self) -> None:
         """Wait for decoders still being torn down in the background."""

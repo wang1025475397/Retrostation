@@ -772,6 +772,23 @@ class App:
     def _system_title(self) -> str:
         return display_name(self.session.current_system_key(), self.translator.language)
 
+    def _source_note(self, game: Game) -> str:
+        """Name the metadata files this game was actually built from.
+
+        Both formats can sit on the same card, and the merge order decides what
+        the player ends up seeing, so every contributing file is named.  A
+        hard-coded "gamelist.xml" read as a promise we were not keeping on the
+        many cards that only carry ``metadata.pegasus.txt``.
+        """
+        names: list[str] = []
+        if "esde" in game.sources:
+            names.append(self.translator("bottom.source_esde"))
+        if "pegasus" in game.sources:
+            names.append(self.translator("bottom.source_pegasus"))
+        if not names:
+            return self.translator("bottom.source_none")
+        return self.translator("bottom.source", files=" + ".join(names))
+
     def _meta(self, game: Game) -> bottom.Meta | None:
         system_key = self.session.current_system_key()
         core = lookup(system_key).core_label
@@ -793,7 +810,7 @@ class App:
             description=game.blurb or "-",
             play_count=f"{self.translator('bottom.play_count')}: {game.play_count}",
             last_played=f"{self.translator('bottom.last_played')}: {last_text}",
-            source_note=self.translator("bottom.source"),
+            source_note=self._source_note(game),
             favorite=game.favorite,
         )
 
@@ -920,6 +937,12 @@ class App:
         self.session.settings_dirty = False
         COLORS.apply(self.config.theme, self.config.theme_variant)
         self._apply_brightness()
+        # Preview sound: the rocker and the settings row both land here, and a
+        # clip that is already sounding is swapped rather than left behind.
+        self._video.configure(
+            sound=self.config.video_sound,
+            volume=max(0.0, min(1.0, self.config.video_volume / 100.0)),
+        )
         self.config.save(Path(self.platform.config_dir) / "config.json")
 
         if self.session.restart_requested:

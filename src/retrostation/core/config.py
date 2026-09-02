@@ -55,6 +55,14 @@ class MetadataConfig:
     backup: bool = True
     #: Fall back to a sidecar file when no writable source is available.
     sidecar_fallback: bool = True
+    #: ES-DE root: the folder holding ``gamelists/`` and ``downloaded_media/``.
+    #:
+    #: Empty means the player has no ES-DE installation, which is the normal
+    #: case: the gamelist is then read from inside the ROM directory
+    #: (``<SYS>/gamelist.xml``) and media from ``<SYS>/media/`` -- laid out
+    #: exactly like ES-DE's own sub-folders (``covers/``, ``videos/``, ...),
+    #: only rooted next to the ROMs instead of in a shared ES-DE tree.
+    esde_root: str = ""
 
 
 @dataclass
@@ -92,6 +100,13 @@ class Config:
     #: what the CPU can do.
     video_fps: int = 24
     video_size: list[int] = field(default_factory=lambda: [288, 216])
+    #: Play the clip's soundtrack while previewing.  Off leaves the preview
+    #: silent -- what it always was, and the safe setting if the sound card is
+    #: wanted by something else.
+    video_sound: bool = True
+    #: Preview volume, 0-100.  Deliberately moderate: a game clip at full
+    #: scale next to a handheld speaker is startling.
+    video_volume: int = 70
 
     # metadata ------------------------------------------------------------ #
     metadata: MetadataConfig = field(default_factory=MetadataConfig)
@@ -193,6 +208,8 @@ class Config:
             raise ConfigError("config.media_dirs must be a non-empty object")
         if self.video_fps <= 0:
             raise ConfigError("config.video_fps must be positive")
+        if not 0 <= self.video_volume <= 100:
+            raise ConfigError("config.video_volume must be between 0 and 100")
         if len(self.video_size) != 2 or any(s <= 0 for s in self.video_size):
             raise ConfigError("config.video_size must be [width, height] with positive values")
         if self.bottom_refresh_ms < 0:

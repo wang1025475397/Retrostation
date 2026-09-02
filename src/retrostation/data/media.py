@@ -28,18 +28,25 @@ from pathlib import Path
 from ..core.config import Config
 from ..core.model import ASSET_COVER, ASSET_FANART, ASSET_KEYS, ASSET_LOGO, ASSET_SCREENSHOT, ASSET_VIDEO, Game
 from ..platform.base import Platform
+from .systems import esde_system_name
 
 log = logging.getLogger(__name__)
 
-#: Candidate directories per format, checked after our own convention.
+#: ES-DE's own sub-folder names, relative to the *media root* -- which is
+#: ``downloaded_media/<system>`` when the player has an ES-DE tree and
+#: ``<SYS>/media`` when they do not.  Same names either way, so a card moved
+#: between the two layouts needs no renaming.  The first entry is the one we
+#: write to and expect; the rest are aliases other tools leave behind.
+_ESDE_TYPE_DIRS: dict[str, tuple[str, ...]] = {
+    ASSET_COVER: ("covers", "box2d", "2dbox"),
+    ASSET_LOGO: ("marquees", "wheel"),
+    ASSET_SCREENSHOT: ("screenshots", "titleshots"),
+    ASSET_VIDEO: ("videos",),
+    ASSET_FANART: ("fanart",),
+}
+
+#: Candidate directories of other frontends, checked after the ES-DE layout.
 _FORMAT_DIRS: dict[str, dict[str, tuple[str, ...]]] = {
-    "esde": {
-        ASSET_COVER: ("media/covers", "media/box2d", "media/2dbox"),
-        ASSET_LOGO: ("media/marquees", "media/wheel"),
-        ASSET_SCREENSHOT: ("media/screenshots", "media/titleshots"),
-        ASSET_VIDEO: ("media/videos",),
-        ASSET_FANART: ("media/fanart",),
-    },
     "pegasus": {
         ASSET_COVER: ("assets/box_front", "assets/box2d"),
         ASSET_LOGO: ("assets/marquee", "assets/wheel"),
@@ -53,9 +60,10 @@ _FORMAT_DIRS: dict[str, dict[str, tuple[str, ...]]] = {
 _IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".webp")
 _VIDEO_SUFFIXES = (".mp4", ".webm", ".mkv", ".avi")
 
-#: One folder per game, named after the game: ``media/<game>/boxFront.jpg``
-#: (Pegasus, and the 天马 packs built on it).  Here the *folder* is the game and
-#: the *file name* is the asset kind -- the opposite of the flat layouts above.
+#: One folder per game, named after the game: ``<game>/boxFront.jpg`` (Pegasus,
+#: and the 天马 packs built on it).  Here the *folder* is the game and the *file
+#: name* is the asset kind -- the opposite of the flat ES-DE layout above.
+#:
 _PER_GAME_ROOTS = ("media", "assets")
 #: Asset kind -> keywords a file name is matched against, best first.
 #:
@@ -87,7 +95,11 @@ class MediaDirs:
 
     root: Path
     by_kind: dict[str, Path]
-    format_dirs: tuple[Path, ...]
+    #: Fallback directories, **per kind**: ES-DE alias names, this app's older
+    #: ``Imgs/`` convention, other frontends.  Grouped by kind on purpose --
+    #: one mixed list let a cover directory answer a *logo* lookup, because a
+    #: lookup only ever matches on the file name, not on what the file is.
+    alternates: dict[str, tuple[Path, ...]] = field(default_factory=dict)
     per_game_dirs: tuple[Path, ...] = ()
     platform: object = None
     _listings: dict[Path, dict[tuple[str, str], Path]] = field(default_factory=dict, repr=False)
@@ -107,14 +119,19 @@ class MediaDirs:
         own = self.by_kind.get(kind)
         if own is not None:
             ordered.append(own)
+        ordered.extend(path for path in self.alternates.get(kind, ()) if path not in ordered)
+
         if kind == ASSET_VIDEO:
             # Measured on the RG DS: the scraper in use drops .mp4 files next to
             # the covers (``Imgs/``) instead of the ``video/`` we ask for, so the
-            # cover directory is probed for video suffixes too (DESIGN §6.3).
-            extra = self.by_kind.get(ASSET_COVER)
-            if extra is not None and extra != own:
-                ordered.append(extra)
-        ordered.extend(path for path in self.format_dirs if path not in ordered)
+            # cover directories are probed for video suffixes too (DESIGN §6.3)
+            # -- but only after the video ones, so a real video/ still wins.
+            cover = self.by_kind.get(ASSET_COVER)
+            if cover is not None and cover not in ordered:
+                ordered.append(cover)
+            ordered.extend(
+                path for path in self.alternates.get(ASSET_COVER, ()) if path not in ordered
+            )
         return ordered
 
     def lookup(self, kind: str, stem: str) -> Path | None:
@@ -191,32 +208,66 @@ class MediaDirs:
 
 
 def media_dirs_for(platform: Platform, config: Config, system_key: str) -> MediaDirs:
-    """Build the directory set for one system."""
-    root = platform.rom_root / system_key
-    by_kind = {
-        kind: root / config.media_dirs.get(kind, kind)
-        for kind in ASSET_KEYS
-        if config.media_dirs.get(kind)
-    }
+    """Build the directory set for one system.
 
-    format_dirs: list[Path] = []
-    for source_name, table in _FORMAT_DIRS.items():
-        for kind, dirs in table.items():
-            target = by_kind.get(kind)
-            for directory in dirs:
-                path = root / directory
-                if path.is_dir() and (target is None or path != target):
-                    format_dirs.append(path)
+    The layout is ES-DE's either way -- ``covers/``, ``screenshots/``,
+    ``videos/``, ``marquees/``, ``fanart/`` -- and only the *root* moves:
+    ES-DE's shared ``downloaded_media/<system>`` when
+    ``config.metadata.esde_root`` is set, otherwise ``<SYS>/media/`` right
+    next to the ROMs.  Same sub-folder names either way, so a card moved
+    between the two layouts needs no renaming.
+
+    Everything this app used to look in (its own ``Imgs/`` convention, Pegasus
+    ``assets/``, one-folder-per-game packs) stays as a *fallback*, so a card
+    that was scraped before this change keeps showing its artwork.
+    """
+    root = platform.rom_root / system_key
+    esde_root = Path(config.metadata.esde_root) if config.metadata.esde_root else None
+    if esde_root is not None:
+        media_root = esde_root / "downloaded_media" / esde_system_name(system_key)
+    else:
+        media_root = root / "media"
+
+    # Primary directory for each kind: the media root's ES-DE sub-folder.
+    by_kind = {kind: media_root / dirs[0] for kind, dirs in _ESDE_TYPE_DIRS.items()}
+
+    alternates: dict[str, list[Path]] = {kind: [] for kind in ASSET_KEYS}
+
+    def add(kind: str, path: Path) -> None:
+        if path.is_dir() and path not in alternates[kind]:
+            alternates[kind].append(path)
+
+    # Aliases ES-DE and its scrapers also write (box2d, wheel, titleshots...).
+    for kind, dirs in _ESDE_TYPE_DIRS.items():
+        for name in dirs[1:]:
+            add(kind, media_root / name)
+
+    # With a shared ES-DE tree a ROM-directory media/ is still a valid place to
+    # look -- that is where a card scraped in place keeps its artwork.
+    if esde_root is not None:
+        for kind, dirs in _ESDE_TYPE_DIRS.items():
+            for name in dirs:
+                add(kind, root / "media" / name)
+
+    # This app's own convention (tiny-scraper writes Imgs/), then Pegasus.
+    for kind in ASSET_KEYS:
+        name = config.media_dirs.get(kind)
+        if name:
+            add(kind, root / name)
+    for kind, dirs in _FORMAT_DIRS["pegasus"].items():
+        for name in dirs:
+            add(kind, root / name)
 
     per_game: list[Path] = []
     for name in _PER_GAME_ROOTS:
         path = root / name
         if path.is_dir():
             per_game.append(path)
+
     return MediaDirs(
         root=root,
         by_kind=by_kind,
-        format_dirs=tuple(dict.fromkeys(format_dirs)),
+        alternates={kind: tuple(paths) for kind, paths in alternates.items()},
         per_game_dirs=tuple(per_game),
         platform=platform,
     )

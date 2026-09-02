@@ -243,6 +243,53 @@ def extensions_for(key: str) -> frozenset[str]:
     return frozenset(ext.lower().lstrip(".") for ext in lookup(key).extensions)
 
 
+#: Our key -> the directory name ES-DE uses for that system.
+#:
+#: ES-DE spells systems differently from the firmware (``psx`` for our ``ps``,
+#: ``nes`` for ``fc``) and *both* of its trees -- ``gamelists/`` and
+#: ``downloaded_media/`` -- are keyed by ES-DE's own spelling, so a table beats
+#: a guess.  Keys left out fall back to themselves, which is exactly right for
+#: the many that happen to agree (``gb``, ``gba``, ``nds``, ``saturn`` ...).
+_ESDE_SYSTEM_NAMES: dict[str, str] = {
+    # -- Nintendo -------------------------------------------------------- #
+    "fc": "nes", "fds": "fds", "sfc": "snes", "snes": "snes",
+    "gb": "gb", "gbc": "gbc", "gba": "gba", "nds": "nds", "n64": "n64",
+    "vb": "virtualboy",
+    # -- Sega ------------------------------------------------------------ #
+    "md": "megadrive", "segaMD": "megadrive", "segaMS": "mastersystem",
+    "sms": "mastersystem", "gg": "gamegear", "sg-1000": "sg1000",
+    "segaCD": "segacd", "sega32x": "sega32x",
+    "saturn": "saturn", "Saturn": "saturn",
+    "dc": "dreamcast", "dreamcast": "dreamcast", "atomiswave": "atomiswave",
+    # -- Sony ------------------------------------------------------------- #
+    "ps": "psx", "ps1": "psx", "psp": "psp",
+    # -- NEC / Bandai / other handhelds ----------------------------------- #
+    "pce": "pcengine", "pcecd": "pcenginecd",
+    "ws": "wonderswan", "wsc": "wonderswancolor", "wonderswan": "wonderswan",
+    "ngp": "ngp", "ngpc": "ngpc", "lynx": "atarilynx",
+    # -- Arcade ------------------------------------------------------------ #
+    "cps1": "cps1", "cps2": "cps2", "cps3": "cps3",
+    "neogeo": "neogeo", "fbneo": "fbneo", "arc": "arcade",
+    "mame": "mame", "hbmame": "hbmame", "ssv": "ssv",
+    # -- Computers & misc -------------------------------------------------- #
+    "msx": "msx", "scummvm": "scummvm", "easyrpg": "easyrpg", "pico": "pico8",
+    "a5200": "atari5200", "atari2600": "atari2600", "zx81": "zx81",
+    "sufami": "sufami", "sunplus": "sunplus", "megaduck": "megaduck",
+    "ports": "ports",
+}
+
+
+def esde_system_name(key: str) -> str:
+    """ES-DE's directory name for one of our system keys.
+
+    Firmware directories are UPPER CASE and the table is lower case, so the
+    lookup folds like :func:`lookup` does.
+    """
+    if not key:
+        return key
+    return _ESDE_SYSTEM_NAMES.get(key) or _ESDE_SYSTEM_NAMES.get(key.casefold()) or key
+
+
 def display_name(key: str, lang: str | None = None) -> str:
     """Human label for a system key, optionally localized.
 
