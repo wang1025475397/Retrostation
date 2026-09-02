@@ -3,9 +3,9 @@
 
 Usage::
 
-    scripts/deploy.sh root@192.168.31.205
-    scripts/deploy.sh --dry-run root@192.168.31.205
-    scripts/deploy.sh --reset root@192.168.31.205   # nuke /tmp/retrostation_*
+    scripts/deploy.py root@<掌机IP>
+    scripts/deploy.py --dry-run root@<掌机IP>
+    scripts/deploy.py --reset root@<掌机IP>   # nuke /tmp/retrostation_*
 
 It pushes:
 

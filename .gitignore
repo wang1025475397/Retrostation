@@ -3,7 +3,17 @@ __pycache__/
 *.pyc
 .pytest_cache/
 build/
+# screenshots/ is a generated artifact; only the shots actually referenced by
+# the docs are tracked. Single-screen shots (single/) and unused bottom panels
+# (everything except 01/02/05 *_bottom.png) stay local-only.
 screenshots/
+!screenshots/
+screenshots/single/
+screenshots/*_bottom.png
+!screenshots/0[125]-*_bottom.png
+screenshots/en_US/*_bottom.png
+!screenshots/en_US/0[125]-*_bottom.png
+!screenshots/en_US/*_top.png
 *.egg-info/
 
 # scripts/build_release.py output: source-free, byte-compiled bundles.

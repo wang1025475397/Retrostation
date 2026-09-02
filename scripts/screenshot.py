@@ -5,11 +5,13 @@ Builds a synthetic library (real PNG covers, a gamelist.xml), then drives the
 real App and saves both panels for each state:
 
     python scripts/screenshot.py [out_dir]
+    python scripts/screenshot.py --fake --lang en_US   # English UI -> screenshots/en_US
 """
 
 from __future__ import annotations
 
 import io
+import os
 import shutil
 import sys
 from pathlib import Path
@@ -23,9 +25,11 @@ from PIL import Image, ImageDraw  # noqa: E402
 from retrostation.core.config import Config  # noqa: E402
 from retrostation.core.i18n import Translator
 from retrostation.data.library import Library
-from retrostation.platform.base import InputAction, InputEvent
+from retrostation.platform.base import Canvas, FileEntry, InputAction, InputEvent, Platform
+from retrostation.platform.linux.canvas import PilCanvas
 from retrostation.platform.linux.platform import LinuxPlatform
 from retrostation.ui.app import App
+from typing import cast
 
 ROOT = Path(__file__).resolve().parent.parent
 LIB = Path("build/screenshot-lib")
@@ -51,15 +55,40 @@ def logo(name: str) -> bytes:
     return buffer.getvalue()
 
 
-def build_library() -> None:
-    shutil.rmtree(LIB, ignore_errors=True)
-    systems = {
+# Per-language synthetic library so localized docs can show a localized UI.
+GAME_DATA: dict[str, dict[str, tuple[list[str], int]]] = {
+    "zh_CN": {
         "FC": (["超级马力欧兄弟", "魂斗罗", "坦克大战", "冒险岛", "赤色要塞", "沙罗曼蛇",
                 "恶魔城", "忍者龙剑传", "双截龙", "热血高校", "炸弹人", "吃豆人"], 0),
         "SFC": (["超时空之钥", "最终幻想VI", "超级银河战士", "恶魔城X", "街头霸王II"], 120),
         "GBA": (["口袋妖怪 绿宝石", "塞尔达传说 缩小帽", "火焰纹章"], 210),
         "MD": (["索尼克", "怒之铁拳II", "梦幻之星IV"], 40),
-    }
+    },
+    "en_US": {
+        "FC": (["Super Mario Bros.", "Contra", "Battle City", "Adventure Island", "Jackal",
+                "Salamander", "Castlevania", "Ninja Gaiden", "Double Dragon",
+                "River City Ransom", "Bomberman", "Pac-Man"], 0),
+        "SFC": (["Chrono Trigger", "Final Fantasy VI", "Super Metroid", "Castlevania X",
+                 "Street Fighter II"], 120),
+        "GBA": (["Pokémon Emerald", "The Minish Cap", "Fire Emblem"], 210),
+        "MD": (["Sonic the Hedgehog", "Streets of Rage 2", "Phantasy Star IV"], 40),
+    },
+}
+
+DESC_BY_LANG = {
+    "zh_CN": "经典名作，手感扎实，至今仍值得一玩。关卡设计精巧，音乐在当时属顶级水准。",
+    "en_US": "A timeless classic with tight controls and level design that still holds up today.",
+}
+
+
+def build_library(lang: str = "zh_CN") -> None:
+    shutil.rmtree(LIB, ignore_errors=True)
+    systems = GAME_DATA.get(lang, GAME_DATA["zh_CN"])
+    desc = DESC_BY_LANG.get(lang, DESC_BY_LANG["zh_CN"])
+    en = lang != "zh_CN"
+    dev = "Nintendo" if en else "任天堂"
+    pub = "Nintendo" if en else "任天堂"
+    genre = "Platformer" if en else "平台跳跃"
     entries = []
     for key, (names, hue) in systems.items():
         directory = LIB / key
@@ -79,12 +108,12 @@ def build_library() -> None:
             "  <game>",
             f"    <path>./{rom}</path>",
             f"    <name>{name}</name>",
-            "    <desc>经典名作，手感扎实，至今仍值得一玩。关卡设计精巧，音乐在当时属顶级水准。</desc>",
+            f"    <desc>{desc}</desc>",
             "    <rating>0.860000</rating>",
             "    <releasedate>19850913T000000</releasedate>",
-            "    <developer>任天堂</developer>",
-            "    <publisher>任天堂</publisher>",
-            "    <genre>平台跳跃</genre>",
+            f"    <developer>{dev}</developer>",
+            f"    <publisher>{pub}</publisher>",
+            f"    <genre>{genre}</genre>",
             "    <players>1-2</players>",
             "    <playcount>23</playcount>",
             "    <lastplayed>20260820T193000</lastplayed>",
@@ -106,23 +135,128 @@ def shoot(app: App, platform, out: Path, tag: str) -> None:
     for index, painter in enumerate(app._painters):  # noqa: SLF001 - dev tool
         target = out / f"{tag}_{'top' if index == 0 else 'bottom'}.png"
         target.parent.mkdir(parents=True, exist_ok=True)
-        painter.canvas.pil_image.save(target)
+        canvas = cast(PilCanvas, painter.canvas)
+        canvas.pil_image.save(target)
     print("saved", tag)
+
+
+class FakePlatform(Platform):
+    """Headless, SDL-free platform so screenshots build on any machine.
+
+    The real ``App`` renders to in-memory ``PilCanvas`` objects, which need no
+    display server -- this is the same stand-in the test suite uses.
+    """
+
+    name = "fake"
+
+    def __init__(self, root: Path) -> None:
+        self._root = Path(root)
+        self.canvases: list[Canvas] = []
+        self.launched: tuple[str, ...] | None = None
+        # Reuse the real font discovery (CJK-capable, cross-platform) so the
+        # rendered text is not tofu boxes where the device font is absent.
+        from retrostation.platform.linux.fonts import FontBook
+
+        self._fonts = FontBook()
+
+    def init_display(self, mode: str) -> list[Canvas]:
+        from retrostation.core.theme import BASE_H, BASE_W
+        from retrostation.platform.linux.canvas import PilCanvas
+
+        self.canvases = [
+            PilCanvas(BASE_W, BASE_H) for _ in range(2 if mode in ("dual", "auto") else 1)
+        ]
+        return self.canvases
+
+    def present(self, index: int) -> None:
+        return None
+
+    def poll_events(self, timeout: float = 0.0) -> list[InputEvent]:
+        return []
+
+    def battery(self) -> int | None:
+        return 87
+
+    def temperature(self) -> float | None:
+        return 56.6
+
+    def set_brightness(self, value: int, index: int = 0) -> None:
+        return None
+
+    @property
+    def rom_root(self) -> Path:
+        return self._root
+
+    @property
+    def config_dir(self) -> Path:
+        path = self._root / ".retrostation"
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def list_dir(self, path: Path) -> list[FileEntry]:
+        try:
+            with os.scandir(path) as iterator:
+                return [
+                    FileEntry(
+                        name=entry.name,
+                        is_dir=entry.is_dir(),
+                        size=entry.stat().st_size,
+                        mtime=entry.stat().st_mtime,
+                    )
+                    for entry in iterator
+                ]
+        except OSError:
+            return []
+
+    def launch_game(self, argv) -> None:
+        self.launched = tuple(argv)
+
+    def font(self, size: int) -> object:
+        return self._fonts.get(size)
+
+    def load_image(self, path: Path) -> object:
+        with Image.open(path) as handle:
+            return handle.convert("RGBA").copy()
+
+    def shutdown(self) -> None:
+        return None
 
 
 def main() -> int:
     single = "--single" in sys.argv
-    positional = [arg for arg in sys.argv[1:] if not arg.startswith("--")]
-    out = Path(positional[0] if positional else "screenshots")
-    build_library()
 
-    # Our own config dir, rebuilt with the library: the default one carries a
-    # ``state.json`` resume snapshot from whatever ran last, which would drop
-    # us straight into the previous game instead of the home page -- the very
-    # first thing this tool wants to shoot.
-    platform = LinuxPlatform(rom_root=str(LIB.resolve()),
-                             config_dir=str((LIB / ".config").resolve()),
-                             headless=True)
+    # --lang LANG renders a localized UI (e.g. en_US) for the localized docs;
+    # default stays "zh_CN" so existing Chinese screenshots are unaffected.
+    args = sys.argv[1:]
+    lang = "zh_CN"
+    rest: list[str] = []
+    i = 0
+    while i < len(args):
+        if args[i] == "--lang" and i + 1 < len(args):
+            lang = args[i + 1]
+            i += 2
+            continue
+        rest.append(args[i])
+        i += 1
+    positional = [a for a in rest if not a.startswith("--")]
+    if positional:
+        out = Path(positional[0])
+    elif lang == "zh_CN":
+        out = Path("screenshots")
+    else:
+        out = Path("screenshots") / lang
+
+    build_library(lang)
+
+    # A SDL-free, headless platform lets this run on any machine (CI, a
+    # developer's laptop, Windows without the Linux input stack).  On the
+    # handheld itself use the default Linux platform instead.
+    if "--fake" in sys.argv:
+        platform: Platform = FakePlatform(LIB.resolve())
+    else:
+        platform = LinuxPlatform(rom_root=str(LIB.resolve()),
+                                 config_dir=str((LIB / ".config").resolve()),
+                                 headless=True)
     config = Config()
     # Force the layout the device is in; without this, "auto" always builds two
     # panels and the single-screen strip never shows up.
@@ -134,7 +268,7 @@ def main() -> int:
 
     library = Library(platform, config)
     library.scan()
-    app = App(platform, config, Translator("zh_CN"), library)
+    app = App(platform, config, Translator(lang), library)
 
     shoot(app, platform, out, "01-home")
     press(app, InputAction.A)            # enter ALL
@@ -154,6 +288,16 @@ def main() -> int:
     shoot(app, platform, out, "07-list-fc")
     app.session.modal = "exit"
     shoot(app, platform, out, "08-exit")
+
+    # 09: multi-card menu -- the "存储卡" row only appears with > 1 ROM root,
+    # which a single-card library never produces, so inject two for the shot.
+    app.session.rom_roots = [
+        (LIB.resolve(), "TF1"),
+        (Path("/nonexistent/tf2"), "TF2"),
+    ]
+    app.session.modal = "menu"
+    shoot(app, platform, out, "09-card-menu")
+
     print("done ->", out.resolve())
     return 0
 
