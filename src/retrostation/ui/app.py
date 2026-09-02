@@ -12,6 +12,7 @@ one-to-one.
 from __future__ import annotations
 
 import logging
+import subprocess
 import time
 from pathlib import Path
 
@@ -25,7 +26,7 @@ from ..core.theme import COLORS, metrics_for
 from ..data.library import Library
 from ..data.systems import display_name, lookup
 from ..data.video import VideoPlayer, VideoSettings
-from ..launcher.launch import LaunchError, build_plan
+from ..launcher.launch import LaunchError, LaunchPlan, build_plan
 from ..platform.base import InputAction, InputEvent, InputKind, Platform
 from .art import ArtProvider
 from .painter import Painter
@@ -823,9 +824,16 @@ class App:
         self.config.save(Path(self.platform.config_dir) / "config.json")
 
         log.info("launching %s via %s", game.key, plan.core_label)
-        # Save the place first (DESIGN §8.1 step ①): the game runs as a
-        # different process and the bootstrap restarts us afterwards.
+        # Save the place first (DESIGN §8.1 step ①): with enough RAM we stay
+        # alive and come back to it; without, the bootstrap restores it.
         self._save_resume()
+
+        if self.platform.can_stay_resident():
+            self._launch_resident(plan)
+            return
+
+        # Low-memory device, or a platform that cannot hide its windows: hand
+        # over by exiting, the way retrostation.sh expects (DESIGN §8.2).
         # Kill the decoder *before* handing over: the hand-off is a file the
         # bootstrap runs once we exit, and an inherited ffmpeg would keep
         # decoding behind the game.
@@ -833,6 +841,33 @@ class App:
         self._launch_plan = plan
         self._running = False
         self.platform.launch_game(plan.argv)
+
+    def _launch_resident(self, plan: LaunchPlan) -> None:
+        """Run the game while this process stays alive (DESIGN §8.2 fast path).
+
+        Hiding the windows hands the screen over in ~1 ms and destroys nothing,
+        so coming back is free too: no process exit (whose kernel reclaim of
+        the surfaces measured ~2 s here), no rescan, no window rebuild.  Only
+        taken when the device has RAM to spare -- see
+        :meth:`Platform.can_stay_resident`.
+        """
+        # Stop decoding for the duration of the game, but do not close() the
+        # player: that would disable the bottom-screen clips for good, and we
+        # are coming back.
+        self._video.stop()
+        log.info("staying resident: hiding windows for %s", plan.core_label)
+        self.platform.suspend_display()
+        try:
+            result = subprocess.run(list(plan.argv))
+            log.info("game exited with %s", result.returncode)
+        except OSError as exc:
+            log.error("could not start %s: %s", plan.argv, exc)
+            self.session.notify(str(exc))
+        finally:
+            self.platform.resume_display()
+            # The compositor may have dropped our buffers while we were hidden.
+            self._top_dirty = True
+            self._bottom_key = None
 
 
     # ------------------------------------------------------------------ #

@@ -27,6 +27,15 @@ from . import video as ffmpeg_pipe
 
 log = logging.getLogger(__name__)
 
+#: Minimum RAM for the frontend to stay resident while a game runs (kB).
+#: Measured cost is ~105 MB on the RG DS (3.9k ROM library + cover cache) --
+#: ~3.5% of this box's 3 GB, but a tenth of a 1 GB device, where it would
+#: compete with the emulator.  Small devices hand over by exiting instead.
+_RESIDENT_MIN_TOTAL_KB = 1_800_000
+#: ...and how much of it must still be free when we look.
+_RESIDENT_MIN_AVAILABLE_KB = 700_000
+
+
 # --------------------------------------------------------------------------- #
 # Path resolution
 # --------------------------------------------------------------------------- #
@@ -267,3 +276,35 @@ class LinuxPlatform(Platform):
             self._display = None
         self._canvases.clear()
         self._input.close()
+
+    def suspend_display(self) -> None:
+        # Stop input *before* hiding the windows: the device is shared (we do
+        # not grab it), so everything the player presses in the game would
+        # otherwise be queued and replayed into the menu on the way back.
+        self._input.pause()
+        if self._display is not None:
+            self._display.hide()
+
+    def resume_display(self) -> None:
+        if self._display is not None:
+            self._display.show()
+        self._input.resume()
+
+    def can_stay_resident(self) -> bool:
+        """Enough RAM to stay alive while a game runs?
+
+        Staying resident saves ~2 s per launch (no process exit and the ~2 s
+        the kernel spends reclaiming our surfaces, no rescan, no window
+        rebuild) but keeps ~105 MB of library and artwork in RAM alongside the
+        emulator.
+        """
+        try:
+            fields: dict[str, int] = {}
+            for line in Path("/proc/meminfo").read_text(encoding="utf-8").splitlines():
+                key, _, rest = line.partition(":")
+                if key in ("MemTotal", "MemAvailable"):
+                    fields[key] = int(rest.split()[0])
+        except (OSError, ValueError, IndexError):
+            return False        # cannot tell -- take the safe path
+        return (fields.get("MemTotal", 0) >= _RESIDENT_MIN_TOTAL_KB
+                and fields.get("MemAvailable", 0) >= _RESIDENT_MIN_AVAILABLE_KB)

@@ -476,3 +476,23 @@ class Platform(abc.ABC):
     @abc.abstractmethod
     def shutdown(self) -> None:
         """Release display/input resources before handing over to a game."""
+
+    def suspend_display(self) -> None:
+        """Hide the UI so another program can use the screen (optional).
+
+        The process stays alive and keeps whatever context it needs to come
+        back.  Implementations that cannot do this leave the no-op and
+        :meth:`can_stay_resident` False, which keeps the hand-off-by-exit path
+        described in DESIGN §8.2.
+        """
+
+    def resume_display(self) -> None:
+        """Undo :meth:`suspend_display`."""
+
+    def can_stay_resident(self) -> bool:
+        """Whether there is enough memory to stay alive while a game runs.
+
+        Conservative default: a platform that does not check keeps handing the
+        device over by exiting, which costs time but no extra memory.
+        """
+        return False

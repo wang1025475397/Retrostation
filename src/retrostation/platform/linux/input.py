@@ -215,6 +215,9 @@ class EvdevInput:
         self._events: deque[InputEvent] = deque()
         self._lock = threading.Lock()
         self._stop = threading.Event()
+        #: Set while a game owns the screen: events are read but dropped.
+        #: See :meth:`pause`.
+        self._paused = False
 
         #: action -> (held_since, last_repeat, long_fired)
         self._held: dict[InputAction, tuple[float, float, bool]] = {}
@@ -299,6 +302,8 @@ class EvdevInput:
     # ------------------------------------------------------------------ #
 
     def _press(self, action: InputAction, *, dedupe: bool = False) -> None:
+        if self._paused:
+            return
         now = time.monotonic()
         with self._lock:
             # An axis leaning the same way keeps reporting its value; without
@@ -309,6 +314,8 @@ class EvdevInput:
             self._events.append(InputEvent(action, InputKind.PRESS))
 
     def _release(self, action: InputAction) -> None:
+        if self._paused:
+            return
         with self._lock:
             self._held.pop(action, None)
             self._events.append(InputEvent(action, InputKind.RELEASE))
@@ -359,6 +366,28 @@ class EvdevInput:
     @property
     def device_path(self) -> str | None:
         return self._path
+
+    def pause(self) -> None:
+        """Stop delivering input: a game owns the screen (DESIGN §8.2).
+
+        The frontend stays alive while the game runs and the input device is
+        shared -- we deliberately do not grab it -- so without this every
+        button the player presses in the game is queued and then replayed into
+        the menu the instant they quit, which launches another game and walks
+        straight back out of the frontend.  The reader thread keeps draining
+        the device so it cannot back up; the events are simply dropped.
+        """
+        self._paused = True
+        with self._lock:
+            self._events.clear()
+            self._held.clear()
+
+    def resume(self) -> None:
+        """Undo :meth:`pause`, dropping anything seen in the meantime."""
+        with self._lock:
+            self._events.clear()
+            self._held.clear()
+        self._paused = False
 
     def close(self) -> None:
         self._stop.set()

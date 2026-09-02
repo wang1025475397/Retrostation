@@ -134,6 +134,10 @@ class SDLDisplay:
         lib.SDL_DestroyTexture.argtypes = [ctypes.c_void_p]
         lib.SDL_DestroyRenderer.argtypes = [ctypes.c_void_p]
         lib.SDL_DestroyWindow.argtypes = [ctypes.c_void_p]
+        lib.SDL_HideWindow.argtypes = [ctypes.c_void_p]
+        lib.SDL_HideWindow.restype = None
+        lib.SDL_ShowWindow.argtypes = [ctypes.c_void_p]
+        lib.SDL_ShowWindow.restype = None
         lib.SDL_RenderCopy.argtypes = [
             ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p,
         ]
@@ -227,8 +231,37 @@ class SDLDisplay:
         lib.SDL_RenderCopy(renderer, texture, None, None)
         lib.SDL_RenderPresent(renderer)
 
+    def hide(self) -> None:
+        """Hide every window without destroying anything.
+
+        The SDL context stays alive, so a game can take the screen over while
+        this process waits, and :meth:`show` brings the UI back without
+        re-initialising anything (DESIGN §8.2).
+        """
+        for window in self._windows:
+            self._lib.SDL_HideWindow(window)
+
+    def show(self) -> None:
+        """Undo :meth:`hide`."""
+        for window in self._windows:
+            self._lib.SDL_ShowWindow(window)
+
     def close(self) -> None:
-        """Destroy windows and quit SDL.  Called exactly once, on the way out."""
+        """Destroy windows and quit SDL.  Called exactly once, on the way out.
+
+        NOTE (measured on the RG DS): this costs ~2 s once a frame has been
+        presented -- ``SDL_DestroyWindow`` waits ~1 s *per window* for the
+        Wayland compositor to release buffers we already handed it, while
+        destroying textures/renderers and ``SDL_Quit`` are free (<15 ms).
+
+        Skipping that teardown does **not** make launching a game faster:
+        hiding the windows and returning early moves the same ~2 s into
+        process exit, where the kernel reclaims the surfaces, and
+        ``retrostation.sh`` still has to wait for the process to disappear
+        before it can start the game (total wall time 5.28 s vs 5.27 s).
+        The cost is inherent to handing the display over, not to how we tear
+        it down -- so don't spend time optimising here again.
+        """
         if self._closed:
             return
         self._closed = True
