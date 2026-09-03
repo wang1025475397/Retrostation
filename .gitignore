@@ -18,3 +18,4 @@ screenshots/en_US/*_bottom.png
 
 # scripts/build_release.py output: source-free, byte-compiled bundles.
 dist/
+screenshots-preview/

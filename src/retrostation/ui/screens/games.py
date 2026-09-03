@@ -6,6 +6,8 @@ cursor, so switching views with X never loses your place (DESIGN §7.1).
 
 from __future__ import annotations
 
+from PIL import Image
+
 from ..art import ArtProvider
 from ..painter import Painter
 from ..widgets import page_header, scrollbar
@@ -98,7 +100,14 @@ def draw_backdrop(painter: Painter, art: ArtProvider, game: Game) -> None:
         if len(_BACKDROP_DIM) >= _BACKDROP_LIMIT:
             _BACKDROP_DIM.clear()
         _BACKDROP_DIM[key] = faded
-    painter.image(faded, (0, 0, width, height))
+    # The canvas must stay fully opaque.  On the device the RGBA framebuffer is
+    # composited by Weston using its alpha channel, so any alpha<255 pixel shows
+    # through to black instead of to the dimmed art (DESIGN §4.4).  Composite the
+    # dimmed backdrop onto the opaque background colour and flatten its alpha.
+    base = Image.new("RGBA", (width, height), COLORS.bg)
+    base.alpha_composite(faded)
+    base.putalpha(255)
+    painter.image(base, (0, 0, width, height))
 
 
 def panel_fill(painter: Painter):

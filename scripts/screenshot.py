@@ -136,7 +136,14 @@ def shoot(app: App, platform, out: Path, tag: str) -> None:
         target = out / f"{tag}_{'top' if index == 0 else 'bottom'}.png"
         target.parent.mkdir(parents=True, exist_ok=True)
         canvas = cast(PilCanvas, painter.canvas)
-        canvas.pil_image.save(target)
+        image = canvas.pil_image
+        # Flatten alpha so the preview matches the device: the RGBA framebuffer
+        # is composited with its alpha channel there, so any alpha<255 pixel
+        # shows through to black instead of the drawn art.
+        if image.mode == "RGBA":
+            image = image.copy()
+            image.putalpha(255)
+        image.save(target)
     print("saved", tag)
 
 

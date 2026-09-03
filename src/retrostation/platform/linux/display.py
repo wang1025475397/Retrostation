@@ -225,7 +225,17 @@ class SDLDisplay:
                 return
             self._textures[index] = texture
 
-        pixels = canvas.pil_image.tobytes("raw", "RGBA")
+        # The canvas must be fully opaque on upload.  Weston composites the
+        # RGBA framebuffer using its alpha channel, so any alpha<255 pixel would
+        # show through to black instead of the (already alpha-composited) art.
+        # Everything is drawn with its transparency pre-blended into the RGB, so
+        # flattening the alpha to 255 keeps the look and makes it display right
+        # (DESIGN §4.4).
+        surface = canvas.pil_image
+        if surface.mode == "RGBA":
+            surface = surface.copy()
+            surface.putalpha(255)
+        pixels = surface.tobytes("raw", "RGBA")
         if lib.SDL_UpdateTexture(texture, None, pixels, width * 4) != 0:
             return
         lib.SDL_RenderCopy(renderer, texture, None, None)
