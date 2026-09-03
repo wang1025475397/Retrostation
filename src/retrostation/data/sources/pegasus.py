@@ -87,29 +87,61 @@ class PegasusSource(MetadataSource):
             entry = self._to_entry(block, modified)
             if entry is None:
                 continue
-            entries.setdefault(entry.key, entry)
+            # Index the entry under *every* file it lists, pointing at the same
+            # RawEntry object.  That way each variant ROM finds its metadata, and
+            # the loader can collapse them into one game (see ``build_games``).
+            for name in entry.files:
+                entries.setdefault(name, entry)
         return entries
 
     # -- parsing ---------------------------------------------------------- #
 
     @staticmethod
-    def _parse_blocks(text: str) -> list[dict[str, str]]:
-        """Split the file into key/value blocks, handling multi-line values."""
-        blocks: list[dict[str, str]] = []
-        current: dict[str, str] = {}
+    def _parse_blocks(text: str) -> list[tuple[dict[str, str], list[str]]]:
+        """Split the file into ``(fields, files)`` blocks.
+
+        Handles the two ways Pegasus lists ROMs for one game (both occur in the
+        wild, and PegasusConverter parses both):
+
+        * repeated ``file:`` lines -- one per ROM;
+        * a single ``files:`` line with comma-separated ROMs, optionally
+          continued on indented following lines.
+
+        A ``game:`` line starts a new block; a block with no ``file``/``files``
+        (collection-level metadata) yields an empty ``files`` list and is
+        dropped later.
+        """
+        blocks: list[tuple[dict[str, str], list[str]]] = []
+        fields: dict[str, str] = {}
+        files: list[str] = []
         current_key: str | None = None
+        in_files = False
+
+        def flush() -> None:
+            if fields or files:
+                blocks.append((dict(fields), list(files)))
 
         for line in text.splitlines():
-            if not line.strip() or line.lstrip().startswith("#"):
-                current_key = None if not line.strip() else current_key
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                # A blank line ends a value continuation; a comment is ignored.
+                if not stripped:
+                    current_key = None
+                    in_files = False
                 continue
 
-            # Continuation of the previous value.
-            if line[0] in " \t" and current_key:
-                body = line.strip()
+            # Continuation line (leading whitespace) of the current value.
+            if line[0] in " \t" and current_key is not None:
+                body = stripped
                 if body == ".":
                     body = ""
-                current[current_key] = f"{current[current_key]}\n{body}"
+                if in_files:
+                    files.extend(p for p in body.split(",") if p.strip())
+                elif current_key == "description":
+                    fields[current_key] = f"{fields.get(current_key, '')}\n{body}"
+                elif current_key not in ("game",):
+                    # Unknown field continued onto the next line.
+                    fields[current_key] = f"{fields.get(current_key, '')}\n{body}"
                 continue
 
             if ":" not in line:
@@ -121,32 +153,41 @@ class PegasusSource(MetadataSource):
                 continue
 
             if key == "game":
-                # A new game starts here; flush the previous block.
-                if current:
-                    blocks.append(current)
-                current = {}
+                flush()
+                fields, files = {}, []
                 current_key = "game"
-                current[current_key] = value
-                continue
-
-            current_key = key
-            if key in current:
-                current[key] = f"{current[key]}\n{value}"  # repeated key (files)
+                in_files = False
+                fields["game"] = value
+            elif key in ("file", "files"):
+                current_key = "file"
+                in_files = True
+                files.extend(p for p in value.split(",") if p.strip())
+                # Keep the first spelling for provenance/round-trip.
+                fields.setdefault("file", value)
+            elif key.startswith("assets."):
+                fields[key] = value
+                current_key = None
+                in_files = False
             else:
-                current[key] = value
+                current_key = key
+                in_files = False
+                if key in fields:
+                    fields[key] = f"{fields[key]}\n{value}"  # repeated key
+                else:
+                    fields[key] = value
 
-        if current:
-            blocks.append(current)
+        flush()
         return blocks
 
-    def _to_entry(self, block: dict[str, str], modified: float) -> RawEntry | None:
-        files = [line for line in block.get("file", "").splitlines() if line.strip()]
+    def _to_entry(self, block: tuple[dict[str, str], list[str]], modified: float) -> RawEntry | None:
+        fields, files = block
+        files = [name.strip() for name in files if name.strip()]
         if not files:
             return None  # a block without a file is collection metadata
 
-        key = files[0].strip()
+        key = files[0]
         media: dict[str, str] = {}
-        for name, value in block.items():
+        for name, value in fields.items():
             if not name.startswith("assets."):
                 continue
             asset_key = name[len("assets."):].replace("_", "").replace("-", "").lower()
@@ -155,7 +196,13 @@ class PegasusSource(MetadataSource):
             if kind and first and kind not in media:
                 media[kind] = first
 
-        return RawEntry(key=key, fields=dict(block), media=media, modified=modified)
+        return RawEntry(
+            key=key,
+            fields=dict(fields),
+            media=media,
+            modified=modified,
+            files=list(files),
+        )
 
     # ------------------------------------------------------------------ #
     # Conversion

@@ -49,6 +49,10 @@ class RawEntry:
     key: str
     fields: dict[str, Any] = field(default_factory=dict)
     media: dict[str, str] = field(default_factory=dict)
+    #: Every ROM file this entry covers.  Most sources describe one file, so
+    #: this defaults to ``[key]``; Pegasus blocks that list several ``file:``
+    #: lines carry all of them here, which is what drives multi-file grouping.
+    files: list[str] = field(default_factory=list)
     opaque: Any = None
     modified: float = 0.0
     missing: bool = False

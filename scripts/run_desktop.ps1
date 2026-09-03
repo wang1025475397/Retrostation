@@ -49,7 +49,7 @@ $args2 = @()
 if ($args -notcontains '--desktop') { $args2 += '--desktop' }
 
 # Auto-use the default ROM directory unless the caller overrode it.
-$defaultRomRoot = 'E:\baidu\ps1\Roms'
+$defaultRomRoot = 'E:\Pegasus G\Roms'
 if (-not ($args | Where-Object { $_ -like '--rom-root*' }) -and (Test-Path $defaultRomRoot)) {
     $args2 += '--rom-root', $defaultRomRoot
 }

@@ -82,28 +82,82 @@ def build_games(
     roms: list[Path],
     system_dir: Path,
     bundles: list[_SourceBundle],
-) -> dict[str, Game]:
-    """Merge every source into one :class:`Game` per ROM.
+) -> tuple[dict[str, Game], set[str]]:
+    """Merge every source into one :class:`Game` per logical game.
+
+    Returns ``(games, variant_keys)``:
+
+    * ``games`` maps ``game_key`` -> :class:`Game` for every entry that should
+      appear in the library -- one per ROM, or one per multi-file Pegasus block;
+    * ``variant_keys`` are the ``game_key``\\ s of ROM files that belong to a
+      multi-file block but are not its primary file.  The caller drops them so
+      a Pegasus ``game:`` block listing several ``file:`` lines shows up once,
+      with the other files collected in :attr:`Game.variants`.
 
     ROMs absent from every source still get a minimal Game built from the file
     name, so the library is always complete.
     """
+    rom_index = {rom.name: rom for rom in roms}
     games: dict[str, Game] = {}
+    variant_keys: set[str] = set()
+
+    # Per-ROM matches across all sources, by file name.
+    matches: dict[str, list[tuple[MetadataSource, RawEntry]]] = {}
     for rom in roms:
-        key = game_key(system, rom)
-        candidates = [
-            bundle.source.to_game(system, rom, bundle.entries[rom.name])
+        found = [
+            (bundle.source, bundle.entries[rom.name])
             for bundle in bundles
             if rom.name in bundle.entries
         ]
-        games[key] = merge_games(candidates) if candidates else Game.from_rom(system, rom)
+        if found:
+            matches[rom.name] = found
 
-        # Remember which file each source came from, for provenance/debugging.
-        for bundle in bundles:
-            entry = bundle.entries.get(rom.name)
-            if entry is not None and not entry.missing:
-                games[key].sources.setdefault(bundle.source.name, system_dir.name)
-    return games
+    # Group ROMs covered by a single multi-file entry (e.g. a Pegasus block
+    # listing several ``file:`` lines).  They collapse into one Game.
+    groups: dict[int, list[str]] = {}
+    for bundle in bundles:
+        for name, entry in bundle.entries.items():
+            file_list = getattr(entry, "files", None)
+            if file_list and len(file_list) > 1:
+                groups.setdefault(id(entry), []).append(name)
+
+    for names in groups.values():
+        primary_name = next((n for n in names if n in matches), names[0])
+        primary_rom = rom_index.get(primary_name)
+        if primary_rom is None:
+            continue
+        found = matches[primary_name]
+        candidates = [source.to_game(system, primary_rom, raw) for source, raw in found]
+        game = merge_games(candidates) if len(candidates) > 1 else candidates[0]
+        variants = [rom_index[n] for n in names if n != primary_name and n in rom_index]
+        game = game.copy(variants=variants)
+        key = game_key(system, primary_rom)
+        games[key] = game
+        for source, raw in found:
+            if not raw.missing:
+                game.sources.setdefault(source.name, system_dir.name)
+        for name in names:
+            if name != primary_name and name in rom_index:
+                variant_keys.add(game_key(system, rom_index[name]))
+
+    # Every other ROM -> its own Game (or a multi-file ROM with no grouping).
+    for rom in roms:
+        key = game_key(system, rom)
+        if key in games or key in variant_keys:
+            continue
+        found = matches.get(rom.name)
+        if found:
+            candidates = [source.to_game(system, rom, raw) for source, raw in found]
+            game = merge_games(candidates) if len(candidates) > 1 else candidates[0]
+        else:
+            game = Game.from_rom(system, rom)
+        games[key] = game
+        if found:
+            for source, raw in found:
+                if not raw.missing:
+                    game.sources.setdefault(source.name, system_dir.name)
+
+    return games, variant_keys
 
 
 def collect_state(entries: dict[str, RawEntry]) -> dict[str, RawEntry]:

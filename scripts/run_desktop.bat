@@ -37,7 +37,7 @@ echo         关闭窗口 或 按 Alt+F4 退出。
 echo -----------------------------------------------------------------
 
 rem 未显式指定 --rom-root 时，自动使用默认 ROM 目录。
-set "DEFAULT_ROM_ROOT=E:\baidu\ps1\Roms"
+set "DEFAULT_ROM_ROOT=E:\Pegasus G\Roms"
 set "ROM_ARG="
 echo %* | findstr /i "rom-root" >nul
 if errorlevel 1 (

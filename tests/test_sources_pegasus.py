@@ -8,6 +8,7 @@ import pytest
 
 from retrostation.data.sources.base import UnsupportedWrite
 from retrostation.data.sources.pegasus import PegasusSource
+from retrostation.data.sources import load_system, build_games
 
 METADATA = """# a comment, ignored
 collection: NES
@@ -56,7 +57,11 @@ class TestParsing:
 
     def test_key_is_first_file(self, system_dir: Path) -> None:
         entries = PegasusSource().load(system_dir)
-        assert set(entries) == {"超级马力欧兄弟.nes", "魂斗罗.nes"}
+        # Every file listed by a ``file:`` line is indexed (same RawEntry), so
+        # each variant ROM can find its metadata.
+        assert set(entries) == {"超级马力欧兄弟.nes", "魂斗罗.nes", "魂斗罗 (Track 1).nes"}
+        # And the entry remembers all of them.
+        assert entries["魂斗罗 (Track 1).nes"].files == ["魂斗罗.nes", "魂斗罗 (Track 1).nes"]
 
     def test_rating_percent_is_normalised(self, system_dir: Path) -> None:
         source = PegasusSource()
@@ -113,3 +118,53 @@ class TestParsing:
         directory.mkdir()
         (directory / "metadata.pegasus.txt").write_bytes(b"\xff\xfe\x00bad")
         assert PegasusSource().load(directory) == {}
+
+
+class TestMultiFileGrouping:
+    """A ``game:`` block may list several ``file:`` lines (region/revision
+    variants).  They must collapse into ONE library entry, not N filename games.
+
+    This is the bug the user hit: ``FBNEO`` folders where Asterix ships as
+    ``asterix.zip`` / ``asterixaad.zip`` / ``asterixj.zip`` etc. were all shown
+    separately and only the first got its metadata.
+    """
+
+    METADATA = """game: Asterix
+file: asterix.zip
+file: asterixaad.zip
+file: asterixj.zip
+summary: 高卢英雄闯关。
+assets.boxFront: Imgs/asterix.png
+"""
+
+    @pytest.fixture
+    def system_dir(self, tmp_path: Path) -> Path:
+        directory = tmp_path / "FBNEO"
+        directory.mkdir()
+        (directory / "metadata.pegasus.txt").write_text(self.METADATA, encoding="utf-8")
+        (directory / "asterix.zip").write_bytes(b"x")
+        (directory / "asterixaad.zip").write_bytes(b"x")
+        (directory / "asterixj.zip").write_bytes(b"x")
+        (directory / "Imgs").mkdir()
+        (directory / "Imgs" / "asterix.png").write_bytes(b"png")
+        return directory
+
+    def test_one_entry_per_block(self, system_dir: Path) -> None:
+        roms = [system_dir / n for n in ("asterix.zip", "asterixaad.zip", "asterixj.zip")]
+        bundles = load_system(system_dir)
+        games, variant_keys = build_games("FBNEO", roms, system_dir, bundles)
+
+        # One game, keyed by the primary (first-listed) file.
+        assert set(games) == {"FBNEO/asterix.zip"}
+        game = games["FBNEO/asterix.zip"]
+        assert game.display_name == "Asterix"
+        assert game.blurb == "高卢英雄闯关。"
+        # The other two files are its variants, reported so they are dropped.
+        assert [p.name for p in game.variants] == ["asterixaad.zip", "asterixj.zip"]
+        assert variant_keys == {"FBNEO/asterixaad.zip", "FBNEO/asterixj.zip"}
+
+    def test_metadata_associated_with_every_file(self, system_dir: Path) -> None:
+        """Each variant ROM resolves to the same title, not its bare file name."""
+        entries = PegasusSource().load(system_dir)
+        for name in ("asterix.zip", "asterixaad.zip", "asterixj.zip"):
+            assert entries[name].fields.get("game") == "Asterix"

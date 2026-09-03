@@ -167,18 +167,26 @@ class Library:
                 names=self._config.metadata.sources,
                 esde_root=self._config.metadata.esde_root,
             )
-            games = source_registry.build_games(system_key, [rom.path for rom in roms], system_dir, bundles)
+            games, variant_keys = source_registry.build_games(
+                system_key, [rom.path for rom in roms], system_dir, bundles
+            )
         except Exception:  # noqa: BLE001 - metadata must never break browsing
             log.exception("metadata load failed for %s; falling back to filenames", system_key)
             games = {rom.name: Game.from_rom(system_key, rom.path) for rom in roms}
+            variant_keys = set()
 
         # Keep the ROM's on-disk order (already sorted by the scanner).
         ordered: list[Game] = []
         for rom in roms:
+            key = game_key(system_key, rom.path)
+            # A multi-file Pegasus block collapses into its primary Game; the
+            # other files (its variants) are skipped so the title shows once.
+            if key in variant_keys:
+                continue
             # ``build_games`` keys by ``game_key``, which is system-prefixed;
             # looking a bare file name up here silently dropped every source's
             # metadata and left the library with filename-only games.
-            game = games.get(game_key(system_key, rom.path))
+            game = games.get(key)
             if game is None:
                 game = Game.from_rom(system_key, rom.path)
             ordered.append(game)

@@ -27,7 +27,6 @@ from .core.theme import COLORS
 from .data.library import Library
 from .data.systems import USER_SYSTEMS_FILE, apply_user_systems, display_name
 from .platform.base import Platform
-from .platform.desktop.platform import DesktopPlatform
 from .platform.linux.platform import LinuxPlatform, resolve_config_dir
 from .ui.app import EXIT_OK, App
 
@@ -42,6 +41,10 @@ def build_platform(args: argparse.Namespace, config: Config) -> Platform:
     """
     explicit = args.rom_root or (None if config.rom_root == "auto" else config.rom_root)
     if getattr(args, "desktop", False):
+        # Lazy import: ``DesktopPlatform`` pulls in tkinter, which only exists on
+        # a PC.  Importing it at module load would break startup on the handheld
+        # (which has no tkinter), even when ``--desktop`` is never used.
+        from .platform.desktop.platform import DesktopPlatform
         return DesktopPlatform(rom_root=explicit)
     return LinuxPlatform(rom_root=explicit, headless=args.headless)
 

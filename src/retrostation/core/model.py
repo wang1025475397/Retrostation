@@ -139,6 +139,11 @@ class Game:
     key: str
     path: Path
     name: str = ""
+    #: Extra ROM files that belong to the *same* game (Pegasus blocks may list
+    #: several ``file:`` lines for one title -- region/revision variants).  The
+    #: primary ``path`` is what launches; these exist so the game shows up once
+    #: instead of once per file.
+    variants: list[Path] = field(default_factory=list)
 
     # -- descriptive metadata ---------------------------------------------- #
     sortname: str | None = None
@@ -205,6 +210,11 @@ class Game:
     def display_name(self) -> str:
         """Name to render; never empty."""
         return self.name or self.path.stem
+
+    @property
+    def is_multi(self) -> bool:
+        """True when the game bundles more than one ROM file."""
+        return bool(self.variants)
 
     @property
     def sort_key(self) -> str:
