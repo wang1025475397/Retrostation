@@ -47,6 +47,10 @@ const state = {
   if (g) state.favorites.add(g.id);
 });
 
+// 版本号镜像自 src/retrostation/__init__.py（经 prototype/version.json 提供，避免 JS 内硬编码）
+let APP_VERSION = '0.2.0';
+fetch('version.json').then(r => r.json()).then(d => { APP_VERSION = d.version; }).catch(() => {});
+
 const MENU_ITEMS = [
   { key: 'screen',  label: '显示模式',   get: () => state.single ? '单屏' : '双屏' },
   { key: 'layout',  label: '游戏视图',   get: () => LAYOUT_CN[state.layout] },
@@ -58,7 +62,7 @@ const MENU_ITEMS = [
   { key: 'theme',   label: '主题',       get: () => '琥珀 / 深色' },
   { key: 'bright',  label: '背光',       get: () => '上 140 / 下 140' },
   { key: 'scrape',  label: '跳转刮削',   get: () => 'Tiny Scraper' },
-  { key: 'about',   label: '关于',       get: () => 'v0.1.0' },
+  { key: 'about',   label: '关于',       get: () => 'v' + APP_VERSION },
 ];
 
 /* ============================================================

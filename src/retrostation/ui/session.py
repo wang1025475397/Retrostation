@@ -23,6 +23,7 @@ from typing import Any, Mapping
 
 from ..core.config import LAYOUTS, Config
 from ..core.i18n import Translator, available_builtin
+from .. import __version__
 from ..core.model import Game
 from ..core.theme import THEMES, VARIANTS
 from ..data.library import Library
@@ -692,7 +693,7 @@ class Session:
              f"{int(config.brightness.get('top', 140))}"),
             ("status_bar", self.translator("menu.status_bar"),
              self.translator("value.on" if config.show_status_bar else "value.off")),
-            ("about", self.translator("menu.about"), "v0.1.0"),
+            ("about", self.translator("menu.about"), f"v{__version__}"),
         ]
         return rows
 
