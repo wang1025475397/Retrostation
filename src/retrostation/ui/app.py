@@ -32,7 +32,7 @@ from .art import ArtProvider
 from .painter import Painter
 from .session import MODAL_EXIT, MODAL_MENU, Session, VIEW_GAMES, VIEW_PLATFORMS
 from .screens import bottom, games, home, menu
-from .widgets import button_bar, dialog, status_bar, toast
+from .widgets import button_bar, dialog, status_bar, toast, version_tag
 
 log = logging.getLogger(__name__)
 
@@ -383,6 +383,7 @@ class App:
             self._last_first = self._draw_games(painter, highlight=highlight)
         else:
             self._draw_home(painter)
+        version_tag(painter)
 
     # -- cached-panel repaint strategies ----------------------------------- #
 

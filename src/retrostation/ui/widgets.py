@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
+from .. import __version__
 from ..core.model import Game
 from ..core.theme import COLORS, Metrics
 from .art import ArtProvider
@@ -41,6 +42,14 @@ def status_bar(painter: Painter, *, dual: bool) -> None:
 
     mode = painter.translator("status.dual" if dual else "status.single")
     painter.text((m.width // 2, center), mode, size=12, fill=COLORS.text_dim, anchor="mm")
+
+
+def version_tag(painter: Painter) -> None:
+    """App version + author, pinned to the bottom-right of the main screen."""
+    m = painter.metrics
+    text = f"v{__version__} · by 游戏师叔"
+    y = m.height - m.bar_h - m.u(6)
+    painter.text((m.width - m.u(10), y), text, size=12, fill=COLORS.text_dim, anchor="rm")
 
 
 def page_header(painter: Painter, *, title: str, subtitle: str = "", right: str = "") -> None:
