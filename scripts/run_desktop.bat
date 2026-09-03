@@ -1,0 +1,60 @@
+@echo off
+rem 一键启动 Retrostation 桌面版（Windows）。双击即可运行，无需手动设置环境。
+rem 直接调用 python（不经 PowerShell），并把每一步打印出来，方便排查问题。
+setlocal
+cd /d "%~dp0.."
+
+set "PYTHONPATH=%CD%\src"
+set PYTHONUNBUFFERED=1
+
+echo ============================================================
+echo   Retrostation 桌面版启动器
+echo   项目根目录 : %CD%
+echo   PYTHONPATH : %PYTHONPATH%
+echo ============================================================
+
+rem 选一个可用的 Python 解释器（python 优先，回退到 py 启动器）。
+set "PY=python"
+where python >nul 2>nul || set "PY=py"
+where %PY% >nul 2>nul
+if errorlevel 1 (
+    echo [错误] 找不到 python 或 py。请先安装 Python 3.11+ 并勾选加入 PATH。
+    pause
+    exit /b 1
+)
+
+echo [1/2] 检查 tkinter（桌面窗口依赖）...
+%PY% -c "import tkinter" 2>nul
+if errorlevel 1 (
+    echo [错误] 当前 Python 缺少 tkinter（标准库的一部分）。
+    echo         请重新运行官方安装器，并在 "Optional Features" 中勾选 tcl/tk and IDLE。
+    pause
+    exit /b 1
+)
+
+echo [2/2] 启动 Retrostation（--desktop）...
+echo         关闭窗口 或 按 Alt+F4 退出。
+echo -----------------------------------------------------------------
+
+rem 未显式指定 --rom-root 时，自动使用默认 ROM 目录。
+set "DEFAULT_ROM_ROOT=E:\baidu\ps1\Roms"
+set "ROM_ARG="
+echo %* | findstr /i "rom-root" >nul
+if errorlevel 1 (
+    if exist "%DEFAULT_ROM_ROOT%\" (
+        set "ROM_ARG=--rom-root "%DEFAULT_ROM_ROOT%""
+    ) else (
+        echo [提示] 默认 ROM 目录不存在：%DEFAULT_ROM_ROOT%
+    )
+)
+
+echo 执行命令: %PY% -m retrostation.main --desktop %ROM_ARG% %*
+%PY% -m retrostation.main --desktop %ROM_ARG% %*
+set "CODE=%errorlevel%"
+echo -----------------------------------------------------------------
+if not "%CODE%"=="0" (
+    echo [退出] 程序异常退出，退出码: %CODE%
+) else (
+    echo [退出] 正常结束。
+)
+pause

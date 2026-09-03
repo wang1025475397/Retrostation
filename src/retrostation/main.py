@@ -27,6 +27,7 @@ from .core.theme import COLORS
 from .data.library import Library
 from .data.systems import USER_SYSTEMS_FILE, apply_user_systems, display_name
 from .platform.base import Platform
+from .platform.desktop.platform import DesktopPlatform
 from .platform.linux.platform import LinuxPlatform, resolve_config_dir
 from .ui.app import EXIT_OK, App
 
@@ -40,6 +41,8 @@ def build_platform(args: argparse.Namespace, config: Config) -> Platform:
     else is a path they chose, and wins over probing.
     """
     explicit = args.rom_root or (None if config.rom_root == "auto" else config.rom_root)
+    if getattr(args, "desktop", False):
+        return DesktopPlatform(rom_root=explicit)
     return LinuxPlatform(rom_root=explicit, headless=args.headless)
 
 
@@ -48,6 +51,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--config", help="path to config.json", default=None)
     parser.add_argument("--rom-root", help="override the ROM root directory", default=None)
     parser.add_argument("--headless", action="store_true", help="run without SDL (development)")
+    parser.add_argument("--desktop", action="store_true",
+                        help="run on a PC with a tkinter window + keyboard (no SDL/evdev)")
+    parser.add_argument("--single", action="store_true",
+                        help="force a single screen instead of dual (mainly for --desktop)")
     parser.add_argument("--scan-only", action="store_true",
                         help="scan the library, print a summary and exit")
     parser.add_argument("--check", metavar="SYSTEM",
@@ -137,6 +144,11 @@ def main(argv: list[str] | None = None) -> int:
     # that to resolve the ROM root.  The config directory does not depend on
     # which card is active, so resolving it on its own is safe.
     config = Config.load(args.config or (resolve_config_dir(None) / "config.json"))
+    # On the desktop we cannot probe the handheld's two displays, so pick a
+    # layout explicitly: dual by default (see the linked bottom screen), single
+    # with --single.  The Linux path keeps probing the real hardware.
+    if args.desktop:
+        config.screen_mode = "single" if args.single else "dual"
     # Before anything draws: the palette is a shared instance, so loading the
     # configured theme here is what every screen picks up.
     COLORS.apply(config.theme, config.theme_variant)
