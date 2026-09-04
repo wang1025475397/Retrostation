@@ -83,7 +83,7 @@ def is_rom(name: str, extensions: frozenset[str]) -> bool:
 
 def scan_system(platform: Platform, system_key: str) -> list[Rom]:
     """List the ROMs of one system directory (never raises)."""
-    directory = platform.rom_root / system_key
+    directory = platform.system_dir(system_key)
     extensions = accepted_extensions(system_key)
     roms: list[Rom] = []
 
@@ -265,6 +265,10 @@ def scan_library(
         for entry in entries
         if entry.is_dir and entry.name not in AGGREGATE_KEYS and not lookup(entry.name).hidden
     ]
+    # Systems kept outside rom_root (e.g. Ports next to Roms) never show up
+    # in the listing above -- append them so they are scanned like the rest.
+    keys.extend(key for key in platform.extra_system_keys() if key not in keys)
+    keys.sort()
 
     systems: dict[str, list[Rom]] = {}
     cached = rescanned = 0

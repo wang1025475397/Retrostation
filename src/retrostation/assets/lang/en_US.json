@@ -153,5 +153,11 @@
   "system.desc.sunplus": "A low-cost arcade-platform chipset used by many generic handheld games.",
   "system.desc.megaduck": "The Welback Holdings Mega Duck, usually just referred to as Mega Duck, is a fourth generation (1987-2004) handheld video game console developed and distributed by Welback Holdings, but marketed under different names like Creatronic, Videojet, Cougar USA, and Hartung.",
   "system.desc.ports": "View and play all of your favorite game ports.",
-  "system.desc.APPS": "Device applications and utilities."
+  "system.desc.APPS": "Device applications and utilities.",
+  "system.desc.a2600": "The Atari Video Computer System (VCS), later named the Atari 2600, is a second generation (1976-1992) home video game console developed and distributed by Atari, Inc.",
+  "system.desc.gw": "Game & Watch is a series of handheld electronic games produced by Nintendo from 1980 and designed by Gunpei Yokoi -- a precursor of the Game Boy.",
+  "system.desc.varcade": "A collection of classic arcade games bundled together for one-tap play.",
+  "system.desc.dos": "DOS games run on the MS-DOS operating system and include many classic PC titles from the 1980s and 1990s.",
+  "system.desc.mdcd": "The Sega CD, released as the Mega-CD in most regions outside North America and Brazil, is a CD-ROM accessory for the Mega Drive/Genesis designed and produced by Sega.",
+  "system.desc.dreamcast": "The Dreamcast is a home video game console released by Sega on 27 November 1998 in Japan, 9 September 1999 in North America, and 14 October 1999 in Europe."
 }

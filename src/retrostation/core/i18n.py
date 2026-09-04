@@ -26,6 +26,10 @@ BUILTIN_LANG_DIR = Path(__file__).resolve().parent.parent / "assets" / "lang"
 #: Locale environment variables, most specific first.
 _LOCALE_VARS = ("LANGUAGE", "LC_ALL", "LC_MESSAGES", "LANG")
 
+#: Prefix of the per-platform description keys, whose suffix is casefolded on
+#: load (see :meth:`Translator._load`).
+_DESC_PREFIX = "system.desc."
+
 
 def available_builtin() -> list[str]:
     """Language codes shipped with the package."""
@@ -103,7 +107,16 @@ class Translator:
             except (OSError, json.JSONDecodeError):
                 continue  # a corrupt bundle must not take the app down
             if isinstance(data, dict):
-                merged.update({str(k): str(v) for k, v in data.items()})
+                for key, value in data.items():
+                    key = str(key)
+                    # Platform descriptions are looked up by the firmware's
+                    # directory name, which comes in whatever case the card
+                    # uses -- normalise so a bundle's ``segaCD`` answers a
+                    # query for ``segamd`` without every bundle spelling the
+                    # key twice.
+                    if key.startswith(_DESC_PREFIX):
+                        key = _DESC_PREFIX + key[len(_DESC_PREFIX):].casefold()
+                    merged[key] = str(value)
         return merged
 
     # ------------------------------------------------------------------ #

@@ -425,6 +425,22 @@ class Platform(abc.ABC):
     def rom_root(self) -> Path:
         """Root directory that holds one sub-directory per system."""
 
+    def system_dir(self, system_key: str) -> Path:
+        """Directory that holds ``system_key``'s ROMs.
+
+        Most systems are ``rom_root/<system>``; platforms override this when
+        the firmware keeps a system elsewhere (e.g. Ports next to Roms).
+        """
+        return self.rom_root / system_key
+
+    def extra_system_keys(self) -> list[str]:
+        """System keys living outside ``rom_root`` that must be scanned too.
+
+        The library scan lists ``rom_root``'s sub-directories to discover
+        systems, so anything kept elsewhere would silently never appear.
+        """
+        return []
+
     def available_rom_roots(self) -> list[tuple[Path, str]]:
         """ROM roots present on this device, with a short label each.
 

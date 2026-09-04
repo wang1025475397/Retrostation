@@ -168,7 +168,7 @@ class Library:
             library.roms = scan_system(self._platform, system_key)
             roms = library.roms
 
-        system_dir = self._platform.rom_root / system_key
+        system_dir = self._platform.system_dir(system_key)
         definition = lookup(system_key)
 
         bundles: list = []
@@ -287,7 +287,7 @@ class Library:
         if metadata.read_only:
             return False
 
-        system_dir = self._platform.rom_root / system_key
+        system_dir = self._platform.system_dir(system_key)
         source = source_registry.source_by_name(metadata.primary_write_source, metadata.esde_root)
         if source is None or not source.writable:
             return self._save_sidecar(game, system_key)
@@ -311,7 +311,7 @@ class Library:
         """Last resort when no writable source exists."""
         if not self._config.metadata.sidecar_fallback:
             return False
-        directory = self._platform.rom_root / system_key / ".retrostation"
+        directory = self._platform.system_dir(system_key) / ".retrostation"
         try:
             directory.mkdir(parents=True, exist_ok=True)
             payload = {

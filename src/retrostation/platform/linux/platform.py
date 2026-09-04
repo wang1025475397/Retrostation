@@ -91,6 +91,18 @@ def resolve_rom_root(explicit: str | None = None) -> Path:
     return Path.cwd() / "roms"  # development fallback
 
 
+def resolve_ports_dir(rom_root: Path) -> Path | None:
+    """Where the ports system lives: ``Roms/PORTS`` first, then the sibling
+    ``Ports`` folder next to Roms (this firmware's layout), else ``None``."""
+    primary = rom_root / "PORTS"
+    if primary.is_dir():
+        return primary
+    sibling = rom_root.parent / "Ports"
+    if sibling.is_dir():
+        return sibling
+    return None
+
+
 def resolve_config_dir(explicit: str | None = None) -> Path:
     if explicit:
         return Path(explicit)
@@ -171,6 +183,26 @@ class LinuxPlatform(Platform):
     @property
     def rom_root(self) -> Path:
         return self._rom_root
+
+    def _ports_dir(self) -> Path | None:
+        """Where the ports system lives on this firmware."""
+        return resolve_ports_dir(self._rom_root)
+
+    def system_dir(self, system_key: str) -> Path:
+        if system_key.casefold() == "ports":
+            ports = self._ports_dir()
+            if ports is not None:
+                return ports
+        return self._rom_root / system_key
+
+    def extra_system_keys(self) -> list[str]:
+        # ``ports`` only when it is not a sub-directory of rom_root -- then it
+        # would never show up in the library scan's directory listing.
+        if (self._rom_root / "PORTS").is_dir():
+            return []
+        if (self._rom_root.parent / "Ports").is_dir():
+            return ["ports"]
+        return []
 
     def available_rom_roots(self) -> list[tuple[Path, str]]:
         return available_rom_roots()

@@ -221,7 +221,7 @@ def media_dirs_for(platform: Platform, config: Config, system_key: str) -> Media
     ``assets/``, one-folder-per-game packs) stays as a *fallback*, so a card
     that was scraped before this change keeps showing its artwork.
     """
-    root = platform.rom_root / system_key
+    root = platform.system_dir(system_key)
     esde_root = Path(config.metadata.esde_root) if config.metadata.esde_root else None
     if esde_root is not None:
         media_root = esde_root / "downloaded_media" / esde_system_name(system_key)

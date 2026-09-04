@@ -110,6 +110,22 @@ _SYSTEMS: tuple[SystemDef, ...] = (
     SystemDef("atomiswave", "Atomiswave", "Atomiswave", ("chd", "bin", "zip"),
               core="flycast_libretro.so", order=84),
 
+    # -- Firmware-convention directories found on real cards -------------- #
+    # These folder names ship with the handheld's own firmware.  Without a
+    # definition here they read as zero games and quietly disappear from the
+    # home page (a card with 300+ ROMs showed nothing for this reason).
+    # Cores verified present on the device: see /mnt/vendor/deep/retro/cores.
+    SystemDef("a2600", "Atari 2600", "雅达利 2600", ("a26", "bin", "zip"),
+              core="stella_libretro.so", order=94),
+    SystemDef("gw", "Game & Watch", "Game & Watch", ("mgw", "gw"),
+              core="gw_libretro.so", order=96),
+    SystemDef("varcade", "Varcade", "街机合集", ("zip",),
+              core="fbneo_libretro.so", alt_cores=("mame2003_plus_libretro.so",), order=96),
+    SystemDef("dos", "DOS", "DOS 游戏", ("dosz", "zip"),
+              core="dosbox_pure_libretro.so", order=98),
+    SystemDef("mdcd", "Sega CD", "世嘉 CD", ("chd", "cue", "bin", "iso"),
+              core="genesis_plus_gx_libretro.so", alt_cores=("picodrive_libretro.so",), order=86),
+
     # -- Sony ------------------------------------------------------------ #
     SystemDef("ps", "PlayStation", "PlayStation", ("bin", "cue", "pbp", "chd", "iso", "img", "m3u", "ccd"),
               core="pcsx_rearmed_libretro.so", order=21),
