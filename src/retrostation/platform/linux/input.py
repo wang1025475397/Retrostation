@@ -27,7 +27,7 @@ import time
 from collections import deque
 from pathlib import Path
 
-from ..base import COMBO_MEMBERS, InputAction, InputEvent, InputKind, combo_tick
+from ..base import InputAction, InputEvent, InputKind
 
 # --------------------------------------------------------------------------- #
 # evdev plumbing
@@ -81,7 +81,7 @@ DEFAULT_KEYMAP: dict[int, InputAction] = {
     314: InputAction.L2,     # BTN_SELECT
     315: InputAction.R2,     # BTN_START
     # System keys
-    310: InputAction.SELECT,  # BTN_TL
+    310: InputAction.SEARCH,  # BTN_TL
     311: InputAction.START,   # BTN_TR
     312: InputAction.MENU,    # BTN_TL2  (the FUNC button)
     313: InputAction.MENU,    # BTN_TR2  (L3 -- also quits, so you are never stuck)
@@ -314,23 +314,14 @@ class EvdevInput:
             # this the d-pad would scroll as fast as the kernel reports.
             if dedupe and action in self._held:
                 return
-            if action in COMBO_MEMBERS:
-                # Withheld for COMBO_WINDOW: if the other member arrives, the
-                # pair fires SEARCH and neither member's own press happened.
-                self._held[action] = (now, now, False, False)
-                return
-            self._held[action] = (now, now, False, True)
+            self._held[action] = (now, now, False)
             self._events.append(InputEvent(action, InputKind.PRESS))
 
     def _release(self, action: InputAction) -> None:
         if self._paused:
             return
         with self._lock:
-            record = self._held.pop(action, None)
-            if action in COMBO_MEMBERS and record is not None and not record[3]:
-                # Released before the withheld press fired (a quick tap):
-                # deliver the pair, just a few milliseconds late.
-                self._events.append(InputEvent(action, InputKind.PRESS))
+            self._held.pop(action, None)
             self._events.append(InputEvent(action, InputKind.RELEASE))
 
     # ------------------------------------------------------------------ #
@@ -350,11 +341,10 @@ class EvdevInput:
         now = time.monotonic()
         generated: list[InputEvent] = []
         with self._lock:
-            combo_tick(self._held, generated, now)
-            for action, (since, last_repeat, long_fired, pressed) in list(self._held.items()):
+            for action, (since, last_repeat, long_fired) in list(self._held.items()):
                 if not long_fired and action in LONG_PRESS_ACTIONS:
                     if now - since >= self._long_press:
-                        self._held[action] = (since, last_repeat, True, pressed)
+                        self._held[action] = (since, last_repeat, True)
                         generated.append(InputEvent(action, InputKind.LONG_PRESS))
                         continue
                 if now - since < self._repeat_delay:
@@ -364,7 +354,7 @@ class EvdevInput:
                     last_repeat += self._repeat_rate
                     fired += 1
                 if fired:
-                    self._held[action] = (since, last_repeat, long_fired, pressed)
+                    self._held[action] = (since, last_repeat, long_fired)
                     generated.extend(InputEvent(action, InputKind.REPEAT) for _ in range(fired))
             self._events.extend(generated)
 

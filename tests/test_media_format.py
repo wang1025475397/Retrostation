@@ -55,6 +55,36 @@ class TestCacheSuffix:
             cache_suffix.cache_clear()
 
 
+class TestCoverThumbnails:
+    """The grid draws covers as filled crops; scaling twice (letterbox fit,
+    then crop-and-grow) is what made them look soft."""
+
+    def test_cover_fills_the_slot_in_one_pass(self, tmp_path: Path) -> None:
+        platform = FakePlatform(tmp_path)
+        source = tmp_path / "cover.png"
+        Image.new("RGB", (300, 400), (10, 20, 30)).save(source)  # 3:4 portrait
+        cache = ThumbnailCache(platform, tmp_path / "cache")
+
+        fit = cache.get("cover", source, 160, 190)
+        crop = cache.get("cover", source, 160, 190, cover=True)
+
+        assert fit.size == (142, 190)      # letterboxed, never upscaled
+        assert crop.size == (160, 190)     # filled in a single scaling pass
+
+    def test_cover_and_fit_caches_do_not_evict_each_other(self, tmp_path: Path) -> None:
+        platform = FakePlatform(tmp_path)
+        source = tmp_path / "cover.png"
+        Image.new("RGB", (300, 400), (10, 20, 30)).save(source)
+        cache = ThumbnailCache(platform, tmp_path / "cache")
+
+        first = cache.get("cover", source, 160, 190)
+        crop = cache.get("cover", source, 160, 190, cover=True)
+        again = cache.get("cover", source, 160, 190)
+
+        assert first.size != crop.size     # distinct cache entries
+        assert again.size == first.size    # the fit entry survived
+
+
 class TestCacheRoundTrip:
     @pytest.fixture
     def library(self, rom_root: Path) -> Library:

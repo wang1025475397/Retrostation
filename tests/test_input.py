@@ -17,18 +17,11 @@ byte-parsing path rather than calling the private helpers directly.
 from __future__ import annotations
 
 import struct
-import time
 from pathlib import Path
 
 import pytest
 
-from retrostation.platform.base import (
-    COMBO_MEMBERS,
-    COMBO_RESULT,
-    InputAction,
-    InputEvent,
-    InputKind,
-)
+from retrostation.platform.base import InputAction, InputEvent, InputKind
 from retrostation.platform.linux import input as input_mod
 from retrostation.platform.linux.input import (
     DEFAULT_KEYMAP,
@@ -129,7 +122,7 @@ class TestButtonMapping:
         (307, InputAction.X),       # BTN_NORTH
         (308, InputAction.L1),      # BTN_WEST
         (309, InputAction.R1),      # BTN_Z
-        (310, InputAction.SELECT),  # BTN_TL
+        (310, InputAction.SEARCH),  # BTN_TL
         (311, InputAction.START),   # BTN_TR
         (314, InputAction.L2),      # BTN_SELECT
         (315, InputAction.R2),      # BTN_START
@@ -150,14 +143,7 @@ class TestButtonMapping:
     def test_press_produces_the_action(self, reader: EvdevInput,
                                       code: int, action: InputAction) -> None:
         feed(reader, raw(EV_KEY, code, 1))
-        if action in COMBO_MEMBERS:
-            # Withheld inside the search-combo window; a lone press still lands,
-            # just a few milliseconds late.
-            assert presses(reader) == []
-            time.sleep(0.09)
-            assert presses(reader) == [action]
-        else:
-            assert presses(reader) == [action]
+        assert presses(reader) == [action]
 
     def test_confirm_is_not_the_back_button(self, reader: EvdevInput) -> None:
         """Regression: A and B were swapped, so 'enter' left the game list."""
@@ -167,58 +153,15 @@ class TestButtonMapping:
         assert presses(reader) == [InputAction.B]
 
     def test_every_action_is_reachable(self) -> None:
-        # Every physical key is taken, so HIDE is bound on the desktop keymap
-        # only and reached from the menu on the device.  SEARCH is different:
-        # it *is* reachable, but as SELECT+START held together -- a synthesised
-        # event, not a key.  Naming exceptions here is deliberate, so the test
+        # HIDE and CHAR have no handheld button: HIDE is desktop-keymap only
+        # (the handheld reaches hiding from the menu), and CHAR is a typed
+        # character event.  Naming exceptions here is deliberate, so the test
         # still catches an action that was merely forgotten.
         desktop_only = {InputAction.HIDE, InputAction.CHAR}
-        synthesized = {COMBO_RESULT}
         reachable = set(DEFAULT_KEYMAP.values()) | {
             side for pair in HAT_AXES.values() for side in pair
         }
-        assert reachable | desktop_only | synthesized == set(InputAction)
-
-    def test_combo_fires_search_alone(self, reader: EvdevInput) -> None:
-        by_action = {action: code for code, action in DEFAULT_KEYMAP.items()}
-        feed(
-            reader,
-            raw(EV_KEY, by_action[InputAction.SELECT], 1),
-            raw(EV_KEY, by_action[InputAction.START], 1),
-        )
-        # The members' own presses never come out: no filter toggle, no menu.
-        assert presses(reader) == [InputAction.SEARCH]
-
-    def test_lone_member_comes_through_after_the_window(
-        self, reader: EvdevInput
-    ) -> None:
-        by_action = {action: code for code, action in DEFAULT_KEYMAP.items()}
-        feed(reader, raw(EV_KEY, by_action[InputAction.SELECT], 1))
-        assert presses(reader) == []  # withheld inside the window
-        time.sleep(0.09)              # past COMBO_WINDOW
-        assert presses(reader) == [InputAction.SELECT]
-
-    def test_quick_tap_still_presses_and_releases(self, reader: EvdevInput) -> None:
-        by_action = {action: code for code, action in DEFAULT_KEYMAP.items()}
-        sel = by_action[InputAction.SELECT]
-        feed(reader, raw(EV_KEY, sel, 1), raw(EV_KEY, sel, 0))
-        # The withheld press is delivered on release, keeping the pair intact.
-        events = reader.poll_events()
-        assert [(e.kind, e.action) for e in events] == [
-            (InputKind.PRESS, InputAction.SELECT),
-            (InputKind.RELEASE, InputAction.SELECT),
-        ]
-
-    def test_members_release_quietly_after_the_combo(
-        self, reader: EvdevInput
-    ) -> None:
-        by_action = {action: code for code, action in DEFAULT_KEYMAP.items()}
-        sel, start = by_action[InputAction.SELECT], by_action[InputAction.START]
-        feed(reader, raw(EV_KEY, sel, 1), raw(EV_KEY, start, 1))
-        assert presses(reader) == [InputAction.SEARCH]
-        feed(reader, raw(EV_KEY, sel, 0), raw(EV_KEY, start, 0))
-        assert releases(reader) == [InputAction.SELECT, InputAction.START]
-        assert presses(reader) == []
+        assert reachable | desktop_only == set(InputAction)
 
     def test_release_after_press(self, reader: EvdevInput) -> None:
         feed(reader, raw(EV_KEY, 304, 1))

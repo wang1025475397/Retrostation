@@ -328,12 +328,17 @@ class Library:
 
     # ------------------------------------------------------------------ #
 
-    def thumbnail(self, kind: str, game: Game, width: int, height: int):
-        """A cached scaled bitmap, or ``None``."""
+    def thumbnail(self, kind: str, game: Game, width: int, height: int,
+                  *, cover: bool = False):
+        """A cached scaled bitmap, or ``None``.
+
+        ``cover=True`` fills the slot (crop + upscale in one pass) -- what the
+        grid and carousel need; the default letterboxes and never upscales.
+        """
         source = game.asset(kind)
         if source is None:
             return None
-        return self._thumbnails.get(kind, source, width, height)
+        return self._thumbnails.get(kind, source, width, height, cover=cover)
 
     def has_video(self, game: Game) -> bool:
         return game.has_asset(ASSET_VIDEO)

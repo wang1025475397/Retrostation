@@ -480,26 +480,35 @@ class ThumbnailCache:
         self._stats[path] = fresh
         return fresh[1], fresh[2]
 
-    def get(self, kind: str, source: Path, width: int, height: int) -> object | None:
-        """A scaled bitmap for ``source``, or ``None`` if it cannot be made."""
+    def get(self, kind: str, source: Path, width: int, height: int,
+            *, cover: bool = False) -> object | None:
+        """A scaled bitmap for ``source``, or ``None`` if it cannot be made.
+
+        ``cover=True`` scales to *fill* the slot (cropping overflow, upscaling
+        allowed) in a single pass -- the grid draws covers that way, and
+        routing the request through the letterboxing fit first would grow the
+        image a second time in :func:`cover_bitmap`, which is where the grid's
+        blur came from.
+        """
         mtime, exists = self._stat(source)
         if not exists:
             return None
-        key = (str(source), width, height, mtime)
+        key = (str(source), width, height, mtime, cover)
 
         cached = self._memory.get(key)
         if cached is not None:
             return cached
 
-        bitmap = self._decode(source, width, height)
+        bitmap = self._decode(source, width, height, cover=cover)
         if bitmap is None:
             return None
 
         self._remember(key, bitmap)
         return bitmap
 
-    def _decode(self, source: Path, width: int, height: int) -> object | None:
-        disk = self._disk_path(source, width, height)
+    def _decode(self, source: Path, width: int, height: int,
+                *, cover: bool = False) -> object | None:
+        disk = self._disk_path(source, width, height, cover=cover)
         if disk is not None and disk.is_file():
             try:
                 return self._platform.load_image(disk)
@@ -520,7 +529,7 @@ class ThumbnailCache:
             except OSError:
                 return None
 
-        scaled = fit_bitmap(original, width, height)
+        scaled = cover_bitmap(original, width, height) if cover else fit_bitmap(original, width, height)
         if disk is not None and self._enabled:
             self._store(disk, scaled)
         return scaled
@@ -570,8 +579,13 @@ class ThumbnailCache:
             return None
         return target
 
-    def _disk_path(self, source: Path, width: int, height: int) -> Path | None:
-        """``Imgs/.cache/<hash>_<w>x<h><suffix>``; ``None`` when caching is off."""
+    def _disk_path(self, source: Path, width: int, height: int,
+                   *, cover: bool = False) -> Path | None:
+        """``Imgs/.cache/<hash>_<w>x<h><suffix>``; ``None`` when caching is off.
+
+        Cover crops live under their own key -- a letterboxed fit and a
+        filled crop of the same source must not evict each other.
+        """
         if not self._enabled:
             return None
         digest = hashlib.sha1(f"{source}|{width}x{height}".encode("utf-8")).hexdigest()[:16]
@@ -585,7 +599,8 @@ class ThumbnailCache:
             except OSError:
                 return None
             self._dirs.add(directory)
-        return directory / f"{digest}_{width}x{height}{suffix}"
+        marker = "c" if cover else ""
+        return directory / f"{digest}_{width}x{height}{marker}{suffix}"
 
     def _store(self, target: Path, bitmap: object) -> None:
         """Queue the bitmap for the writer thread; never blocks the caller."""

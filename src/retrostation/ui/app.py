@@ -262,7 +262,10 @@ class App:
         # The settings dialog can switch video off while we are running.
         self._video.configure(enabled=self.config.bottom_video)
         game = None
-        if self.session.view == VIEW_GAMES:
+        if self.session.modal == MODAL_SEARCH:
+            # 搜索（筛选）时停止解码：切换结果不需要视频，关闭后由 select 恢复播放。
+            game = None
+        elif self.session.view == VIEW_GAMES:
             game = self.session.current_game()
         elif self.session.preview_mode and self.session.view == VIEW_PLATFORMS:
             # 双屏预览选中：下屏的游戏详情面板同样播放该游戏的片段。
@@ -367,7 +370,7 @@ class App:
         session = self.session
         return (
             session.view, session.layout, session.platform_index, session.game_index,
-            session.filter, session.sort, session.modal, session.menu_index,
+            session.sort, session.modal, session.menu_index,
             session.exit_selected, session.active_toast(),
             len(session.system_keys()),
         )
@@ -570,8 +573,7 @@ class App:
             return 0
 
         subtitle = str(len(all_games))
-        right = (f"{self.translator('games.filter_' + session.filter)} · "
-                 f"{self.translator('games.layout_' + session.layout)}")
+        right = self.translator('games.layout_' + session.layout)
 
         index = session.game_index
         if 0 <= index < len(all_games):

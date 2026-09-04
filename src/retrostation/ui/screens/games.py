@@ -99,7 +99,9 @@ def cover_art(
     card underneath.
     """
     x, y, w, h = box
-    bitmap = art.thumbnail(game, w, h, prefer_logo=prefer_logo)
+    # cover=True asks the cache for a filled crop in one pass: scaling twice
+    # (letterbox fit, then crop-and-grow) is what made grid covers look soft.
+    bitmap = art.thumbnail(game, w, h, prefer_logo=prefer_logo, cover=cover)
     if bitmap is None:
         painter.rounded_rect(box, radius=radius or painter.metrics.u(3),
                              fill=COLORS.panel_2, outline=(255, 255, 255, 20))
@@ -187,7 +189,7 @@ def footer_hints(painter: Painter, layout: str, translator) -> list[tuple[str, s
         ("B", translator("btn.back")),
         ("Y", translator("btn.favorite")),
         ("X", translator(next_view)),
-        ("SELECT", translator("btn.filter")),
+        ("SELECT", translator("btn.search")),
         ("START", translator("btn.menu")),
     ]
 

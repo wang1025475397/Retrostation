@@ -41,13 +41,14 @@ class ArtProvider:
 
     # ------------------------------------------------------------------ #
 
-    def thumbnail(self, game: Game, width: int, height: int, *, prefer_logo: bool = False) -> object | None:
+    def thumbnail(self, game: Game, width: int, height: int, *,
+                  prefer_logo: bool = False, cover: bool = False) -> object | None:
         """Scaled artwork for ``game``, or ``None`` when there is none."""
         kind = ASSET_LOGO if prefer_logo else ASSET_COVER
         path = game.asset(kind)
         if path is None:
             return None
-        return self._library.thumbnail(kind, game, width, height)
+        return self._library.thumbnail(kind, game, width, height, cover=cover)
 
     def backdrop(self, game: Game, width: int, height: int) -> object | None:
         """Panel-filling art to sit behind the game page, or ``None``.

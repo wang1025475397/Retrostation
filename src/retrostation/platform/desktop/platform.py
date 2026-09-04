@@ -43,14 +43,12 @@ from ...core.theme import BASE_H, BASE_W
 from ..base import (
     AudioPipe,
     Canvas,
-    COMBO_MEMBERS,
     FileEntry,
     InputAction,
     InputEvent,
     InputKind,
     Platform,
     VideoPipe,
-    combo_tick,
 )
 from ..linux.canvas import PilCanvas
 from ..linux.fonts import FontBook
@@ -85,7 +83,7 @@ _KEYMAP: dict[str, InputAction] = {
     "e": InputAction.R1,
     "home": InputAction.L2,
     "end": InputAction.R2,
-    "tab": InputAction.SELECT,
+    "tab": InputAction.SEARCH,
     "s": InputAction.START,
     "m": InputAction.START,
     "quoteleft": InputAction.MENU,  # ` (backtick): hold to quit
@@ -133,9 +131,8 @@ class DesktopPlatform(Platform):
         self._photos: list[object] = []
         self._events: deque[InputEvent] = deque()
         self._lock = threading.Lock()
-        #: action -> (held_since, last_repeat, long_fired, pressed); ``pressed``
-        #: stays False while a search-combo member's press is withheld.
-        self._held: dict[InputAction, tuple[float, float, bool, bool]] = {}
+        #: action -> (held_since, last_repeat, long_fired)
+        self._held: dict[InputAction, tuple[float, float, bool]] = {}
         self._closed = False
         #: Actual on-screen size of one panel (may be scaled down to fit the
         # display; the rendered PilCanvas is always larger and gets resized).
@@ -272,7 +269,6 @@ class DesktopPlatform(Platform):
             InputAction.R1: "R1 下翻页",
             InputAction.L2: "L2 跳到首",
             InputAction.R2: "R2 跳到尾",
-            InputAction.SELECT: "SELECT 筛选",
             InputAction.START: "START 菜单",
             InputAction.MENU: "MENU 退出",
             InputAction.SEARCH: "/ 搜索",
@@ -294,7 +290,7 @@ class DesktopPlatform(Platform):
             InputAction.A, InputAction.B, InputAction.X, InputAction.Y,
             InputAction.HIDE,
             InputAction.L1, InputAction.R1, InputAction.L2, InputAction.R2,
-            InputAction.SELECT, InputAction.START, InputAction.MENU,
+            InputAction.START, InputAction.MENU,
             InputAction.SEARCH,
         ]
         for action in order:
@@ -371,13 +367,7 @@ class DesktopPlatform(Platform):
                 return  # OS auto-repeat: we synthesise our own repeats
             now = time.monotonic()
             if action is not None:
-                if action in COMBO_MEMBERS:
-                    # Withheld for COMBO_WINDOW: if the other member arrives,
-                    # the pair fires SEARCH and neither member's own press
-                    # happened.
-                    self._held[action] = (now, now, False, False)
-                else:
-                    self._held[action] = (now, now, False, True)
+                self._held[action] = (now, now, False)
             self._events.append(
                 InputEvent(action or InputAction.CHAR, InputKind.PRESS, text=text)
             )
@@ -389,11 +379,7 @@ class DesktopPlatform(Platform):
         if action is None:
             return
         with self._lock:
-            record = self._held.pop(action, None)
-            if action in COMBO_MEMBERS and record is not None and not record[3]:
-                # Released before the withheld press fired (a quick tap):
-                # deliver the pair, just a few milliseconds late.
-                self._events.append(InputEvent(action, InputKind.PRESS))
+            self._held.pop(action, None)
             self._events.append(InputEvent(action, InputKind.RELEASE))
 
     def poll_events(self, timeout: float = 0.0) -> list[InputEvent]:
@@ -421,15 +407,14 @@ class DesktopPlatform(Platform):
             pass
 
     def _synthesize(self) -> None:
-        """Synthesise long-press (quit), the search combo and auto-repeat."""
+        """Synthesise long-press (quit) and auto-repeat (scrolling)."""
         now = time.monotonic()
         generated: list[InputEvent] = []
         with self._lock:
-            combo_tick(self._held, generated, now)
-            for action, (since, last, long_fired, pressed) in list(self._held.items()):
+            for action, (since, last, long_fired) in list(self._held.items()):
                 if action is InputAction.MENU and not long_fired:
                     if now - since >= _LONG_PRESS:
-                        self._held[action] = (since, last, True, pressed)
+                        self._held[action] = (since, last, True)
                         generated.append(InputEvent(action, InputKind.LONG_PRESS))
                         continue
                 if action not in _REPEATABLE:
@@ -442,7 +427,7 @@ class DesktopPlatform(Platform):
                     nlast += _REPEAT_RATE
                     fired += 1
                 if fired:
-                    self._held[action] = (since, nlast, long_fired, pressed)
+                    self._held[action] = (since, nlast, long_fired)
                     generated.extend(
                         InputEvent(action, InputKind.REPEAT) for _ in range(fired)
                     )

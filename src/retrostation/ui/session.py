@@ -20,6 +20,7 @@ import copy
 import time
 import unicodedata
 from dataclasses import dataclass, field, fields
+from pathlib import Path
 from enum import Enum
 from functools import lru_cache
 from typing import Any, Mapping
@@ -107,7 +108,6 @@ def _search_rank(game: Game, query: str, mode: str) -> int:
             best = min(best, _RANK_INITIALS_CONTAINS + offset)
     return best
 
-FILTERS = ("all", "covered", "missing")
 SORTS = ("name", "play", "recent")
 
 #: Settings-menu rows whose value cycles with LEFT/RIGHT (see
@@ -116,7 +116,7 @@ SORTS = ("name", "play", "recent")
 #: stage, and the restart happens when A commits.  "hide_game" is an action
 #: and stays on A only.
 _CYCLING_ROWS = frozenset(
-    {"screen", "card", "layout", "bvideo", "video_sound", "sort", "filter",
+    {"screen", "card", "layout", "bvideo", "video_sound", "sort",
      "show_hidden", "search_by", "theme", "variant", "language", "status_bar"}
 )
 
@@ -166,7 +166,6 @@ class Session:
     layout: str = "list"
     platform_index: int = 0
     game_index: int = 0
-    filter: str = "all"
     sort: str = "name"
 
     #: 平台总览的预览条选中状态（SELECT 进入/退出，左右移动，A 进入游戏）。
@@ -271,11 +270,6 @@ class Session:
         else:
             games = list(self.library.resolve_all(key))
 
-        if self.filter == "covered":
-            games = [game for game in games if game.has_asset("cover")]
-        elif self.filter == "missing":
-            games = [game for game in games if not game.has_asset("cover")]
-
         if self.sort == "play":
             games.sort(key=lambda game: (-game.play_count, game.sort_key.casefold()))
         elif self.sort == "recent":
@@ -348,7 +342,6 @@ class Session:
         return {
             "view": self.view,
             "layout": self.layout,
-            "filter": self.filter,
             "sort": self.sort,
             "system": self.current_system_key(),
             "game": game.key if game is not None else None,
@@ -366,8 +359,6 @@ class Session:
 
         if data.get("layout") in LAYOUTS:
             self.layout = data["layout"]
-        if data.get("filter") in FILTERS:
-            self.filter = data["filter"]
         if data.get("sort") in SORTS:
             self.sort = data["sort"]
 
@@ -545,8 +536,6 @@ class Session:
             return self._toggle_hidden()
         if action is InputAction.X:
             return self._cycle_layout()
-        if action is InputAction.SELECT:
-            return self._cycle_filter()
         if action is InputAction.START:
             return self._open_menu()
         if action is InputAction.MENU:
@@ -675,24 +664,13 @@ class Session:
         self.notify(self.translator("toast.volume", value=value))
         return Outcome(redraw=True)
 
-    def _cycle_filter(self, direction: int = 1) -> Outcome:
-        self.filter = _cycle(FILTERS, self.filter, direction)
-        self.game_index = 0
-        names = {
-            "all": "games.filter_all",
-            "covered": "games.filter_covered",
-            "missing": "games.filter_missing",
-        }
-        self.notify(self.translator(names[self.filter]))
-        return Outcome(redraw=True)
-
     # -- modals ------------------------------------------------------------- #
 
     def _open_menu(self) -> Outcome:
         self.modal = MODAL_MENU
         self.menu_index = 0
         # Transaction start: B restores this snapshot, A commits the whole pass.
-        self._menu_stash = (copy.deepcopy(self.config), self.sort, self.filter, self.layout)
+        self._menu_stash = (copy.deepcopy(self.config), self.sort, self.layout)
         return Outcome(redraw=True)
 
     def _open_exit_dialog(self) -> Outcome:
@@ -756,10 +734,10 @@ class Session:
     def _cancel_menu(self) -> None:
         """B: restore what the dialog opened with; nothing staged survives."""
         if self._menu_stash is not None:
-            stashed_config, sort, filter_, layout = self._menu_stash
+            stashed_config, sort, layout = self._menu_stash
             for item in fields(type(stashed_config)):
                 setattr(self.config, item.name, getattr(stashed_config, item.name))
-            self.sort, self.filter, self.layout = sort, filter_, layout
+            self.sort, self.layout = sort, layout
         self._menu_stash = None
         self.modal = MODAL_NONE
 
@@ -776,7 +754,7 @@ class Session:
             self.config.screen_mode = "single" if self.config.screen_mode != "single" else "dual"
         elif key == "card":
             paths = [path for path, _label in self.rom_roots]
-            if len(paths) < 2:
+            if len(paths) < 2 or self.current_rom_root is None:
                 return
             try:
                 index = paths.index(self.current_rom_root)
@@ -789,8 +767,6 @@ class Session:
             self.config.bottom_video = not self.config.bottom_video
         elif key == "sort":
             self.sort = _cycle(SORTS, self.sort, direction)
-        elif key == "filter":
-            self._cycle_filter(direction)
         elif key == "show_hidden":
             self.config.show_hidden = not self.config.show_hidden
         elif key == "search_by":
@@ -904,8 +880,6 @@ class Session:
             ("video_volume", self.translator("menu.video_volume"),
              f"{int(config.video_volume)}"),
             ("sort", self.translator("menu.sort"), self.translator(f"value.sort_{self.sort}")),
-            ("filter", self.translator("menu.filter"), self.translator(f"games.filter_{self.filter}")),
-            # Sits with the filter row: both decide which entries are listed.
             ("show_hidden", self.translator("menu.show_hidden"),
              self.translator("value.on" if config.show_hidden else "value.off")),
             # What the search matches against; cycles title -> rom -> both.
@@ -979,7 +953,7 @@ class Session:
         self.rom_select_game = None
         self.rom_select_paths = []
 
-    # -- search (SELECT+START) --------------------------------------------- #
+    # -- search (SELECT) ---------------------------------------------------- #
 
     def _open_search(self) -> Outcome:
         """Search the context the player is looking at: the whole library from
@@ -1061,22 +1035,25 @@ class Session:
         elif action is InputAction.RIGHT:
             self.search_kb = min(last, self.search_kb + 1)
         elif action is InputAction.UP:
-            if self.search_results():
-                # Up always jumps into the result list: after typing, the
-                # cursor sits wherever the last letter landed, and asking the
-                # player to first walk it to the top row would hide the results
-                # behind a chore.  Down/left/right still cover the grid.
-                self.search_focus = "results"
-                self.search_result_index = 0
-            else:
-                self.search_kb = max(0, self.search_kb - SEARCH_COLS)
+            self.search_kb = max(0, self.search_kb - SEARCH_COLS)
         elif action is InputAction.DOWN:
             self.search_kb = min(last, self.search_kb + SEARCH_COLS)
         elif action is InputAction.A:
             return self._apply_search_key(SEARCH_CODES[self.search_kb])
         elif action is InputAction.B:
-            # Backspace while there is text to delete, close when there is not.
-            return self._apply_search_key("BS" if self.search_text else "OFF")
+            # B hops to the result list and back -- the arrows must stay free
+            # to walk the letter grid, or the second letter of a query becomes
+            # unreachable once the first one matches something.  The desktop's
+            # Backspace key arrives as "\b" and always deletes instead: hopping
+            # would make fixing a typo impossible.  With nothing to list, B
+            # keeps its old meaning too: delete, then close.
+            if event.text == "\b" or not self.search_results():
+                if self.search_text:
+                    return self._apply_search_key("BS")
+                self._close_search()
+            else:
+                self.search_focus = "results"
+                self.search_result_index = 0
         elif action is InputAction.Y:
             self._set_search_text("")
         elif action in (InputAction.L1, InputAction.R1):

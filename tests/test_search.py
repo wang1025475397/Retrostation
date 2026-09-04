@@ -128,11 +128,31 @@ def test_platform_context_searches_only_that_system() -> None:
     assert ("resolve_all", "snes") in session.library.calls
 
 
-def test_up_off_the_top_row_jumps_into_the_results() -> None:
+def test_b_hops_to_the_results_and_back() -> None:
+    """The arrows stay on the letter grid -- B is the hop between the two
+    regions.  Otherwise the second letter of a query would be unreachable as
+    soon as the first one matched anything."""
     session = make_session()
     type_text(session, "HDL")
-    session.handle(press(InputAction.UP))       # cursor sits on row 0
+
+    # Arrows keep walking the grid even with results on screen.
+    session.search_kb = SEARCH_CODES.index("H")
+    session.handle(press(InputAction.UP))
+    assert session.search_focus == "kb"
+    assert session.search_kb == 0               # one row up, grid intact
+
+    # B hops to the results...
+    session.handle(press(InputAction.B))
     assert session.search_focus == "results"
+    # ...and B there comes back to the keyboard.
+    session.handle(press(InputAction.B))
+    assert session.search_focus == "kb"
+
+
+def test_results_launch_from_the_b_hop() -> None:
+    session = make_session()
+    type_text(session, "HDL")
+    session.handle(press(InputAction.B))        # hop to the results
     outcome = session.handle(press(InputAction.A))
     assert outcome.launch is not None
     assert outcome.launch.display_name == "魂斗罗"
@@ -248,11 +268,14 @@ def test_backspace_deletes_esc_closes_letter_b_types() -> None:
     session.handle(InputEvent(InputAction.B, InputKind.PRESS, text="\b"))
     assert session.modal == MODAL_NONE
 
-    # The handheld's B button carries no character and keeps its meaning.
+    # The handheld's B button carries no character: with no results it still
+    # deletes (and closes once empty); with results it hops to the list.
     session = make_session()
-    type_text(session, "A")
+    type_text(session, "Z")             # matches nothing
     session.handle(press(InputAction.B))
-    assert session.search_text == ""
+    assert session.search_text == ""    # deleted
+    session.handle(press(InputAction.B))
+    assert session.modal == MODAL_NONE  # empty query: closes
 
     # Esc leaves outright, whatever is typed so far.
     session = make_session()
@@ -268,10 +291,13 @@ def test_backspace_deletes_esc_closes_letter_b_types() -> None:
 
 
 def test_combo_again_closes() -> None:
+    """SELECT toggles the search: the same key that opens it closes it."""
     session = make_session()
     type_text(session, "A")
     session.handle(press(InputAction.SEARCH))
     assert session.modal == MODAL_NONE
+    session.handle(press(InputAction.SEARCH))
+    assert session.modal == MODAL_SEARCH
 
 
 def test_menu_long_press_quits_from_the_search() -> None:
