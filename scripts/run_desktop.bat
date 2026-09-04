@@ -36,20 +36,11 @@ echo [2/2] 启动 Retrostation（--desktop）...
 echo         关闭窗口 或 按 Alt+F4 退出。
 echo -----------------------------------------------------------------
 
-rem 未显式指定 --rom-root 时，自动使用默认 ROM 目录。
-set "DEFAULT_ROM_ROOT=E:\Pegasus G\Roms"
-set "ROM_ARG="
-echo %* | findstr /i "rom-root" >nul
-if errorlevel 1 (
-    if exist "%DEFAULT_ROM_ROOT%\" (
-        set "ROM_ARG=--rom-root "%DEFAULT_ROM_ROOT%""
-    ) else (
-        echo [提示] 默认 ROM 目录不存在：%DEFAULT_ROM_ROOT%
-    )
-)
-
-echo 执行命令: %PY% -m retrostation.main --desktop %ROM_ARG% %*
-%PY% -m retrostation.main --desktop %ROM_ARG% %*
+rem 默认 ROM 目录（含中文路径）等逻辑交给 run_desktop.ps1 处理。
+rem cmd 直接读含中文的 .bat 会按 GBK 乱码，导致 --rom-root 根本传不进去；
+rem PowerShell 对 UTF-8 / 中文路径可靠，且 .ps1 已正确处理默认目录。
+echo [提示] 正在通过 run_desktop.ps1 启动（支持中文 ROM 路径）……
+powershell -ExecutionPolicy Bypass -NoProfile -File "%~dp0run_desktop.ps1" %*
 set "CODE=%errorlevel%"
 echo -----------------------------------------------------------------
 if not "%CODE%"=="0" (

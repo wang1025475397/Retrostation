@@ -1,4 +1,4 @@
-<#
+﻿<#
 Desktop launcher for Retrostation on Windows -- runs the frontend with a
 tkinter window + keyboard instead of the handheld's SDL/evdev stack.
 Mirrors scripts/retrostation.sh but without the on-device game-launch loop
@@ -49,8 +49,21 @@ $args2 = @()
 if ($args -notcontains '--desktop') { $args2 += '--desktop' }
 
 # Auto-use the default ROM directory unless the caller overrode it.
-$defaultRomRoot = 'E:\Pegasus G\Roms'
-if (-not ($args | Where-Object { $_ -like '--rom-root*' }) -and (Test-Path $defaultRomRoot)) {
+# The path lives in rom_root.txt (next to this script) -- edit only THAT file
+# to change where your ROMs are; a command-line --rom-root still wins.
+$romRootConfig = Join-Path $here 'rom_root.txt'
+$defaultRomRoot = $null
+if (Test-Path $romRootConfig) {
+    # UTF-8 read so Chinese paths survive on Windows PowerShell 5.1 too.
+    $defaultRomRoot = (Get-Content -Encoding UTF8 -Path $romRootConfig |
+        Where-Object { $_.Trim() -and -not $_.Trim().StartsWith('#') } |
+        Select-Object -First 1).Trim()
+}
+if (-not $defaultRomRoot) {
+    # Built-in fallback only when the config file is missing or empty.
+    $defaultRomRoot = 'F:\天马精简包\Roms'
+}
+if (-not ($args | Where-Object { $_ -like '--rom-root*' }) -and $defaultRomRoot -and (Test-Path $defaultRomRoot)) {
     $args2 += '--rom-root', $defaultRomRoot
 }
 $args2 += $args
