@@ -17,14 +17,17 @@ Navigation rules come from DESIGN §5.2; the notable ones:
 from __future__ import annotations
 
 import time
+import unicodedata
 from dataclasses import dataclass, field
 from enum import Enum
+from functools import lru_cache
 from typing import Any, Mapping
 
-from ..core.config import LAYOUTS, Config
+from ..core.config import LAYOUTS, SEARCH_BY, Config
 from ..core.i18n import Translator, available_builtin
 from .. import __version__
 from ..core.model import Game
+from ..core.pinyin import initials
 from ..core.theme import THEMES, VARIANTS
 from ..data.library import Library
 from ..data.systems import AGGREGATE_KEYS, AGGREGATES, lookup
@@ -37,6 +40,71 @@ MODAL_NONE = ""
 MODAL_MENU = "menu"
 MODAL_EXIT = "exit"
 MODAL_ROM_SELECT = "rom_select"
+MODAL_SEARCH = "search"
+
+#: The on-screen search keyboard, row-major, ``SEARCH_COLS`` per row: letters
+#: and digits, then backspace / clear / close.  ABC order -- a d-pad user
+#: scans alphabetically -- and the actions trail where the eye lands last.
+SEARCH_COLS = 7
+SEARCH_CODES: tuple[str, ...] = (
+    *"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
+    "BS", "CLR", "OFF",
+)
+
+#: Search match ranks.  A hit's rank is ``quality + field offset``, so the
+#: display title always outranks the sortname, which outranks the bare ROM
+#: file name -- within one field, a prefix beats a containment hit and a name
+#: match beats an initials match.  The ROM name exists for English queries
+#: (the pinyin initial of 拳皇97 will never spell KOF), but it must not push a
+#: title hit off the first page.
+_RANK_NAME_PREFIX = 0
+_RANK_NAME_CONTAINS = 1
+_RANK_INITIALS_PREFIX = 2
+_RANK_INITIALS_CONTAINS = 3
+_OFFSET_TITLE = 0
+_OFFSET_STEM = 4
+_RANK_MISS = 99
+
+
+@lru_cache(maxsize=8192)
+def _folded_name(text: str) -> str:
+    """Upper-cased and full-width-folded: what containment matches against."""
+    return unicodedata.normalize("NFKC", text).upper()
+
+
+@lru_cache(maxsize=8192)
+def _name_initials(text: str) -> str:
+    """Pinyin / word initials of the folded name, cached per title."""
+    return initials(_folded_name(text))
+
+
+def _search_rank(game: Game, query: str, mode: str) -> int:
+    """Best rank across the names ``config.search_by`` selects; ``_RANK_MISS``
+    when nothing matches.  ``mode`` is one of :data:`SEARCH_BY`."""
+    if mode == "rom":
+        fields: tuple[tuple[int, str], ...] = ((_OFFSET_STEM, game.path.stem),)
+    elif mode == "both":
+        fields = (
+            (_OFFSET_TITLE, game.display_name),
+            (_OFFSET_STEM, game.path.stem),
+        )
+    else:  # "title", the default
+        fields = ((_OFFSET_TITLE, game.display_name),)
+    best = _RANK_MISS
+    for offset, text in fields:
+        if not text:
+            continue
+        name = _folded_name(text)
+        name_ini = _name_initials(text)
+        if name.startswith(query):
+            best = min(best, _RANK_NAME_PREFIX + offset)
+        elif query in name:
+            best = min(best, _RANK_NAME_CONTAINS + offset)
+        if name_ini.startswith(query):
+            best = min(best, _RANK_INITIALS_PREFIX + offset)
+        elif query in name_ini:
+            best = min(best, _RANK_INITIALS_CONTAINS + offset)
+    return best
 
 FILTERS = ("all", "covered", "missing")
 SORTS = ("name", "play", "recent")
@@ -100,6 +168,17 @@ class Session:
     rom_select_index: int = 0
     rom_select_game: Game | None = None
     rom_select_paths: list = field(default_factory=list)
+
+    #: Search state (SELECT+START).  ``search_origin`` is the system key (or
+    #: aggregate key) the search started from: on the home page the search
+    #: spans the whole library, inside a system just that system's games.
+    search_text: str = ""
+    search_kb: int = 0
+    search_focus: str = "kb"      # "kb" or "results"
+    search_result_index: int = 0
+    search_origin: str = ""
+    #: ``(text, results)`` -- filtering re-runs only when the query changed.
+    _search_cache: tuple[str, list] | None = field(default=None, init=False, repr=False)
 
     #: Set when a settings row changed something that outlives the dialog: the
     #: app applies it (palette, backlight) and writes ``config.json``.  A
@@ -306,9 +385,14 @@ class Session:
             return self._handle_menu_modal(event)
         if self.modal == MODAL_ROM_SELECT:
             return self._handle_rom_select_modal(event)
+        if self.modal == MODAL_SEARCH:
+            return self._handle_search_modal(event)
 
         if event.kind is InputKind.LONG_PRESS and event.action is InputAction.MENU:
             return self._open_exit_dialog()
+
+        if event.is_press and event.action is InputAction.SEARCH:
+            return self._open_search()
 
         handlers = {
             VIEW_PLATFORMS: self._handle_platforms,
@@ -632,6 +716,13 @@ class Session:
             # What is *visible* changed, not what is on disk: each system's
             # cache would keep serving the list built under the old setting.
             self.library.drop_games()
+        elif key == "search_by":
+            self.config.search_by = SEARCH_BY[
+                (SEARCH_BY.index(self.config.search_by) + 1) % len(SEARCH_BY)
+            ]
+            # The result cache is keyed by the query text only; a mode switch
+            # must not leave it serving results from the old field set.
+            self._search_cache = None
         elif key == "hide_game":
             # Action, not a setting: close the dialog and let the toast report.
             self.modal = MODAL_NONE
@@ -758,6 +849,9 @@ class Session:
             # Sits with the filter row: both decide which entries are listed.
             ("show_hidden", self.translator("menu.show_hidden"),
              self.translator("value.on" if config.show_hidden else "value.off")),
+            # What the search matches against; cycles title -> rom -> both.
+            ("search_by", self.translator("menu.search_by"),
+             self.translator(f"value.search_{config.search_by}")),
             ("theme", self.translator("menu.theme"), self.translator(f"value.theme_{config.theme}")),
             ("variant", self.translator("menu.variant"),
              self.translator(f"value.variant_{config.theme_variant}")),
@@ -825,6 +919,149 @@ class Session:
         self.modal = MODAL_NONE
         self.rom_select_game = None
         self.rom_select_paths = []
+
+    # -- search (SELECT+START) --------------------------------------------- #
+
+    def _open_search(self) -> Outcome:
+        """Search the context the player is looking at: the whole library from
+        an aggregate page, one system's games from inside it."""
+        self.search_origin = self.current_system_key()
+        self.search_text = ""
+        self.search_kb = 0
+        self.search_focus = "kb"
+        self.search_result_index = 0
+        self._search_cache = None
+        self.modal = MODAL_SEARCH
+        # Build the game list now, while the player expects a beat of work:
+        # the first keystroke then filters a ready list instead of freezing
+        # mid-typing on a cold library.
+        self.games()
+        return Outcome(redraw=True)
+
+    def _close_search(self) -> None:
+        self.modal = MODAL_NONE
+        self.search_text = ""
+        self.search_focus = "kb"
+        self.search_result_index = 0
+        self._search_cache = None
+
+    def search_results(self) -> list[Game]:
+        """Games matching the query, prefix hits before containment hits."""
+        if self._search_cache is None or self._search_cache[0] != self.search_text:
+            self._search_cache = (self.search_text, self._build_search_results())
+        return self._search_cache[1]
+
+    def _build_search_results(self) -> list[Game]:
+        query = self.search_text.strip().upper()
+        if not query:
+            return []
+        # The list the player is already looking at -- loaded and cached, since
+        # it is the page the search was opened from.  Filtering that in-memory
+        # list keeps every keystroke instant; pulling a fresh aggregate here
+        # instead re-walked every system's metadata on the first character and
+        # froze the UI for seconds.
+        games = self.games()
+        scored: list[tuple[int, str, Game]] = []
+        for game in games:
+            rank = _search_rank(game, query, self.config.search_by)
+            if rank < _RANK_MISS:
+                scored.append((rank, game.sort_key.casefold(), game))
+        scored.sort(key=lambda item: (item[0], item[1]))
+        return [item[2] for item in scored]
+
+    def _handle_search_modal(self, event: InputEvent) -> Outcome:
+        if not event.is_press:
+            return Outcome()
+        if event.action is InputAction.SEARCH:
+            # The combo that opened the search closes it again.
+            self._close_search()
+            return Outcome(redraw=True)
+        if self.search_focus == "kb":
+            return self._handle_search_kb(event)
+        return self._handle_search_results(event)
+
+    def _handle_search_kb(self, event: InputEvent) -> Outcome:
+        # A real keyboard (desktop) rides the character on the event, and it
+        # wins over the key's mapped action: typing "s" inserts "S" even though
+        # the key maps to START.  Case does not matter; matching is
+        # case-insensitive anyway.
+        if event.text and event.text.isalnum():
+            self._set_search_text(self.search_text + event.text.upper())
+            return Outcome(redraw=True)
+        if event.text == "\x1b":
+            # Desktop Esc: leave the dialog outright, whatever is typed so far.
+            self._close_search()
+            return Outcome(redraw=True)
+        action = event.action
+        last = len(SEARCH_CODES) - 1
+        if action is InputAction.LEFT:
+            self.search_kb = max(0, self.search_kb - 1)
+        elif action is InputAction.RIGHT:
+            self.search_kb = min(last, self.search_kb + 1)
+        elif action is InputAction.UP:
+            if self.search_results():
+                # Up always jumps into the result list: after typing, the
+                # cursor sits wherever the last letter landed, and asking the
+                # player to first walk it to the top row would hide the results
+                # behind a chore.  Down/left/right still cover the grid.
+                self.search_focus = "results"
+                self.search_result_index = 0
+            else:
+                self.search_kb = max(0, self.search_kb - SEARCH_COLS)
+        elif action is InputAction.DOWN:
+            self.search_kb = min(last, self.search_kb + SEARCH_COLS)
+        elif action is InputAction.A:
+            return self._apply_search_key(SEARCH_CODES[self.search_kb])
+        elif action is InputAction.B:
+            # Backspace while there is text to delete, close when there is not.
+            return self._apply_search_key("BS" if self.search_text else "OFF")
+        elif action is InputAction.Y:
+            self._set_search_text("")
+        elif action in (InputAction.L1, InputAction.R1):
+            if self.search_results():
+                self.search_focus = "results"
+                self.search_result_index = 0
+        return Outcome(redraw=True)
+
+    def _handle_search_results(self, event: InputEvent) -> Outcome:
+        results = self.search_results()
+        if event.text == "\x1b":
+            # Desktop Esc from the result list: one press, dialog gone.
+            self._close_search()
+            return Outcome(redraw=True)
+        # No typing here on purpose: the focus is not on the keyboard, so
+        # every key acts instead -- B (and the letter that carries it) goes
+        # back to the query, arrows move, A launches.
+        action = event.action
+        if action in (InputAction.UP, InputAction.DOWN):
+            if results:
+                step = -1 if action is InputAction.UP else 1
+                self.search_result_index = (
+                    (self.search_result_index + step) % len(results)
+                )
+        elif action in (InputAction.L1, InputAction.R1, InputAction.B):
+            self.search_focus = "kb"
+        elif action is InputAction.A:
+            if results:
+                game = results[self.search_result_index % len(results)]
+                self._close_search()
+                return self._pick_or_launch(game)
+        return Outcome(redraw=True)
+
+    def _apply_search_key(self, code: str) -> Outcome:
+        if code == "OFF":
+            self._close_search()
+        elif code == "BS":
+            self._set_search_text(self.search_text[:-1])
+        elif code == "CLR":
+            self._set_search_text("")
+        else:
+            self._set_search_text(self.search_text + code)
+        return Outcome(redraw=True)
+
+    def _set_search_text(self, text: str) -> None:
+        self.search_text = text
+        self.search_result_index = 0
 
     def _handle_exit_modal(self, event: InputEvent) -> Outcome:
         if not event.is_press:

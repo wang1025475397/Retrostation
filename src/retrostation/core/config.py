@@ -30,6 +30,11 @@ SCREEN_MODES: tuple[str, ...] = ("auto", "dual", "single")
 SINGLE_LAYOUTS: tuple[str, ...] = ("split_v", "split_h")
 SORT_ORDERS: tuple[str, ...] = ("name", "play", "recent")
 FILTERS: tuple[str, ...] = ("all", "covered", "missing")
+#: What the game search matches against: metadata titles, ROM file names, or
+#: both.  "rom" exists for English queries against Chinese packs (the pinyin
+#: initials of 拳皇97 will never spell KOF); "title" is the default because it
+#: is what "search" usually means.
+SEARCH_BY: tuple[str, ...] = ("title", "rom", "both")
 
 
 class ConfigError(ValueError):
@@ -92,6 +97,8 @@ class Config:
     #: entries (a pack's BIOS sets, duplicates, junk) get out of the way, and
     #: they must stay out of the way until the player asks to see them again.
     show_hidden: bool = False
+    #: Which names the search matches against -- see :data:`SEARCH_BY`.
+    search_by: str = "title"
 
     # media --------------------------------------------------------------- #
     media_dirs: dict[str, str] = field(
@@ -137,6 +144,7 @@ class Config:
         "filter": FILTERS,
         "theme": THEMES,
         "theme_variant": VARIANTS,
+        "search_by": SEARCH_BY,
     }
 
     # ------------------------------------------------------------------ #

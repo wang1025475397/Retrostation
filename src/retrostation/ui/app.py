@@ -30,8 +30,16 @@ from ..launcher.launch import LaunchError, LaunchPlan, build_plan
 from ..platform.base import InputAction, InputEvent, InputKind, Platform
 from .art import ArtProvider
 from .painter import Painter
-from .session import MODAL_EXIT, MODAL_MENU, MODAL_ROM_SELECT, Session, VIEW_GAMES, VIEW_PLATFORMS
-from .screens import bottom, games, home, menu
+from .session import (
+    MODAL_EXIT,
+    MODAL_MENU,
+    MODAL_ROM_SELECT,
+    MODAL_SEARCH,
+    Session,
+    VIEW_GAMES,
+    VIEW_PLATFORMS,
+)
+from .screens import bottom, games, home, menu, search
 from .widgets import button_bar, dialog, status_bar, toast, version_tag
 
 log = logging.getLogger(__name__)
@@ -504,6 +512,8 @@ class App:
             menu.draw_exit(painter, session)
         elif session.modal == MODAL_ROM_SELECT:
             menu.draw_rom_select(painter, session)
+        elif session.modal == MODAL_SEARCH:
+            search.draw(painter, self.art, session)
         message = session.active_toast()
         if message:
             toast(painter, message)
@@ -712,14 +722,23 @@ class App:
         key = session.current_system_key()
         # 双屏预览选中：详情面板展示预览选中的游戏（渲染路径与游戏详情相同）。
         previewing = session.preview_mode and session.view == VIEW_PLATFORMS
-        if previewing:
+        if session.modal == MODAL_SEARCH:
+            # 双屏搜索选中：详情面板跟随搜索结果的光标（与预览选中同一路径）。
+            results = session.search_results()
+            game = (
+                results[min(session.search_result_index, len(results) - 1)]
+                if results else None
+            )
+        elif previewing:
             previews = session.preview_games()
             game = previews[min(session.preview_index, len(previews) - 1)] if previews else None
         else:
             game = session.current_game() if session.view == VIEW_GAMES else None
 
+        searching = session.modal == MODAL_SEARCH
         meta = self._meta(game) if game is not None else None
-        frame = self._video.frame() if game is not None else None
+        # 搜索切换选中不驱动视频（上一个游戏的片段会与结果错位），详情走封面兜底。
+        frame = None if searching else (self._video.frame() if game is not None else None)
         # 平台总览的工具栏标题带上该平台的游戏数量；聚合视图没有单一数量。
         game_count = (
             self.library.rom_count(key)
@@ -735,7 +754,7 @@ class App:
             hints=self._platform_hints() if previewing else self._bottom_hints(),
             video_frame=frame,
             video_progress=self._video.progress() if frame is not None else None,
-            clip_pending=(game is not None and self._video.is_pending(game.key)),
+            clip_pending=(game is not None and not searching and self._video.is_pending(game.key)),
             system_desc=self._system_desc(key),
             game_count=game_count,
         )

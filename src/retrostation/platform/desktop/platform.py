@@ -43,12 +43,14 @@ from ...core.theme import BASE_H, BASE_W
 from ..base import (
     AudioPipe,
     Canvas,
+    COMBO_MEMBERS,
     FileEntry,
     InputAction,
     InputEvent,
     InputKind,
     Platform,
     VideoPipe,
+    combo_tick,
 )
 from ..linux.canvas import PilCanvas
 from ..linux.fonts import FontBook
@@ -87,6 +89,8 @@ _KEYMAP: dict[str, InputAction] = {
     "s": InputAction.START,
     "m": InputAction.START,
     "quoteleft": InputAction.MENU,  # ` (backtick): hold to quit
+    "slash": InputAction.SEARCH,    # / : open (or leave) the search dialog
+    "backspace": InputAction.B,     # backspace = the B action (undo / back)
 }
 
 #: Actions that auto-repeat while held (list scrolling, page turns).
@@ -129,8 +133,9 @@ class DesktopPlatform(Platform):
         self._photos: list[object] = []
         self._events: deque[InputEvent] = deque()
         self._lock = threading.Lock()
-        #: action -> (held_since, last_repeat, long_fired)
-        self._held: dict[InputAction, tuple[float, float, bool]] = {}
+        #: action -> (held_since, last_repeat, long_fired, pressed); ``pressed``
+        #: stays False while a search-combo member's press is withheld.
+        self._held: dict[InputAction, tuple[float, float, bool, bool]] = {}
         self._closed = False
         #: Actual on-screen size of one panel (may be scaled down to fit the
         # display; the rendered PilCanvas is always larger and gets resized).
@@ -270,12 +275,14 @@ class DesktopPlatform(Platform):
             InputAction.SELECT: "SELECT 筛选",
             InputAction.START: "START 菜单",
             InputAction.MENU: "MENU 退出",
+            InputAction.SEARCH: "/ 搜索",
         }
         # keysym -> human-readable key name
         key_labels = {
             "up": "↑", "down": "↓", "left": "←", "right": "→",
             "return": "Enter", "escape": "Esc", "quoteleft": "`",
             "home": "Home", "end": "End", "tab": "Tab",
+            "slash": "/", "backspace": "Bksp",
         }
         # Reverse the keymap: action -> [keysyms] (one action may bind several).
         rev: dict[InputAction, list[str]] = {}
@@ -288,6 +295,7 @@ class DesktopPlatform(Platform):
             InputAction.HIDE,
             InputAction.L1, InputAction.R1, InputAction.L2, InputAction.R2,
             InputAction.SELECT, InputAction.START, InputAction.MENU,
+            InputAction.SEARCH,
         ]
         for action in order:
             keys = rev.get(action, [])
@@ -342,15 +350,37 @@ class DesktopPlatform(Platform):
     def _on_press(self, event) -> None:
         if self._closed:
             return
-        action = _KEYMAP.get(event.keysym.lower())
-        if action is None:
+        keysym = event.keysym.lower()
+        action = _KEYMAP.get(keysym)
+        # Alphanumeric keys ride their character along: in the search dialog
+        # the character is what gets typed, everywhere else the mapped action
+        # is what fires.  Unmapped printable keys carry only the character.
+        text = keysym if len(keysym) == 1 and keysym.isalnum() else ""
+        # Esc and Backspace keep their B-action mapping for every other
+        # screen; in the search dialog the session tells them apart from the
+        # plain B key (and from the handheld's B button, which carries no
+        # character) by these control characters riding in ``text``.
+        if keysym == "backspace":
+            text = "\b"
+        elif keysym == "escape":
+            text = "\x1b"
+        if action is None and not text:
             return
         with self._lock:
-            if action in self._held:
+            if action is not None and action in self._held:
                 return  # OS auto-repeat: we synthesise our own repeats
             now = time.monotonic()
-            self._held[action] = (now, now, False)
-            self._events.append(InputEvent(action, InputKind.PRESS))
+            if action is not None:
+                if action in COMBO_MEMBERS:
+                    # Withheld for COMBO_WINDOW: if the other member arrives,
+                    # the pair fires SEARCH and neither member's own press
+                    # happened.
+                    self._held[action] = (now, now, False, False)
+                else:
+                    self._held[action] = (now, now, False, True)
+            self._events.append(
+                InputEvent(action or InputAction.CHAR, InputKind.PRESS, text=text)
+            )
 
     def _on_release(self, event) -> None:
         if self._closed:
@@ -359,7 +389,11 @@ class DesktopPlatform(Platform):
         if action is None:
             return
         with self._lock:
-            self._held.pop(action, None)
+            record = self._held.pop(action, None)
+            if action in COMBO_MEMBERS and record is not None and not record[3]:
+                # Released before the withheld press fired (a quick tap):
+                # deliver the pair, just a few milliseconds late.
+                self._events.append(InputEvent(action, InputKind.PRESS))
             self._events.append(InputEvent(action, InputKind.RELEASE))
 
     def poll_events(self, timeout: float = 0.0) -> list[InputEvent]:
@@ -387,14 +421,15 @@ class DesktopPlatform(Platform):
             pass
 
     def _synthesize(self) -> None:
-        """Synthesise long-press (quit) and auto-repeat (scrolling)."""
+        """Synthesise long-press (quit), the search combo and auto-repeat."""
         now = time.monotonic()
         generated: list[InputEvent] = []
         with self._lock:
-            for action, (since, last, long_fired) in list(self._held.items()):
+            combo_tick(self._held, generated, now)
+            for action, (since, last, long_fired, pressed) in list(self._held.items()):
                 if action is InputAction.MENU and not long_fired:
                     if now - since >= _LONG_PRESS:
-                        self._held[action] = (since, last, True)
+                        self._held[action] = (since, last, True, pressed)
                         generated.append(InputEvent(action, InputKind.LONG_PRESS))
                         continue
                 if action not in _REPEATABLE:
@@ -407,7 +442,7 @@ class DesktopPlatform(Platform):
                     nlast += _REPEAT_RATE
                     fired += 1
                 if fired:
-                    self._held[action] = (since, nlast, long_fired)
+                    self._held[action] = (since, nlast, long_fired, pressed)
                     generated.extend(
                         InputEvent(action, InputKind.REPEAT) for _ in range(fired)
                     )

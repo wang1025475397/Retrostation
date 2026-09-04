@@ -314,6 +314,7 @@ The matching `config.json` keys:
 | `per_system_sort` | Per-system sort order | `{"FC": "filename"}` |
 | `per_system_filter` | Per-system filter | `{"FC": "all"}` |
 | `show_hidden` | Show games the player hid (see README "Controls") | `false` |
+| `search_by` | Names the search matches: `title` / `rom` / `both` | `"title"` |
 | `available_rom_roots` | Manually specify ROM card roots (multi-card) | `["/mnt/mmc/Roms", "/mnt/sdcard/Roms"]` |
 
 ---

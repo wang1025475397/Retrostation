@@ -53,12 +53,22 @@ class InputAction(str, enum.Enum):
     START = "start"
     SELECT = "select"
     MENU = "menu"    # long press = quit
+    #: SELECT+START held together (see ``COMBO_MEMBERS`` below).  Synthesised
+    #: by the input platforms: the members' own presses are withheld for
+    #: ``COMBO_WINDOW`` so opening search never toggles the filter or opens
+    #: the menu first.
+    SEARCH = "search"
 
     #: The device's own volume rocker.  Not game buttons: while the frontend is
     #: up they move the preview volume, which is the only thing here that makes
     #: a sound of its own.
     VOLUME_UP = "volume_up"
     VOLUME_DOWN = "volume_down"
+
+    #: A typed character with no key mapping (desktop only; see
+    #: :attr:`InputEvent.text`).  Handlers that do not care about typing
+    #: ignore it, so it is inert everywhere except the search dialog.
+    CHAR = "char"
 
 
 class InputKind(str, enum.Enum):
@@ -79,6 +89,10 @@ class InputEvent:
     #: Touch coordinates, only set for ``InputAction.TAP``.
     x: int | None = None
     y: int | None = None
+    #: The typed character for keys that carry one (desktop keyboard).  An
+    #: event can be both: ``s`` types an "s" *and* maps to START, and the
+    #: handler in charge decides which side it consumes.
+    text: str = ""
 
     @property
     def is_press(self) -> bool:
@@ -95,6 +109,48 @@ class InputEvent:
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
         pos = f" @({self.x},{self.y})" if self.x is not None else ""
         return f"<{self.kind.value}:{self.action.value}{pos}>"
+
+
+# --------------------------------------------------------------------------- #
+# Key combos
+# --------------------------------------------------------------------------- #
+
+#: Buttons that together mean "search".  Held at once they synthesise
+#: :attr:`InputAction.SEARCH`; a member pressed alone still comes through as
+#: itself once it is clear the other one is not coming.
+COMBO_MEMBERS: frozenset[InputAction] = frozenset(
+    {InputAction.SELECT, InputAction.START}
+)
+COMBO_RESULT: InputAction = InputAction.SEARCH
+#: How long a combo member's press is withheld in case the other member
+#: arrives.  Below perception, far above key bounce.
+COMBO_WINDOW = 0.08
+
+#: The shape of a ``_held`` entry shared by the platforms:
+#: ``(since, last_repeat, long_fired, pressed)``.  ``pressed`` is False while
+#: a combo member's press is being withheld.
+
+
+def combo_tick(held: dict, out: list[InputEvent], now: float) -> None:
+    """Fire the combo, or let a lone member's press through.
+
+    Call once per poll with the platform lock held.  Both members present ->
+    one SEARCH press and both members vanish, so their withheld presses never
+    happened and the filter/menu never toggled.  A member alone past the
+    window gets its press here: single-button behaviour is delayed by at most
+    the window, while repeat and long-press keep their timing from the
+    original press moment.
+    """
+    if all(member in held for member in COMBO_MEMBERS):
+        for member in COMBO_MEMBERS:
+            del held[member]
+        out.append(InputEvent(COMBO_RESULT, InputKind.PRESS))
+        return
+    for action in COMBO_MEMBERS:
+        record = held.get(action)
+        if record is not None and not record[3] and now - record[0] >= COMBO_WINDOW:
+            held[action] = (record[0], record[1], record[2], True)
+            out.append(InputEvent(action, InputKind.PRESS))
 
 
 # --------------------------------------------------------------------------- #

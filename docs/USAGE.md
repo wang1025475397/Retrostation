@@ -295,6 +295,7 @@ ES-DE/                                  ← esde_root
 | `per_system_sort` | 每个机种各自的排序方式 | `{"FC": "filename"}` |
 | `per_system_filter` | 每个机种各自的筛选 | `{"FC": "all"}` |
 | `show_hidden` | 是否显示已隐藏的游戏（操作见 README「操作键位」） | `false` |
+| `search_by` | 搜索匹配的名称：`title` 游戏名 / `rom` ROM 文件名 / `both` 混合 | `"title"` |
 | `available_rom_roots` | 手动指定 ROM 卡根（多卡时） | `["/mnt/mmc/Roms", "/mnt/sdcard/Roms"]` |
 
 ---
