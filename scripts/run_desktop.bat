@@ -1,9 +1,12 @@
+@chcp 65001 >nul
 @echo off
 rem 一键启动 Retrostation 桌面版（Windows）。双击即可运行，无需手动设置环境。
 rem 直接调用 python（不经 PowerShell），并把每一步打印出来，方便排查问题。
 setlocal
 cd /d "%~dp0.."
 
+rem 强制 Python 以 UTF-8 进行标准流 I/O，避免中文打印乱码。
+set "PYTHONUTF8=1"
 set "PYTHONPATH=%CD%\src"
 set PYTHONUNBUFFERED=1
 

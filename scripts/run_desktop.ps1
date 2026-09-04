@@ -13,6 +13,11 @@ Any extra arguments are forwarded to retrostation.main.
 #>
 $ErrorActionPreference = 'Stop'
 
+# Make the PowerShell console speak UTF-8 so Chinese output is not garbled.
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$OutputEncoding = [System.Text.Encoding]::UTF8
+$env:PYTHONUTF8 = '1'
+
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 $root = Split-Path -Parent $here
 
