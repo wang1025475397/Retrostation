@@ -226,6 +226,8 @@ ES-DE/                                  ← esde_root
 `metadata.pegasus.txt` 是**只读**的：收藏、游玩次数这些由本前端产生的数据不会写进去，仍然写回 `gamelist.xml`。
 如果卡上只有 Pegasus、没有 `gamelist.xml`，第一次收藏时会在该机种目录下自动创建 `gamelist.xml`。
 
+`ignore-files:` 指令同样生效：Pegasus 包用它标记要隐藏的文件（通常是 BIOS / 设备文件，如 `neogeo.zip`），这些文件不会被当作游戏显示。支持一行一个文件名的多行写法，也识别 `metadata.txt` 这类非标准文件名。
+
 ---
 
 ## 六、预览声音与音量
@@ -292,6 +294,7 @@ ES-DE/                                  ← esde_root
 | `video_volume` | 预览音量 0–100（见第六节「预览声音与音量」） | `70` |
 | `per_system_sort` | 每个机种各自的排序方式 | `{"FC": "filename"}` |
 | `per_system_filter` | 每个机种各自的筛选 | `{"FC": "all"}` |
+| `show_hidden` | 是否显示已隐藏的游戏（操作见 README「操作键位」） | `false` |
 | `available_rom_roots` | 手动指定 ROM 卡根（多卡时） | `["/mnt/mmc/Roms", "/mnt/sdcard/Roms"]` |
 
 ---

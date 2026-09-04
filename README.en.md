@@ -15,6 +15,7 @@ The top screen (DSI-1) is the interactive main view; the bottom screen (DSI-2) i
 - **Two metadata formats**: **ES-DE `gamelist.xml` (read + write)** and **Pegasus `metadata.pegasus.txt` (read-only)**, merged by priority; the bottom panel names the file the current entry actually came from.
 - **ES-DE media layout**: cover · video · logo · screenshot · fanart, in ES-DE's own folder names (`covers/`, `videos/`, `marquees/`, `screenshots/`, `fanart/`). Works with ES-DE's separate tree (`gamelists/` + `downloaded_media/`) or with everything inside the ROM directory (`<SYS>/gamelist.xml` + `<SYS>/media/`) — **same folder names either way, so moving between the two needs no renaming**.
 - **Interoperable play state**: favorites / play count / last played are written back to `gamelist.xml`, interoperable with ES-DE / Batocera.
+- **Hide unwanted games**: select one and press `H` (desktop) or use the menu's "Hide this game" — the entry leaves the list immediately. Hidden state is also written back to `gamelist.xml`, interoperable with other frontends; the "Show hidden" menu switch brings them back, badged as hidden.
 - **Pluggable data sources**: `data/sources/` plugin layer; a new format is one new file, with the UI and scanner untouched.
 - **Bottom-screen video with sound**: ffmpeg pipeline software decoding; the soundtrack plays through ALSA and the **volume rocker** adjusts it (±5, takes effect at once); automatic fallback to cover when there is no video or decoding fails; measured ~4.5% single core.
 - **Fast cold start, light footprint**: index cache + thumbnail cache, cold start to first frame ~1.2 s, resident memory ~40 MB.
@@ -122,10 +123,11 @@ After deployment, open **APPS** menu on device → select **Retrostation.sh** to
 |---|---|---|
 | Up/Down | No response on platform page | Move selection (list ±1, grid by row ±4; hold to repeat) |
 | Left/Right | Switch platform | List ±10; grid, carousel ±1 |
-| **A** | Enter game library | **Launch game** |
+| **A** | Enter game library | **Launch game** (multi-file games first show a ROM picker) |
 | **B** | — | Back to platform page |
 | **X** | — | Switch list / grid / carousel |
 | **Y** | — | Favorite / unfavorite |
+| **H / Delete** | — | Hide / unhide (desktop keyboard only; on the handheld use the menu) |
 | L1 / R1 | — | Page up / down |
 | L2 / R2 | — | Jump to first / last |
 | SELECT | — | Switch filter (all / has cover / missing cover) |

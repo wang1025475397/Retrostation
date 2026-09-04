@@ -239,6 +239,10 @@ lookup, so artwork cannot be matched to the wrong slot.
 to `gamelist.xml`. If a card has only Pegasus and no `gamelist.xml`, one is created in that system
 directory the first time you favorite something.
 
+The `ignore-files:` directive is honoured too: Pegasus packs use it to mark files to hide (usually
+BIOS / device sets, e.g. `neogeo.zip`), and those files never show up as games. One file name per
+indented line is supported, and bare `metadata.txt` names are recognised as well.
+
 ---
 
 ## 6. Preview Sound & Volume
@@ -309,6 +313,7 @@ The matching `config.json` keys:
 | `video_volume` | Preview volume 0–100 (see section 6, "Preview Sound & Volume") | `70` |
 | `per_system_sort` | Per-system sort order | `{"FC": "filename"}` |
 | `per_system_filter` | Per-system filter | `{"FC": "all"}` |
+| `show_hidden` | Show games the player hid (see README "Controls") | `false` |
 | `available_rom_roots` | Manually specify ROM card roots (multi-card) | `["/mnt/mmc/Roms", "/mnt/sdcard/Roms"]` |
 
 ---
