@@ -98,6 +98,17 @@ def build_games(
     name, so the library is always complete.
     """
     rom_index = {rom.name: rom for rom in roms}
+    # File names a metadata source (Pegasus ``ignore-files:``) asks to hide.
+    # Lower-cased so the pack's spelling need not match the on-disk name.
+    ignored: set[str] = set()
+    for bundle in bundles:
+        ignored.update(bundle.source.ignored_files(system_dir))
+    ignored_lower = {name.lower() for name in ignored}
+    if ignored_lower:
+        rom_index = {
+            name: rom for name, rom in rom_index.items()
+            if name.lower() not in ignored_lower
+        }
     games: dict[str, Game] = {}
     variant_keys: set[str] = set()
 
@@ -142,6 +153,8 @@ def build_games(
 
     # Every other ROM -> its own Game (or a multi-file ROM with no grouping).
     for rom in roms:
+        if rom.name.lower() in ignored_lower:
+            continue
         key = game_key(system, rom)
         if key in games or key in variant_keys:
             continue

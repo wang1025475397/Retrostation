@@ -88,6 +88,10 @@ class Config:
     layout: str = "list"
     sort: str = "name"
     filter: str = "all"
+    #: Show games the player hid.  Off by default: hiding is how unwanted
+    #: entries (a pack's BIOS sets, duplicates, junk) get out of the way, and
+    #: they must stay out of the way until the player asks to see them again.
+    show_hidden: bool = False
 
     # media --------------------------------------------------------------- #
     media_dirs: dict[str, str] = field(

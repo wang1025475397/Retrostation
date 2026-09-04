@@ -6,15 +6,56 @@ cursor, so switching views with X never loses your place (DESIGN §7.1).
 
 from __future__ import annotations
 
-from PIL import Image
+from PIL import Image, ImageChops, ImageDraw
 
 from ..art import ArtProvider
+from ...data.media import cover_bitmap
 from ..painter import Painter
+
+
+def _round_corners(bitmap: object, radius: int) -> object:
+    """Return ``bitmap`` with its corners clipped to a rounded rectangle.
+
+    The mask is multiplied with the bitmap's existing alpha, so a dimmed
+    (semi-transparent) cover keeps its fade instead of snapping back to opaque.
+    """
+    if radius <= 0:
+        return bitmap
+    image: Image.Image = bitmap  # type: ignore[assignment]
+    if image.mode != "RGBA":
+        image = image.convert("RGBA")
+    w, h = image.size
+    r = min(radius, w // 2, h // 2)
+    mask = Image.new("L", (w, h), 0)
+    ImageDraw.Draw(mask).rounded_rectangle([0, 0, w, h], radius=r, fill=255)
+    alpha = ImageChops.multiply(image.split()[-1], mask)
+    rounded = image.copy()
+    rounded.putalpha(alpha)
+    return rounded
 from ..widgets import page_header, scrollbar
 from ...core.model import Game
 from ...core.theme import COLORS
 
 _STAR = "★"
+
+
+def _hidden_badge(painter: Painter, x: int, y: int, *, size: int = 9) -> None:
+    """Small marker telling the player this entry is hidden.
+
+    Only ever drawn while the show-hidden switch is on -- the one case where a
+    hidden game is on screen at all, and the only way to tell it from its
+    visible neighbours.  Palette colours keep it readable in every theme, and
+    the solid backing matters because the badge usually sits on cover art.
+    """
+    label = painter.translator("games.hidden")
+    m = painter.metrics
+    pad_x = m.u(4)
+    w = painter.text_width(label, size=size) + pad_x * 2
+    h = size + m.u(6)
+    painter.rounded_rect((x, y, w, h), radius=m.u(3), fill=COLORS.panel_2,
+                         outline=COLORS.border)
+    painter.text((x + pad_x, y + h // 2), label, size=size, fill=COLORS.text_dim,
+                 anchor="lm")
 
 
 def _dimmed(painter: Painter, bitmap: object, opacity: int) -> object:
@@ -43,6 +84,8 @@ def cover_art(
     *,
     prefer_logo: bool = False,
     opacity: int = 255,
+    cover: bool = False,
+    radius: int = 0,
 ) -> None:
     """The game's artwork, or an empty plate that says there is none.
 
@@ -50,11 +93,15 @@ def cover_art(
     decoration, so a missing cover was easy to mistake for an unusual one -- and
     each view drew a different one.  An empty plate labelled "no cover" is
     unambiguous, and the three views now agree.
+
+    ``cover=True`` fills the box (cropping overflow) instead of letterboxing, so
+    the art occupies the whole slot; ``radius`` rounds the corners to match the
+    card underneath.
     """
     x, y, w, h = box
     bitmap = art.thumbnail(game, w, h, prefer_logo=prefer_logo)
     if bitmap is None:
-        painter.rounded_rect(box, radius=painter.metrics.u(3),
+        painter.rounded_rect(box, radius=radius or painter.metrics.u(3),
                              fill=COLORS.panel_2, outline=(255, 255, 255, 20))
         painter.text(
             (x + w // 2, y + h // 2),
@@ -62,7 +109,12 @@ def cover_art(
             size=11 if h >= 60 else 9, fill=COLORS.text_dim, anchor="mm",
         )
         return
-    painter.image_fit(_dimmed(painter, bitmap, opacity) if opacity < 255 else bitmap, box)
+    drawn = _dimmed(painter, bitmap, opacity) if opacity < 255 else bitmap
+    if cover:
+        drawn = cover_bitmap(drawn, w, h)
+    if radius:
+        drawn = _round_corners(drawn, radius)
+    painter.image_fit(drawn, box)
 
 
 #: ``(game key, w, h) -> dimmed backdrop``.  Kept apart from ``_DIM_CACHE``
@@ -205,11 +257,15 @@ def _row(
 
     text_x = x + thumb_w + m.u(10)
     max_name_w = w - thumb_h - m.u(150)
+    name = painter.ellipsize(game.display_name, size=15, max_width=max_name_w)
     painter.text(
         (text_x, y + h // 2),
-        painter.ellipsize(game.display_name, size=15, max_width=max_name_w),
+        name,
         size=15, fill=name_color, anchor="lm",
     )
+    if game.hidden:
+        _hidden_badge(painter, text_x + painter.text_width(name, size=15) + m.u(6),
+                      y + h // 2 - m.u(7))
 
     meta_x = x + w - m.u(46)
     if game.favorite:
@@ -288,10 +344,13 @@ def _card(
         painter.rounded_rect(box, radius=m.u(7), fill=panel_fill(painter), outline=COLORS.border)
 
     art_h = h - name_h
-    cover_art(painter, art, game, (x + 1, y + 1, w - 2, art_h))
+    cover_art(painter, art, game, (x, y, w, art_h), cover=True, radius=m.u(7))
 
     if game.favorite:
         painter.text((x + w - m.u(8), y + m.u(10)), _STAR, size=12, fill=COLORS.accent, anchor="rm")
+    # Bottom-left: the favourite star already owns the top-right corner.
+    if game.hidden:
+        _hidden_badge(painter, x + m.u(4), y + art_h - m.u(16))
 
     bar = (x + 1, y + art_h, w - 2, name_h)
     painter.rect(bar, fill=COLORS.accent_d1 if selected else COLORS.panel_2)
@@ -396,19 +455,17 @@ def _cover_card(
 ) -> None:
     m = painter.metrics
     x, y, w, h = box
-    painter.rounded_rect(
-        box, radius=m.u(8),
-        fill=panel_fill(painter),
-        outline=COLORS.accent if selected else COLORS.border,
-        width=2 if selected else 1,
-    )
 
-    # No logo overlay here: the banner below the carousel already shows one for
-    # the selected game, and repeating it on every card just covered the art.
-    cover_art(painter, art, game, (x + 1, y + 1, w - 2, h - 2), opacity=opacity)
+    # No border: the cover fills the whole card and is cropped to its rounded
+    # corners, so the carousel reads as a row of pictures rather than outlined
+    # boxes.  The selected card stays distinct through its size and full opacity.
+    cover_art(painter, art, game, (x, y, w, h), opacity=opacity,
+              cover=True, radius=m.u(8))
 
     if game.favorite:
         painter.text((x + w - m.u(8), y + m.u(10)), _STAR, size=13, fill=COLORS.accent, anchor="rm")
+    if game.hidden:
+        _hidden_badge(painter, x + m.u(6), y + h - m.u(18))
 
 
 def _single(painter: Painter) -> bool:

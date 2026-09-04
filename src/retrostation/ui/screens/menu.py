@@ -23,3 +23,21 @@ def draw_exit(painter: Painter, session: Session) -> None:
         title=painter.translator("dialog.exit_title"),
         body=painter.translator("dialog.exit_body"),
     )
+
+
+def draw_rom_select(painter: Painter, session: Session) -> None:
+    """Picker for the files of a multi-file game (arcade hacks/clones, discs)."""
+    game = session.rom_select_game
+    paths = session.rom_select_paths
+    rows = []
+    for index, path in enumerate(paths):
+        label = path.name
+        if game is not None and path == game.path:
+            label = f"{painter.translator('rom_select.primary')} · {label}"
+        rows.append((label, ""))
+    dialog(
+        painter,
+        title=painter.translator("rom_select.title"),
+        rows=rows,
+        selected=session.rom_select_index,
+    )

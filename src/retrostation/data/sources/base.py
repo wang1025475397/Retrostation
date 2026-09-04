@@ -94,6 +94,16 @@ class MetadataSource(abc.ABC):
         the problem.  A broken metadata file must not break the library.
         """
 
+    def ignored_files(self, system_dir: Path) -> set[str]:
+        """File names this source asks the scanner to hide.
+
+        Most formats have no such concept, so the default hides nothing.  A
+        source that does (Pegasus' ``ignore-files:``) overrides this to return
+        the names its metadata file lists; :func:`build_games` then drops them
+        from the library entirely.
+        """
+        return set()
+
     # -- writing ---------------------------------------------------------- #
 
     def save(self, system_dir: Path, entries: Mapping[str, RawEntry]) -> None:

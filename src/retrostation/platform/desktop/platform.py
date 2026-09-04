@@ -77,6 +77,8 @@ _KEYMAP: dict[str, InputAction] = {
     "escape": InputAction.B,
     "x": InputAction.X,
     "y": InputAction.Y,
+    "h": InputAction.HIDE,
+    "delete": InputAction.HIDE,
     "q": InputAction.L1,
     "e": InputAction.R1,
     "home": InputAction.L2,
@@ -260,6 +262,7 @@ class DesktopPlatform(Platform):
             InputAction.B: "B 返回",
             InputAction.X: "X 切视图",
             InputAction.Y: "Y 收藏",
+            InputAction.HIDE: "H 隐藏",
             InputAction.L1: "L1 上翻页",
             InputAction.R1: "R1 下翻页",
             InputAction.L2: "L2 跳到首",
@@ -282,6 +285,7 @@ class DesktopPlatform(Platform):
         order = [
             InputAction.UP, InputAction.DOWN, InputAction.LEFT, InputAction.RIGHT,
             InputAction.A, InputAction.B, InputAction.X, InputAction.Y,
+            InputAction.HIDE,
             InputAction.L1, InputAction.R1, InputAction.L2, InputAction.R2,
             InputAction.SELECT, InputAction.START, InputAction.MENU,
         ]

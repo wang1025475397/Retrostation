@@ -36,6 +36,7 @@ VIEW_GAMES = "games"
 MODAL_NONE = ""
 MODAL_MENU = "menu"
 MODAL_EXIT = "exit"
+MODAL_ROM_SELECT = "rom_select"
 
 FILTERS = ("all", "covered", "missing")
 SORTS = ("name", "play", "recent")
@@ -93,6 +94,12 @@ class Session:
     modal: str = MODAL_NONE
     menu_index: int = 0
     exit_selected: int = 0
+    #: ROM picker for multi-file games (Pegasus blocks listing several
+    #: ``file:`` lines -- e.g. arcade hacks/clones).  ``rom_select_paths`` is
+    #: ``[game.path, *game.variants]`` and ``rom_select_index`` the cursor.
+    rom_select_index: int = 0
+    rom_select_game: Game | None = None
+    rom_select_paths: list = field(default_factory=list)
 
     #: Set when a settings row changed something that outlives the dialog: the
     #: app applies it (palette, backlight) and writes ``config.json``.  A
@@ -179,6 +186,15 @@ class Session:
             )
         else:
             games.sort(key=lambda game: game.sort_key.casefold())
+
+        # Re-apply the hide rule here, not just when the library loads a system:
+        # a game hidden a moment ago is still in that cached list, which was
+        # filtered before the change.  Filtering again makes the entry vanish on
+        # the very next frame instead of lingering until something else happens
+        # to rebuild the cache -- and it costs one pass over the list, where a
+        # rebuild would re-parse every metadata file for the system.
+        if not self.config.show_hidden:
+            games = [game for game in games if not game.hidden]
 
         if self._pending_game_key:
             for position, game in enumerate(games):
@@ -288,6 +304,8 @@ class Session:
             return self._handle_exit_modal(event)
         if self.modal == MODAL_MENU:
             return self._handle_menu_modal(event)
+        if self.modal == MODAL_ROM_SELECT:
+            return self._handle_rom_select_modal(event)
 
         if event.kind is InputKind.LONG_PRESS and event.action is InputAction.MENU:
             return self._open_exit_dialog()
@@ -354,6 +372,8 @@ class Session:
         if not previews:
             return Outcome()
         target = previews[min(self.preview_index, len(previews) - 1)]
+        if target.is_multi:
+            return self._open_rom_select(target)
         games = self.games()
         for position, game in enumerate(games):
             if game.path == target.path:
@@ -406,11 +426,13 @@ class Session:
             self.game_index = 0 if action is InputAction.L2 else count - 1
             return Outcome(redraw=True)
         if action is InputAction.A:
-            return Outcome(launch=self.current_game())
+            return self._pick_or_launch(self.current_game())
         if action is InputAction.B:
             return self._back_to_platforms()
         if action is InputAction.Y:
             return self._toggle_favorite()
+        if action is InputAction.HIDE:
+            return self._toggle_hidden()
         if action is InputAction.X:
             return self._cycle_layout()
         if action is InputAction.SELECT:
@@ -481,7 +503,31 @@ class Session:
             return Outcome()
         game.favorite = not game.favorite
         self.library.save_state(game, self.system_of(game))
+        # Same reason as hiding: the FAV view filters on this very flag, and
+        # ``current_game()`` rebuilt the frame cache before it changed.
+        self.invalidate()
         key = "btn.unfavorite" if not game.favorite else "btn.favorite"
+        self.notify(self.translator(key) + " " + game.display_name)
+        return Outcome(redraw=True)
+
+    def _toggle_hidden(self) -> Outcome:
+        """Hide / unhide the game under the cursor, persisted like favourites.
+
+        While ``show_hidden`` is on the entry stays where it is, so a mis-press
+        can be undone right there instead of after hunting for it in a menu.  It
+        drops out of the list again as soon as the switch is off.
+        """
+        game = self.current_game()
+        if game is None:
+            return Outcome()
+        game.hidden = not game.hidden
+        self.library.save_state(game, self.system_of(game))
+        # ``current_game()`` above rebuilt the frame cache while the game was
+        # still in its old state, so without this the list -- and the preview
+        # strip, which is built from the same list -- would go on showing it
+        # until some later input happened to drop the cache.
+        self.invalidate()
+        key = "toast.unhidden" if not game.hidden else "toast.hidden"
         self.notify(self.translator(key) + " " + game.display_name)
         return Outcome(redraw=True)
 
@@ -581,6 +627,15 @@ class Session:
             self.sort = SORTS[(SORTS.index(self.sort) + 1) % len(SORTS)]
         elif key == "filter":
             self._cycle_filter()
+        elif key == "show_hidden":
+            self.config.show_hidden = not self.config.show_hidden
+            # What is *visible* changed, not what is on disk: each system's
+            # cache would keep serving the list built under the old setting.
+            self.library.drop_games()
+        elif key == "hide_game":
+            # Action, not a setting: close the dialog and let the toast report.
+            self.modal = MODAL_NONE
+            return self._toggle_hidden()
         elif key == "theme":
             self.config.theme = THEMES[(THEMES.index(self.config.theme) + 1) % len(THEMES)]
         elif key == "variant":
@@ -662,7 +717,23 @@ class Session:
         """``(key, label, value)`` triples for the settings dialog."""
         config = self.config
         single = config.screen_mode == "single"
-        rows = [
+        rows: list[tuple[str, str, str]] = []
+        # Leading row, and only from the game list: the menu also opens on the
+        # home page, where there is nothing to hide.  This is how the handheld
+        # reaches the hide action -- every one of its buttons is taken, so HIDE
+        # cannot be bound to one.  It leads because it is usually the reason the
+        # menu was opened, not one more setting to fiddle with.
+        if self.view == VIEW_GAMES:
+            game = self.current_game()
+            if game is not None:
+                # Named for what the row will do, not for what it is: the same
+                # row both hides and un-hides, so a fixed label would be wrong
+                # half the time.
+                label = self.translator(
+                    "menu.unhide_game" if game.hidden else "menu.hide_game"
+                )
+                rows.append(("hide_game", label, ""))
+        rows += [
             ("screen", self.translator("menu.screen"),
              self.translator("value.single" if single else "value.dual")),
         ]
@@ -684,6 +755,9 @@ class Session:
              f"{int(config.video_volume)}"),
             ("sort", self.translator("menu.sort"), self.translator(f"value.sort_{self.sort}")),
             ("filter", self.translator("menu.filter"), self.translator(f"games.filter_{self.filter}")),
+            # Sits with the filter row: both decide which entries are listed.
+            ("show_hidden", self.translator("menu.show_hidden"),
+             self.translator("value.on" if config.show_hidden else "value.off")),
             ("theme", self.translator("menu.theme"), self.translator(f"value.theme_{config.theme}")),
             ("variant", self.translator("menu.variant"),
              self.translator(f"value.variant_{config.theme_variant}")),
@@ -696,6 +770,61 @@ class Session:
             ("about", self.translator("menu.about"), f"v{__version__}"),
         ]
         return rows
+
+    # -- ROM picker (multi-file games) ------------------------------------- #
+
+    def _pick_or_launch(self, game: Game | None) -> Outcome:
+        """Launch a single-file game now, or open the ROM picker for a block."""
+        if game is None:
+            return Outcome()
+        if game.is_multi:
+            return self._open_rom_select(game)
+        return Outcome(launch=game)
+
+    def _open_rom_select(self, game: Game) -> Outcome:
+        self.rom_select_game = game
+        self.rom_select_paths = [game.path, *game.variants]
+        self.rom_select_index = 0
+        self.modal = MODAL_ROM_SELECT
+        return Outcome(redraw=True)
+
+    def _handle_rom_select_modal(self, event: InputEvent) -> Outcome:
+        if not event.is_press:
+            return Outcome()
+        count = len(self.rom_select_paths)
+        if event.action is InputAction.UP:
+            if count:
+                self.rom_select_index = (self.rom_select_index - 1) % count
+        elif event.action is InputAction.DOWN:
+            if count:
+                self.rom_select_index = (self.rom_select_index + 1) % count
+        elif event.action in (InputAction.L1, InputAction.R1):
+            # Step a page at a time through long clone lists.
+            if count:
+                step = -5 if event.action is InputAction.L1 else 5
+                self.rom_select_index = (self.rom_select_index + step) % count
+        elif event.action is InputAction.A:
+            return self._confirm_rom_select()
+        elif event.action in (InputAction.B, InputAction.MENU):
+            self._close_rom_select()
+        return Outcome(redraw=True)
+
+    def _confirm_rom_select(self) -> Outcome:
+        game = self.rom_select_game
+        if game is None or not self.rom_select_paths:
+            self._close_rom_select()
+            return Outcome(redraw=True)
+        chosen = self.rom_select_paths[self.rom_select_index]
+        # Launch the chosen file but keep the parent game's metadata and state
+        # key, so favourites / play count stay attached to the title.
+        selected = game.copy(path=chosen)
+        self._close_rom_select()
+        return Outcome(launch=selected)
+
+    def _close_rom_select(self) -> None:
+        self.modal = MODAL_NONE
+        self.rom_select_game = None
+        self.rom_select_paths = []
 
     def _handle_exit_modal(self, event: InputEvent) -> Outcome:
         if not event.is_press:

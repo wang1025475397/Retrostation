@@ -153,10 +153,15 @@ class TestButtonMapping:
         assert presses(reader) == [InputAction.B]
 
     def test_every_action_is_reachable(self) -> None:
+        # Actions the handheld has no button left for: every physical key is
+        # taken, so these are bound on the desktop keymap and reached from the
+        # menu on the device.  Naming one here is a deliberate decision, so the
+        # test still catches an action that was merely forgotten.
+        desktop_only = {InputAction.HIDE}
         reachable = set(DEFAULT_KEYMAP.values()) | {
             side for pair in HAT_AXES.values() for side in pair
         }
-        assert reachable == set(InputAction)
+        assert reachable | desktop_only == set(InputAction)
 
     def test_release_after_press(self, reader: EvdevInput) -> None:
         feed(reader, raw(EV_KEY, 304, 1))

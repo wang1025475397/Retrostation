@@ -30,7 +30,7 @@ from ..launcher.launch import LaunchError, LaunchPlan, build_plan
 from ..platform.base import InputAction, InputEvent, InputKind, Platform
 from .art import ArtProvider
 from .painter import Painter
-from .session import MODAL_EXIT, MODAL_MENU, Session, VIEW_GAMES, VIEW_PLATFORMS
+from .session import MODAL_EXIT, MODAL_MENU, MODAL_ROM_SELECT, Session, VIEW_GAMES, VIEW_PLATFORMS
 from .screens import bottom, games, home, menu
 from .widgets import button_bar, dialog, status_bar, toast, version_tag
 
@@ -502,6 +502,8 @@ class App:
             menu.draw(painter, session)
         elif session.modal == MODAL_EXIT:
             menu.draw_exit(painter, session)
+        elif session.modal == MODAL_ROM_SELECT:
+            menu.draw_rom_select(painter, session)
         message = session.active_toast()
         if message:
             toast(painter, message)

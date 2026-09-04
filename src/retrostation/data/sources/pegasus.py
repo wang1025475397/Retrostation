@@ -30,6 +30,14 @@ from .base import MetadataSource, RawEntry
 
 FILENAME = "metadata.pegasus.txt"
 
+#: Candidate metadata file names, tried in order.  The Pegasus convention is
+#: ``metadata.pegasus.txt``, but some pack authors (and the 天马 / Pegasus
+#: EmulationStation themes) instead ship a bare ``metadata.txt`` in the system
+#: folder.  If we only looked for the standard name, that file's
+#: ``ignore-files`` directive would be silently skipped and its BIOS / device
+#: sets would wrongly show up as games.
+FILENAMES = ("metadata.pegasus.txt", "metadata.txt", ".metadata.txt")
+
 #: Pegasus asset key -> internal asset kind.  First match wins per kind.
 _ASSET_KEYS: dict[str, str] = {
     "boxfront": ASSET_COVER,
@@ -58,19 +66,35 @@ class PegasusSource(MetadataSource):
     priority = 20
 
     FILENAME = FILENAME
+    FILENAMES = FILENAMES
 
     def __init__(self, filename: str = FILENAME) -> None:
         self._filename = filename
+        #: Parsed ``ignore-files`` set (lower-cased), cached so ``ignored_files``
+        #: does not re-read the metadata file on every scan call.
+        self._ignored: set[str] | None = None
 
     # ------------------------------------------------------------------ #
     # Discovery / reading
     # ------------------------------------------------------------------ #
 
+    def _resolve_filename(self, system_dir: Path) -> str | None:
+        """First metadata file name that actually exists, or ``None``."""
+        if (system_dir / self._filename).is_file():
+            return self._filename
+        for name in self.FILENAMES:
+            if name != self._filename and (system_dir / name).is_file():
+                return name
+        return None
+
     def detect(self, system_dir: Path) -> bool:
-        return (system_dir / self._filename).is_file()
+        return self._resolve_filename(system_dir) is not None
 
     def load(self, system_dir: Path) -> dict[str, RawEntry]:
-        path = system_dir / self._filename
+        filename = self._resolve_filename(system_dir)
+        if filename is None:
+            return {}
+        path = system_dir / filename
         try:
             text = path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
@@ -81,11 +105,17 @@ class PegasusSource(MetadataSource):
         except OSError:
             modified = 0.0
 
-        blocks = self._parse_blocks(text)
+        blocks, ignored = self._parse_blocks(text)
+        # Lower-cased once: file names from metadata and from disk must match
+        # even when a pack writes them in a different case.
+        self._ignored = {name.lower() for name in ignored}
         entries: dict[str, RawEntry] = {}
         for block in blocks:
             entry = self._to_entry(block, modified)
             if entry is None:
+                continue
+            entry.files = [name for name in entry.files if name.lower() not in self._ignored]
+            if not entry.files:
                 continue
             # Index the entry under *every* file it lists, pointing at the same
             # RawEntry object.  That way each variant ROM finds its metadata, and
@@ -94,11 +124,36 @@ class PegasusSource(MetadataSource):
                 entries.setdefault(name, entry)
         return entries
 
+    def ignored_files(self, system_dir: Path) -> set[str]:
+        """File names this pack asks to hide (``ignore-files:`` directive).
+
+        Cached on the instance: the scanner calls it once per system, and the
+        metadata file is only parsed once (here or in :meth:`load`).
+        """
+        if self._ignored is not None:
+            return self._ignored
+        filename = self._resolve_filename(system_dir)
+        if filename is None:
+            self._ignored = set()
+            return self._ignored
+        path = system_dir / filename
+        if not path.is_file():
+            self._ignored = set()
+            return self._ignored
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            self._ignored = set()
+            return self._ignored
+        _blocks, ignored = self._parse_blocks(text)
+        self._ignored = {name.lower() for name in ignored}
+        return self._ignored
+
     # -- parsing ---------------------------------------------------------- #
 
     @staticmethod
-    def _parse_blocks(text: str) -> list[tuple[dict[str, str], list[str]]]:
-        """Split the file into ``(fields, files)`` blocks.
+    def _parse_blocks(text: str) -> tuple[list[tuple[dict[str, str], list[str]]], set[str]]:
+        """Split the file into ``(fields, files)`` blocks plus an ignore set.
 
         Handles the two ways Pegasus lists ROMs for one game (both occur in the
         wild, and PegasusConverter parses both):
@@ -110,10 +165,15 @@ class PegasusSource(MetadataSource):
         A ``game:`` line starts a new block; a block with no ``file``/``files``
         (collection-level metadata) yields an empty ``files`` list and is
         dropped later.
+
+        Every ``ignore-files:`` line (Pegasus' hide directive, which packs use
+        for BIOS / parent sets) is collected into the returned set regardless of
+        where it appears in the file.
         """
         blocks: list[tuple[dict[str, str], list[str]]] = []
         fields: dict[str, str] = {}
         files: list[str] = []
+        ignore: set[str] = set()
         current_key: str | None = None
         in_files = False
 
@@ -135,7 +195,11 @@ class PegasusSource(MetadataSource):
                 body = stripped
                 if body == ".":
                     body = ""
-                if in_files:
+                if current_key in ("ignore-files", "ignore-file"):
+                    # Continuation line(s) of the ignore directive: each listed
+                    # file name, one per indented line.
+                    ignore.update(MetadataSource._split_list(body))
+                elif in_files:
                     files.extend(p for p in body.split(",") if p.strip())
                 elif current_key == "description":
                     fields[current_key] = f"{fields.get(current_key, '')}\n{body}"
@@ -150,6 +214,15 @@ class PegasusSource(MetadataSource):
             key = key.strip().lower()
             value = value.strip()
             if not key:
+                continue
+
+            if key in ("ignore-files", "ignore-file"):
+                # Hide directive: every named file is skipped by the scanner.
+                # Normalised via the shared helper; do not let it leak into the
+                # block's fields or disturb the ``file`` continuation state.
+                ignore.update(MetadataSource._split_list(value))
+                current_key = key
+                in_files = False
                 continue
 
             if key == "game":
@@ -177,7 +250,7 @@ class PegasusSource(MetadataSource):
                     fields[key] = value
 
         flush()
-        return blocks
+        return blocks, ignore
 
     def _to_entry(self, block: tuple[dict[str, str], list[str]], modified: float) -> RawEntry | None:
         fields, files = block

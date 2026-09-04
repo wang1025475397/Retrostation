@@ -147,6 +147,16 @@ class Library:
                 self._systems[system_key] = library
         return library
 
+    def drop_games(self) -> None:
+        """Forget every parsed system; the next access rebuilds it.
+
+        Needed when a setting changes what is *visible* rather than what is on
+        disk -- the show-hidden switch.  Each :class:`SystemLibrary` memoises
+        its filtered list, so without this the old list keeps being served.
+        """
+        with self._lock:
+            self._systems.clear()
+
     def load_games(self, system_key: str) -> SystemLibrary:
         """Parse metadata + resolve media for one system (idempotent)."""
         library = self.system(system_key)
@@ -161,6 +171,7 @@ class Library:
         system_dir = self._platform.rom_root / system_key
         definition = lookup(system_key)
 
+        bundles: list = []
         try:
             bundles = source_registry.load_system(
                 system_dir,
@@ -175,9 +186,25 @@ class Library:
             games = {rom.name: Game.from_rom(system_key, rom.path) for rom in roms}
             variant_keys = set()
 
+        # Files the pack asks to hide (Pegasus ``ignore-files``: BIOS and device
+        # sets).  ``build_games`` deliberately leaves them out of ``games``, so
+        # without skipping them here the ``Game.from_rom`` fallback below puts
+        # every one of them right back into the list as a filename-only entry --
+        # which is exactly how a pack's hide directive used to be undone.
+        ignored_names: set[str] = set()
+        for bundle in bundles:
+            try:
+                ignored_names |= {
+                    name.lower() for name in bundle.source.ignored_files(system_dir)
+                }
+            except Exception:  # noqa: BLE001 - one broken source must not hide the library
+                log.exception("ignored_files failed for %s in %s", bundle.source.name, system_key)
+
         # Keep the ROM's on-disk order (already sorted by the scanner).
         ordered: list[Game] = []
         for rom in roms:
+            if rom.name.lower() in ignored_names:
+                continue
             key = game_key(system_key, rom.path)
             # A multi-file Pegasus block collapses into its primary Game; the
             # other files (its variants) are skipped so the title shows once.
@@ -191,7 +218,7 @@ class Library:
                 game = Game.from_rom(system_key, rom.path)
             ordered.append(game)
 
-        library.games = self._filter_and_sort(ordered, system_key)
+        library.games = self._filter_and_sort(ordered, system_key, self._config.show_hidden)
         library.media_dirs = media_dirs_for(self._platform, self._config, system_key)
         library.loaded = True
         return library
@@ -314,8 +341,15 @@ class Library:
     # ------------------------------------------------------------------ #
 
     @staticmethod
-    def _filter_and_sort(games: list[Game], system_key: str) -> list[Game]:
-        """Hide entries marked hidden, and sort by display name."""
-        visible = [game for game in games if not game.hidden]
+    def _filter_and_sort(
+        games: list[Game], system_key: str, show_hidden: bool = False
+    ) -> list[Game]:
+        """Hide entries marked hidden, and sort by display name.
+
+        ``show_hidden`` brings them back so the player can un-hide them again.
+        They keep their normal place in the sort order, so flipping the switch
+        does not make the list jump around.
+        """
+        visible = [game for game in games if show_hidden or not game.hidden]
         visible.sort(key=lambda game: game.sort_key.casefold())
         return visible

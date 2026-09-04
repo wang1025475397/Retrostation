@@ -39,6 +39,11 @@ class InputAction(str, enum.Enum):
     B = "b"          # back
     X = "x"          # cycle view (list / grid / carousel)
     Y = "y"          # favourite
+    #: Hide / unhide the game under the cursor.  Deliberately not a face button:
+    #: the handheld has no spare one (and only MENU synthesises a long press),
+    #: so this is bound on the desktop keymap and reached from the menu
+    #: everywhere else.
+    HIDE = "hide"
 
     L1 = "l1"
     R1 = "r1"
