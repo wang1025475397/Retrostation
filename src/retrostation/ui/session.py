@@ -16,9 +16,10 @@ Navigation rules come from DESIGN §5.2; the notable ones:
 
 from __future__ import annotations
 
+import copy
 import time
 import unicodedata
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from enum import Enum
 from functools import lru_cache
 from typing import Any, Mapping
@@ -109,6 +110,21 @@ def _search_rank(game: Game, query: str, mode: str) -> int:
 FILTERS = ("all", "covered", "missing")
 SORTS = ("name", "play", "recent")
 
+#: Settings-menu rows whose value cycles with LEFT/RIGHT (see
+#: :meth:`Session._adjust_menu`).  Since the menu became a transaction, the
+#: restart-grade rows (screen mode, card) cycle safely too: the arrows only
+#: stage, and the restart happens when A commits.  "hide_game" is an action
+#: and stays on A only.
+_CYCLING_ROWS = frozenset(
+    {"screen", "card", "layout", "bvideo", "video_sound", "sort", "filter",
+     "show_hidden", "search_by", "theme", "variant", "language", "status_bar"}
+)
+
+
+def _cycle(options: tuple, current, direction: int):
+    """One step through ``options``, forwards or backwards, wrapping."""
+    return options[(options.index(current) + direction) % len(options)]
+
 TOAST_SECONDS = 2.0
 
 #: Page sizes for the list view (rows) and the carousel.
@@ -184,6 +200,12 @@ class Session:
     #: app applies it (palette, backlight) and writes ``config.json``.  A
     #: Session has no business knowing where the SD card is mounted.
     settings_dirty: bool = False
+    #: Menu transaction: ``(deep config copy, sort, filter, layout)`` taken
+    #: when the dialog opens.  LEFT/RIGHT stage changes on the live fields (so
+    #: the row labels follow); A commits the *effects* -- palette, backlight,
+    #: language, library caches, restart flags -- in one go; B restores this
+    #: snapshot and drops everything staged.
+    _menu_stash: tuple | None = field(default=None, init=False, repr=False)
     #: Set when a change cannot take effect without new windows (screen mode).
     #: The app exits with ``EXIT_RESTART_UI`` and the bootstrap starts us again --
     #: rebuilding windows inside a running process is not an option (DESIGN §4.4).
@@ -379,6 +401,13 @@ class Session:
             step = 1 if event.action is InputAction.VOLUME_UP else -1
             return self._adjust_volume(step)
 
+        # Global escape hatch FIRST: MENU long press opens the quit dialog
+        # from anywhere, modals included.  The search dialog used to swallow
+        # it, which on the desktop left the window's close button dead -- the
+        # close box synthesises exactly this event.
+        if event.kind is InputKind.LONG_PRESS and event.action is InputAction.MENU:
+            return self._open_exit_dialog()
+
         if self.modal == MODAL_EXIT:
             return self._handle_exit_modal(event)
         if self.modal == MODAL_MENU:
@@ -387,9 +416,6 @@ class Session:
             return self._handle_rom_select_modal(event)
         if self.modal == MODAL_SEARCH:
             return self._handle_search_modal(event)
-
-        if event.kind is InputKind.LONG_PRESS and event.action is InputAction.MENU:
-            return self._open_exit_dialog()
 
         if event.is_press and event.action is InputAction.SEARCH:
             return self._open_search()
@@ -620,8 +646,8 @@ class Session:
         """The system a game belongs to -- not the view it was opened from."""
         return game.key.split("/", 1)[0]
 
-    def _cycle_layout(self) -> Outcome:
-        self.layout = LAYOUTS[(LAYOUTS.index(self.layout) + 1) % len(LAYOUTS)]
+    def _cycle_layout(self, direction: int = 1) -> Outcome:
+        self.layout = _cycle(LAYOUTS, self.layout, direction)
         self.config.layout = self.layout
         count = len(self.games())
         if count:
@@ -649,8 +675,8 @@ class Session:
         self.notify(self.translator("toast.volume", value=value))
         return Outcome(redraw=True)
 
-    def _cycle_filter(self) -> Outcome:
-        self.filter = FILTERS[(FILTERS.index(self.filter) + 1) % len(FILTERS)]
+    def _cycle_filter(self, direction: int = 1) -> Outcome:
+        self.filter = _cycle(FILTERS, self.filter, direction)
         self.game_index = 0
         names = {
             "all": "games.filter_all",
@@ -665,6 +691,8 @@ class Session:
     def _open_menu(self) -> Outcome:
         self.modal = MODAL_MENU
         self.menu_index = 0
+        # Transaction start: B restores this snapshot, A commits the whole pass.
+        self._menu_stash = (copy.deepcopy(self.config), self.sort, self.filter, self.layout)
         return Outcome(redraw=True)
 
     def _open_exit_dialog(self) -> Outcome:
@@ -685,79 +713,124 @@ class Session:
         elif event.action in (InputAction.LEFT, InputAction.RIGHT):
             return self._adjust_menu(rows[self.menu_index][0],
                                      -1 if event.action is InputAction.LEFT else 1)
-        elif event.action is InputAction.B:
-            self.modal = MODAL_NONE
-        elif event.action is InputAction.MENU:
-            self.modal = MODAL_NONE
+        elif event.action in (InputAction.B, InputAction.MENU):
+            self._cancel_menu()
         return Outcome(redraw=True)
 
     def _apply_menu(self, key: str) -> Outcome:
-        """Toggle the row under the cursor.
+        """A: commit everything the arrows staged, then close.
 
-        Anything that outlives the dialog -- or needs the platform, like the
-        backlight -- only raises :attr:`settings_dirty`; the app applies and
-        persists it.
+        The effects wait for this key on purpose -- palette, backlight,
+        language, library caches and the saved config all change together
+        here, and the restart-grade rows (screen mode, card) raise their flags
+        at the same moment, so nothing bounces mid-adjustment.
+        """
+        if key == "hide_game":
+            self.modal = MODAL_NONE
+            self._menu_stash = None
+            return self._toggle_hidden()
+
+        stashed = self._menu_stash[0] if self._menu_stash is not None else None
+        if stashed is not None:
+            if stashed.show_hidden != self.config.show_hidden:
+                self.library.drop_games()
+            if stashed.language != self.config.language:
+                self.translator.set_language(self.config.language)
+            if stashed.screen_mode != self.config.screen_mode:
+                self.restart_requested = True
+        # The card comparison is against the menu's own baseline, never the
+        # app's resolved root: config.rom_root may legitimately still be
+        # "auto" (never committed), and comparing against the resolved path
+        # would restart on every plain A press.
+        baseline_rom_root = (
+            str(stashed.rom_root) if stashed is not None else str(self.current_rom_root)
+        )
+        if str(self.config.rom_root) != baseline_rom_root:
+            self.card_changed = True
+            self.restart_requested = True
+        self._menu_stash = None
+        self.settings_dirty = True
+        self.modal = MODAL_NONE
+        return Outcome(redraw=True)
+
+    def _cancel_menu(self) -> None:
+        """B: restore what the dialog opened with; nothing staged survives."""
+        if self._menu_stash is not None:
+            stashed_config, sort, filter_, layout = self._menu_stash
+            for item in fields(type(stashed_config)):
+                setattr(self.config, item.name, getattr(stashed_config, item.name))
+            self.sort, self.filter, self.layout = sort, filter_, layout
+        self._menu_stash = None
+        self.modal = MODAL_NONE
+
+    def _toggle_menu_row(self, key: str, direction: int = 1) -> None:
+        """**Stage** a row's value in place -- nothing takes effect yet.
+
+        The palette, the backlight, the language, the library caches and the
+        restart flags all wait for A (:meth:`_apply_menu`); B restores the
+        snapshot.  Staging edits the live config fields so the row labels and
+        the values on screen follow the arrows.  ``direction`` only matters
+        for the cycling rows (LEFT steps backwards); the on/off rows flip.
         """
         if key == "screen":
             self.config.screen_mode = "single" if self.config.screen_mode != "single" else "dual"
-            self.restart_requested = True
         elif key == "card":
-            self._switch_card()
+            paths = [path for path, _label in self.rom_roots]
+            if len(paths) < 2:
+                return
+            try:
+                index = paths.index(self.current_rom_root)
+            except ValueError:
+                index = -1
+            self.config.rom_root = str(paths[(index + 1) % len(paths)])
         elif key == "layout":
-            self._cycle_layout()
+            self._cycle_layout(direction)
         elif key == "bvideo":
             self.config.bottom_video = not self.config.bottom_video
         elif key == "sort":
-            self.sort = SORTS[(SORTS.index(self.sort) + 1) % len(SORTS)]
+            self.sort = _cycle(SORTS, self.sort, direction)
         elif key == "filter":
-            self._cycle_filter()
+            self._cycle_filter(direction)
         elif key == "show_hidden":
             self.config.show_hidden = not self.config.show_hidden
-            # What is *visible* changed, not what is on disk: each system's
-            # cache would keep serving the list built under the old setting.
-            self.library.drop_games()
         elif key == "search_by":
-            self.config.search_by = SEARCH_BY[
-                (SEARCH_BY.index(self.config.search_by) + 1) % len(SEARCH_BY)
-            ]
+            self.config.search_by = _cycle(SEARCH_BY, self.config.search_by, direction)
             # The result cache is keyed by the query text only; a mode switch
             # must not leave it serving results from the old field set.
             self._search_cache = None
-        elif key == "hide_game":
-            # Action, not a setting: close the dialog and let the toast report.
-            self.modal = MODAL_NONE
-            return self._toggle_hidden()
         elif key == "theme":
-            self.config.theme = THEMES[(THEMES.index(self.config.theme) + 1) % len(THEMES)]
+            self.config.theme = _cycle(THEMES, self.config.theme, direction)
         elif key == "variant":
-            self.config.theme_variant = VARIANTS[
-                (VARIANTS.index(self.config.theme_variant) + 1) % len(VARIANTS)
-            ]
+            self.config.theme_variant = _cycle(VARIANTS, self.config.theme_variant, direction)
         elif key == "language":
-            self._cycle_language()
+            codes = ("auto", *available_builtin())
+            if self.config.language in codes:
+                self.config.language = _cycle(codes, self.config.language, direction)
+            else:
+                self.config.language = "auto"
         elif key == "video_sound":
             self.config.video_sound = not self.config.video_sound
         elif key == "brightness":
             self._step_brightness(BRIGHTNESS_STEP)
         elif key == "status_bar":
             self.config.show_status_bar = not self.config.show_status_bar
-        self.settings_dirty = True
-        self.modal = MODAL_NONE
-        return Outcome(redraw=True)
 
     def _adjust_menu(self, key: str, direction: int) -> Outcome:
-        """Nudge a numeric row with LEFT/RIGHT.
+        """**Stage** a row's value with LEFT/RIGHT; the dialog stays open and
+        nothing takes effect until A commits (:meth:`_apply_menu`).
 
-        The backlight and the preview volume are the numeric rows; every other
-        row ignores this rather than leave the player wondering why nothing
-        moved.
+        The numeric rows step by their own increment; the cycling rows share
+        the staged switch.  Rows that are actions or app-level restarts
+        (screen, card, hide_game) deliberately do not respond to the arrows.
         """
         if key == "brightness":
             self._step_brightness(direction * BRIGHTNESS_STEP)
-            self.settings_dirty = True
         elif key == "video_volume":
-            # Same path as the rocker, so both stay in step.
-            self._adjust_volume(direction)
+            value = max(0, min(100, int(self.config.video_volume) + direction * self._VOLUME_STEP))
+            self.config.video_volume = value
+            self.notify(self.translator("toast.volume", value=value))
+        elif key in _CYCLING_ROWS:
+            self._toggle_menu_row(key, direction)
         return Outcome(redraw=True)
 
     def _step_brightness(self, delta: int) -> None:
@@ -767,42 +840,28 @@ class Session:
         self.config.brightness["top"] = level
         self.config.brightness["bottom"] = level
 
-    def _cycle_language(self) -> None:
+    def _cycle_language(self, direction: int = 1) -> None:
         """``auto`` first, then what we ship, so the default stays reachable."""
         codes = ["auto", *available_builtin()]
         current = self.config.language
-        following = codes[(codes.index(current) + 1) % len(codes)] if current in codes else "auto"
+        following = (
+            codes[(codes.index(current) + direction) % len(codes)]
+            if current in codes else "auto"
+        )
         self.config.language = following
         self.translator.set_language(following)
 
     def _card_label(self) -> str:
-        """Label of the card in use (TF1 / TF2)."""
+        """Label of the card in use (TF1 / TF2) -- follows the staged choice."""
+        for path, label in self.rom_roots:
+            if str(path) == self.config.rom_root:
+                return label
+        # "auto" (or anything unresolved before the first commit): the card
+        # the app actually mounted.
         for path, label in self.rom_roots:
             if path == self.current_rom_root:
                 return label
         return "-"
-
-    def _switch_card(self) -> None:
-        """Browse the other card.
-
-        The library is built around one ROM root, so this cannot be applied in
-        place: the choice goes into the config and the app restarts us against
-        it -- exit code 43, the same route the screen mode takes, for the same
-        reason (DESIGN §4.4: rebuilding these inside a live process is what
-        crashes under Wayland).
-        """
-        paths = [path for path, _label in self.rom_roots]
-        if len(paths) < 2:
-            return
-        try:
-            index = paths.index(self.current_rom_root)
-        except ValueError:
-            index = -1
-        self.config.rom_root = str(paths[(index + 1) % len(paths)])
-        # The resume snapshot names a game on the card we are leaving; keeping
-        # it would restore us onto a ROM that is not mounted.
-        self.card_changed = True
-        self.restart_requested = True
 
     def menu_rows(self) -> list[tuple[str, str, str]]:
         """``(key, label, value)`` triples for the settings dialog."""
@@ -993,6 +1052,9 @@ class Session:
             self._close_search()
             return Outcome(redraw=True)
         action = event.action
+        if action is InputAction.MENU:
+            self._close_search()
+            return Outcome(redraw=True)
         last = len(SEARCH_CODES) - 1
         if action is InputAction.LEFT:
             self.search_kb = max(0, self.search_kb - 1)
@@ -1029,10 +1091,13 @@ class Session:
             # Desktop Esc from the result list: one press, dialog gone.
             self._close_search()
             return Outcome(redraw=True)
+        action = event.action
+        if action is InputAction.MENU:
+            self._close_search()
+            return Outcome(redraw=True)
         # No typing here on purpose: the focus is not on the keyboard, so
         # every key acts instead -- B (and the letter that carries it) goes
         # back to the query, arrows move, A launches.
-        action = event.action
         if action in (InputAction.UP, InputAction.DOWN):
             if results:
                 step = -1 if action is InputAction.UP else 1

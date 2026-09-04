@@ -9,11 +9,13 @@ from retrostation.core.i18n import Translator
 from retrostation.core.model import Game
 from retrostation.platform.base import InputAction, InputEvent, InputKind
 from retrostation.ui.session import (
+    MODAL_EXIT,
     MODAL_NONE,
     MODAL_ROM_SELECT,
     MODAL_SEARCH,
     SEARCH_CODES,
     Session,
+    VIEW_GAMES,
 )
 
 
@@ -199,6 +201,41 @@ def test_search_by_defaults_to_title_and_validates() -> None:
         Config.from_dict({**Config().to_dict(), "search_by": "whatever"}).validate()
 
 
+def test_menu_arrows_nudge_without_closing() -> None:
+    session = make_session()
+    session._close_search()
+    session._open_menu()
+    keys = [key for key, _l, _v in session.menu_rows()]
+    session.menu_index = keys.index("search_by")
+    before = session.config.search_by
+
+    session.handle(press(InputAction.RIGHT))
+    assert session.config.search_by != before
+    assert session.modal == "menu"              # still open for the next row
+    session.handle(press(InputAction.LEFT))
+    assert session.config.search_by == before
+    assert session.modal == "menu"
+
+    # A confirms: same value, dialog closed.
+    session.handle(press(InputAction.A))
+    assert session.config.search_by == before
+    assert session.modal == ""
+
+
+def test_hide_game_row_still_applies_and_closes() -> None:
+    root = Path("/roms")
+    game = Game(key="mame/a.zip", path=root / "mame" / "a.zip", name="A")
+    session = make_session({"mame": [game]})
+    session._close_search()
+    session.view = VIEW_GAMES        # the hide row is offered from the game list
+    session._open_menu()
+    keys = [key for key, _l, _v in session.menu_rows()]
+    session.menu_index = keys.index("hide_game")
+    session.handle(press(InputAction.A))
+    assert game.hidden is True
+    assert session.modal == ""
+
+
 def test_backspace_deletes_esc_closes_letter_b_types() -> None:
     # Desktop backspace (a B event carrying "\b") deletes, and closes only
     # once there is nothing left to delete.
@@ -235,6 +272,16 @@ def test_combo_again_closes() -> None:
     type_text(session, "A")
     session.handle(press(InputAction.SEARCH))
     assert session.modal == MODAL_NONE
+
+
+def test_menu_long_press_quits_from_the_search() -> None:
+    """The desktop close box synthesises MENU long press + A; the search
+    dialog must never swallow it, or the window cannot be closed at all."""
+    session = make_session()
+    session.handle(InputEvent(InputAction.MENU, InputKind.LONG_PRESS))
+    assert session.modal == MODAL_EXIT
+    outcome = session.handle(press(InputAction.A))
+    assert outcome.quit is True
 
 
 def test_results_focus_and_multi_file_launch() -> None:

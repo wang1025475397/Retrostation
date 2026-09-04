@@ -260,7 +260,7 @@ class TestSettingsRows:
     def test_the_sound_row_toggles(self, rom_root: Path) -> None:
         session = session_for(rom_root)
         before = session.config.video_sound
-        session._apply_menu("video_sound")
+        session._adjust_menu("video_sound", 1)
         assert session.config.video_sound is not before
 
     def test_left_and_right_move_the_volume(self, rom_root: Path) -> None:
