@@ -67,7 +67,13 @@ class VideoSettings:
     #: Seconds the selection must stay put before we spawn a decoder.
     debounce: float = 0.25
     #: Seconds without a single frame before a file is treated as broken.
-    stale: float = 3.0
+    #:
+    #: Measured on the device: the first frame lands in ~1.1 s when the machine
+    #: is idle and in ~3 s while the card is busy with a scan, so 3 s wrote off
+    #: perfectly good clips.  A false positive costs a lot -- the file is
+    #: blacklisted for the rest of the session -- so the window errs on the
+    #: patient side; being slow to give up only costs a cover for a moment.
+    stale: float = 5.0
     #: Whether the clip's soundtrack is played.  ``False`` keeps the preview
     #: silent, which is all it ever was before sound existed.
     sound: bool = True
@@ -129,6 +135,9 @@ class VideoPlayer:
         #: reapers because the next clip's sound has to wait for exactly this
         #: one -- see :meth:`_start_locked`.
         self._audio_reaper: threading.Thread | None = None
+        #: The thread still *opening* the current soundtrack, if any.  It holds
+        #: the card just as the teardown does, so the next clip waits for it.
+        self._audio_opening: threading.Thread | None = None
 
         self._frame = None
         self._frame_seq = 0
@@ -333,20 +342,53 @@ class VideoPlayer:
         self._audio_reaper = reaper
         reaper.start()
 
-    def _open_audio(self, path: Path) -> None:
-        """Start the soundtrack for ``path``; silence is an acceptable outcome."""
+    def _open_audio(self, path: Path, generation: int,
+                    predecessors: list[threading.Thread | None]) -> None:
+        """Start the soundtrack for ``path``; silence is an acceptable outcome.
+
+        Runs on its own thread, *behind* the pictures.  It waits for the
+        outgoing clip to let go of the card and then opens ALSA, and on a
+        device whose card is held by something else (the stock frontend, a
+        volume daemon) those retries measure most of a second -- spent in front
+        of the pump, that is enough to push the first frame past the staleness
+        window on a busy machine, so the clip was written off as broken while
+        it was still waiting for a soundtrack it was never going to get.
+
+        ``predecessors`` are both things that may still hold the card: the
+        teardown of the last clip and, because opening is itself asynchronous
+        now, the thread still opening it.  Waiting for that one too is what
+        keeps the handover strict -- without it a switch landing mid-open left
+        the outgoing soundtrack running and the new one silent.
+        """
         if not self._settings.sound:
             return
-        # Take the card over from the clip being replaced: it cannot be opened
-        # twice, and the one that loses the race stays silent on screen.
-        handover = self._audio_reaper
-        if handover is not None:
-            handover.join(timeout=_AUDIO_HANDOVER)
-            self._audio_reaper = None
+        for thread in predecessors:
+            if thread is not None:
+                thread.join(timeout=_AUDIO_HANDOVER)
         try:
-            self._audio = self._platform.open_audio_pipe(path, volume=self._settings.volume)
+            audio = self._platform.open_audio_pipe(path, volume=self._settings.volume)
         except Exception:  # noqa: BLE001 - silence is an acceptable outcome
             log.debug("no audio for %s", path, exc_info=True)
+            return
+        with self._lock:
+            if (self._generation == generation and not self._closed
+                    and self._current is not None):
+                self._audio = audio
+                return
+        # Switched away -- or shut down -- while the card was being opened.
+        # This is the only place that can still close it: ``_stop_locked``
+        # never saw it, because it was not in ``self._audio`` yet.  Joinable,
+        # so a launch waits for it: a soundtrack that outlives its clip keeps
+        # playing behind the emulator, which is what DESIGN §8.1 forbids.
+        reaper = threading.Thread(
+            target=self._close_pipes, args=(None, audio),
+            name="retrostation-audio-reap", daemon=True,
+        )
+        # Started *before* it joins the list: _join_reapers() runs without the
+        # lock, and joining a thread that is not started yet raises.
+        reaper.start()
+        with self._lock:
+            self._reapers.append(reaper)
 
     def _start_locked(self, target: tuple[str, Path], now: float) -> None:
         key, path = target
@@ -379,9 +421,10 @@ class VideoPlayer:
         stop = threading.Event()
         self._stop_event = stop
 
-        # Sound comes up last: it waits for the outgoing clip to let go of the
-        # card, and failing to get it must never stop the pictures.
-        self._open_audio(path)
+        # Pictures first.  Sound goes on its own thread behind them, taking
+        # both things that may still hold the card with it: see _open_audio.
+        predecessors = [self._audio_reaper, self._audio_opening]
+        self._audio_reaper = None
 
         self._thread = threading.Thread(
             target=self._pump,
@@ -390,6 +433,11 @@ class VideoPlayer:
             daemon=True,
         )
         self._thread.start()
+        self._audio_opening = threading.Thread(
+            target=self._open_audio, args=(path, generation, predecessors),
+            name=f"retrostation-audio-{generation}", daemon=True,
+        )
+        self._audio_opening.start()
 
     def _stop_locked(self, *, reap: bool) -> threading.Thread | None:
         """Terminate the decoder; returns the thread the *caller* must join.
@@ -460,6 +508,28 @@ class VideoPlayer:
         for thread in reapers:
             thread.join(timeout=1.0)
 
+    def _probe_duration(self, pipe: VideoPipe, generation: int) -> None:
+        """Ask the pipe how long the clip is, once a picture is already up.
+
+        ``ffprobe`` on one of these devices measures **4.8 s** for a 36 s clip
+        -- longer than :attr:`VideoSettings.stale`, the window a decoder gets to
+        produce its first frame.  Probing first meant the pipe was written off
+        as broken before it had produced a single frame, so no video ever
+        played and the UI just showed the cover.
+
+        It only feeds the progress bar, so it has no business standing in front
+        of the picture: run it after frame one, and on its own thread so a clip
+        that ends early is not held open by it.
+        """
+        try:
+            duration = float(getattr(pipe, "duration", 0.0) or 0.0)
+        except Exception:  # noqa: BLE001 - duration is a nicety, never fatal
+            log.debug("duration probe failed", exc_info=True)
+            return
+        with self._lock:
+            if self._generation == generation:
+                self._duration = duration
+
     def _check_staleness(self, now: float) -> None:
         """A pipe that produced nothing is broken: blacklist it (DESIGN §14)."""
         if self._frames_decoded or self._current is None:
@@ -467,20 +537,35 @@ class VideoPlayer:
         if now - self._started_at < self._settings.stale:
             return
         log.info("video produced no frames within %.1fs: %s", self._settings.stale, self._current[1])
+        self._explain_silence()
         self._failed.add(self._current[0])
         self._stop_locked(reap=False)
 
-    def _pump(self, pipe: VideoPipe, generation: int, stop: threading.Event) -> None:
-        """Read frames at a steady pace and publish only the newest one."""
-        interval = 1.0 / max(1, self._settings.fps)
-        try:
-            duration = float(getattr(pipe, "duration", 0.0) or 0.0)
-            with self._lock:
-                if self._generation == generation:
-                    self._duration = duration
-        except Exception:  # noqa: BLE001 - duration is a nicety, never fatal
-            log.debug("duration probe failed", exc_info=True)
+    def _explain_silence(self) -> None:
+        """Say what the decoder is actually doing.
 
+        "No frames" covers a lot of ground -- the file may be unreadable, the
+        decoder may have died on startup, or it may just be too slow -- and
+        ffmpeg's own complaints go to ``DEVNULL``.  Without this the only
+        symptom is a cover where a video should be.
+        """
+        pipe = self._pipe
+        proc = getattr(pipe, "_proc", None) if pipe is not None else None
+        if proc is None:
+            log.info("  decoder: no ffmpeg process (pipe open: %s)", pipe is not None)
+            return
+        code = proc.poll()
+        state = f"exited with {code}" if code is not None else "still running"
+        log.info("  decoder: ffmpeg %s, %d frame(s) read", state, self._frames_decoded)
+
+    def _pump(self, pipe: VideoPipe, generation: int, stop: threading.Event) -> None:
+        """Read frames at a steady pace and publish only the newest one.
+
+        The clip's length is probed **after** the first frame, on its own
+        thread -- never in front of it: see :meth:`_probe_duration`.
+        """
+        interval = 1.0 / max(1, self._settings.fps)
+        pending_duration = True
         next_at = self._clock()
         try:
             while not stop.is_set():
@@ -494,6 +579,18 @@ class VideoPlayer:
                     self._frame_seq += 1
                     self._frames_decoded += 1
                     self._last_frame_at = self._clock()
+                if pending_duration:
+                    pending_duration = False
+                    log.info(
+                        "video first frame after %.0f ms (%dx%d@%d): %s",
+                        (self._clock() - self._started_at) * 1000,
+                        self._settings.width, self._settings.height,
+                        self._settings.fps, getattr(pipe, "_path", "?"),
+                    )
+                    threading.Thread(
+                        target=self._probe_duration, args=(pipe, generation),
+                        name="retrostation-duration", daemon=True,
+                    ).start()
                 next_at += interval
                 delay = next_at - self._clock()
                 if delay <= 0:

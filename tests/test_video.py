@@ -10,6 +10,7 @@ The one thing these tests cannot cover is real decoding -- that is what
 
 from __future__ import annotations
 
+import subprocess
 import threading
 import time
 from pathlib import Path
@@ -21,6 +22,7 @@ from retrostation.core.config import Config
 from retrostation.core.model import ASSET_VIDEO, Game
 from retrostation.data.video import VideoPlayer, VideoSettings
 from retrostation.platform.base import VideoPipe
+from retrostation.platform.linux import ffmpeg as ffmpeg_codec
 from retrostation.platform.linux.video import build_command
 from tests.conftest import FakePlatform
 
@@ -322,7 +324,7 @@ class TestFailures:
         assert len(platform.pipes) == 1
         assert player.frame() is None
 
-        clock.advance(5.0)  # past the 3s stale window
+        clock.advance(6.0)  # past the 5s stale window
         player.update()
         assert platform.pipes[0].closed is True
 
@@ -369,6 +371,64 @@ class TestTiming:
         assert wait_until(lambda: player.frame() is not None)
         assert player.progress() is None
         player.stop()
+
+    def test_a_slow_duration_probe_never_delays_the_first_frame(
+        self, rom_root: Path,
+    ) -> None:
+        """ffprobe measures 4.8 s on one device -- longer than the stale window.
+
+        Probing before the first frame meant the pipe was written off as broken
+        while it was still waiting on ffprobe: every clip degraded to its cover
+        and the log said "produced no frames".  The picture must come first.
+        """
+        platform = SlowProbePlatform(rom_root, frames=50, duration=10.0, delay=2.0)
+        clock = Clock()
+        player = make_player(platform, clock)
+
+        player.select(game())
+        clock.advance(0.5)
+        player.update()
+
+        started = time.monotonic()
+        assert wait_until(lambda: player.frame() is not None, timeout=1.5), (
+            "the first frame waited on the duration probe"
+        )
+        assert time.monotonic() - started < 1.5
+        # The probe still runs -- just behind the picture, not in front of it.
+        assert wait_until(lambda: player.progress() is not None, timeout=5.0)
+        player.stop()
+
+
+class SlowProbePlatform(VideoPlatform):
+    """Hands out pipes whose ``duration`` takes seconds -- ffprobe on the device."""
+
+    def __init__(self, root: Path, *, delay: float, **kwargs) -> None:
+        super().__init__(root, **kwargs)
+        self.delay = delay
+
+    def open_video_pipe(self, path: Path, *, width: int, height: int,
+                        fps: int) -> VideoPipe:
+        self.calls.append((path, width, height, fps))
+        pipe = SlowProbePipe(
+            frames=self.frames, size=(width, height),
+            duration=self.duration, delay=self.delay,
+        )
+        self.pipes.append(pipe)
+        return pipe
+
+
+class SlowProbePipe(FakePipe):
+    """A pipe that decodes instantly but takes ``delay`` seconds to measure."""
+
+    def __init__(self, *args, delay: float = 2.0, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.delay = delay
+
+    @property
+    def duration(self) -> float:
+        time.sleep(self.delay)
+        self.duration_read.set()
+        return self._duration
 
     def test_frame_seq_only_moves_on_new_frames(self, rom_root: Path) -> None:
         platform = VideoPlatform(rom_root, frames=2)
@@ -654,3 +714,61 @@ class TestFFmpegCommand:
         video_filter = command[command.index("-vf") + 1]
         assert "force_original_aspect_ratio=decrease" in video_filter
         assert "pad=100:100" in video_filter
+
+
+class TestFfmpegAvailability:
+    """``which(ffmpeg)`` is not the same question as "can we decode".
+
+    One device ships a build whose ``libfontconfig.so.1`` resolves too old for
+    its own libpangoft2, so the binary dies on startup: found, spawned, dead.
+    Every clip then paid for a subprocess that decoded nothing, and all the
+    player saw was a cover where a video should have been.
+    """
+
+    @staticmethod
+    def _pretend_installed(monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(ffmpeg_codec.shutil, "which", lambda name: "/usr/bin/ffmpeg")
+
+    def test_a_build_that_cannot_start_is_not_available(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        self._pretend_installed(monkeypatch)
+        monkeypatch.setattr(
+            ffmpeg_codec.subprocess, "run",
+            lambda argv, **kwargs: subprocess.CompletedProcess(
+                argv, 1, b"", b"ffmpeg: symbol lookup error: undefined symbol",
+            ),
+        )
+        ffmpeg_codec.runs.cache_clear()
+        try:
+            assert ffmpeg_codec.available() is False
+        finally:
+            ffmpeg_codec.runs.cache_clear()
+
+    def test_a_working_build_is_only_probed_once(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The probe is a process spawn; it must not run per clip."""
+        self._pretend_installed(monkeypatch)
+        calls: list[list[str]] = []
+
+        def ok(argv, **kwargs):  # noqa: ANN001
+            calls.append(list(argv))
+            return subprocess.CompletedProcess(argv, 0, b"ffmpeg version 4.4.2", b"")
+
+        monkeypatch.setattr(ffmpeg_codec.subprocess, "run", ok)
+        ffmpeg_codec.runs.cache_clear()
+        try:
+            assert ffmpeg_codec.available() is True
+            assert ffmpeg_codec.available() is True
+        finally:
+            ffmpeg_codec.runs.cache_clear()
+        assert len(calls) == 1
+
+    def test_no_ffmpeg_at_all(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(ffmpeg_codec.shutil, "which", lambda name: None)
+        ffmpeg_codec.runs.cache_clear()
+        try:
+            assert ffmpeg_codec.available() is False
+        finally:
+            ffmpeg_codec.runs.cache_clear()

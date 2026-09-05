@@ -7,6 +7,7 @@ the player launched.
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 import pytest
@@ -62,6 +63,9 @@ class SoundPlatform(FakePlatform):
         self.sound = sound
         self.audio_calls: list[tuple[Path, float]] = []
         self.audio_pipes: list[FakeAudioPipe] = []
+        #: Was the card still taken when this one asked for it?  It cannot be
+        #: opened twice, so every entry here must be ``False``.
+        self.opened_while_busy: list[bool] = []
 
     def open_video_pipe(self, path, *, width, height, fps):
         return FakeVideoPipe((width, height))
@@ -70,9 +74,28 @@ class SoundPlatform(FakePlatform):
         if not self.sound:
             return None
         self.audio_calls.append((Path(path), volume))
+        self.opened_while_busy.append(any(not pipe.closed for pipe in self.audio_pipes))
         pipe = FakeAudioPipe()
         self.audio_pipes.append(pipe)
         return pipe
+
+    def wait_for_sound(self, player=None, count: int = 1,
+                       timeout: float = 3.0) -> bool:
+        """Wait until the player actually *holds* the soundtrack.
+
+        Counting the open call is not enough: the pipe is handed over after it
+        returns, and a volume change or a switch landing in that gap finds the
+        player empty-handed -- which is exactly the race this hides.
+        """
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if len(self.audio_calls) < count:
+                time.sleep(0.005)
+                continue
+            if player is None or player._audio is not None:  # noqa: SLF001
+                return True
+            time.sleep(0.005)
+        return False
 
 
 def clip(key: str = "魂斗罗") -> Game:
@@ -97,6 +120,7 @@ class TestPreviewSound:
         platform = SoundPlatform(tmp_path)
         player = player_for(platform, volume=0.5)
         player.select(clip())
+        assert platform.wait_for_sound(player,), "the soundtrack never opened"
 
         assert len(platform.audio_calls) == 1
         path, volume = platform.audio_calls[0]
@@ -116,6 +140,7 @@ class TestPreviewSound:
         platform = SoundPlatform(tmp_path)
         player = player_for(platform)
         player.select(clip())
+        assert platform.wait_for_sound(player,)
         assert platform.audio_pipes[0].closed is False
 
         player.stop()
@@ -125,9 +150,11 @@ class TestPreviewSound:
         platform = SoundPlatform(tmp_path)
         player = player_for(platform)
         player.select(clip("魂斗罗"))
+        assert platform.wait_for_sound(player,)
         first = platform.audio_pipes[0]
 
         player.select(clip("超级马力欧兄弟"))
+        assert platform.wait_for_sound(player,2), "the second clip never got the card"
         player.stop()  # joins the background teardown
         assert first.closed is True
         assert len(platform.audio_pipes) == 2
@@ -180,6 +207,7 @@ class TestRetuning:
         platform = SoundPlatform(tmp_path)
         player = player_for(platform, volume=0.7)
         player.select(clip())
+        assert platform.wait_for_sound(player,)
         assert len(platform.audio_pipes) == 1
 
         player.configure(volume=0.3)
@@ -192,6 +220,7 @@ class TestRetuning:
         player = player_for(platform, volume=0.7)
         player.configure(volume=0.2)  # nothing playing yet
         player.select(clip())
+        assert platform.wait_for_sound(player,)
 
         assert platform.audio_calls[0][1] == pytest.approx(0.2)
 
@@ -200,18 +229,24 @@ class TestSoundHandover:
     """The card cannot be opened twice -- the next clip must wait for the last.
 
     Before this was serialised, whichever clip lost the race simply had no
-    sound, and which one that was changed from switch to switch.
+    sound, and which one that was changed from switch to switch.  The handover
+    now runs behind the pictures, so what is asserted is the invariant -- the
+    card is never asked for while it is still taken -- not when it happens.
     """
 
     def test_the_outgoing_sound_is_gone_before_the_next_opens(self, tmp_path: Path) -> None:
         platform = SoundPlatform(tmp_path)
         player = player_for(platform)
         player.select(clip("魂斗罗"))
+        assert platform.wait_for_sound(player,)
         first = platform.audio_pipes[0]
 
         player.select(clip("超级马力欧兄弟"))
+        assert platform.wait_for_sound(player,2), "the next clip never got the card"
+
         assert first.closed is True
         assert len(platform.audio_pipes) == 2
+        assert platform.opened_while_busy == [False, False]
 
 
 class TestVolumeRocker:

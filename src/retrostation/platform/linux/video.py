@@ -14,12 +14,15 @@ core for no reason.
 from __future__ import annotations
 
 import logging
+import os
 import shutil
 import subprocess
+import tempfile
 from contextlib import suppress
 from pathlib import Path
 
 from ..base import VideoPipe
+from . import ffmpeg as ffmpeg_codec
 
 log = logging.getLogger(__name__)
 
@@ -36,10 +39,16 @@ _KILL_GRACE = 0.2
 
 
 def available(executable: str = FFMPEG) -> bool:
-    """Whether the binary exists.  Cached: this is asked once per video."""
+    """Whether the binary exists *and can run*.
+
+    Delegated to :func:`ffmpeg.runs` because ``which()`` answers the wrong
+    question: a build that dies on startup (see there) is found, spawned, and
+    produces nothing, which reads to the player as a broken clip rather than as
+    a broken ffmpeg.  Cached: this is asked once per video.
+    """
     cached = _availability.get(executable)
     if cached is None:
-        cached = shutil.which(executable) is not None
+        cached = ffmpeg_codec.runs(executable)
         _availability[executable] = cached
     return cached
 
@@ -69,15 +78,26 @@ class FFmpegPipe(VideoPipe):
         self.size = (int(width), int(height))
         self._frame_bytes = int(width) * int(height) * 3
         self._probe = probe
+        self._executable = executable
         self._duration = -1.0
+        self._frames_read = 0
+        self._complaints = None
 
         command = build_command(path, width=width, height=height, fps=fps, executable=executable)
+        self._command = command
         log.debug("video pipe: %s", " ".join(command))
+        # What ffmpeg says about itself goes to a scratch file.  A pipe would
+        # fill up and wedge the decoder the moment it got talkative, while
+        # DEVNULL left a clip that never started with nothing to show for it
+        # but "no frames" -- which cost hours on a device where the decoder
+        # exited 1 for a reason it was never allowed to give.
+        self._complaints = tempfile.TemporaryFile()
         self._proc = subprocess.Popen(
             command,
             stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
+            stderr=self._complaints,
             bufsize=self._frame_bytes * 2,
+            env=ffmpeg_codec.decoder_env(),
         )
 
     # -- VideoPipe -------------------------------------------------------- #
@@ -122,8 +142,72 @@ class FFmpegPipe(VideoPipe):
             # close() raced us and closed the pipe underneath the read.
             return None
         if not data or len(data) < self._frame_bytes:
+            self._explain_stop()
             return None
+        self._frames_read += 1
         return Image.frombytes("RGB", self.size, data).convert("RGBA")
+
+    def _explain_stop(self) -> None:
+        """The stream ended early; log whatever ffmpeg said about it.
+
+        Most clips stop because they reached the end (they loop, so they do
+        not).  The interesting case is a decoder that never produced anything,
+        where this is the only record of why.
+        """
+        proc = self._proc
+        code = proc.poll() if proc is not None else None
+        words = self._last_words()
+        if code:
+            log.warning(
+                "ffmpeg exited with %s after %d frame(s)%s",
+                code, self._frames_read, f": {words}" if words else " (silent)",
+            )
+            # The argv too -- it is only a debug line while things work, and
+            # the one thing that distinguishes a decoder that failed here from
+            # the same command succeeding in a shell.
+            log.warning("  argv: %s", " ".join(self._command))
+            self._report_environment()
+        elif words:
+            log.debug("ffmpeg stopped after %d frame(s): %s", self._frames_read, words)
+
+    def _report_environment(self) -> None:
+        """What the decoder resolves to *from inside this process*.
+
+        The same command works from a shell on this device, so when it fails
+        here the difference has to be something the process carries: which
+        binary PATH resolves to, which libavformat it then loads, and whether
+        the muxer we ask for is in the table that binary reports.  Costs a
+        process spawn, and only ever runs on failure.
+        """
+        log.warning("  resolved: %s -> %s", self._executable, shutil.which(self._executable))
+        log.warning("  LD_LIBRARY_PATH=%s", os.environ.get("LD_LIBRARY_PATH"))
+        try:
+            result = subprocess.run(
+                [self._executable, "-hide_banner", "-loglevel", "error", "-muxers"],
+                capture_output=True, timeout=15,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            log.warning("  muxer list unavailable: %s", exc)
+            return
+        names = [
+            parts[1] for parts in
+            (line.split() for line in result.stdout.decode("utf-8", "replace").splitlines())
+            if len(parts) > 1
+        ]
+        log.warning("  muxers: %d, rawvideo=%s, image2pipe=%s, s16le=%s",
+                    len(names), "rawvideo" in names, "image2pipe" in names, "s16le" in names)
+
+    def _last_words(self, limit: int = 4000) -> str:
+        """Everything ffmpeg wrote to stderr, flattened to one line."""
+        handle = self._complaints
+        if handle is None:
+            return ""
+        try:
+            handle.seek(0)
+            text = handle.read(limit).decode("utf-8", "replace")
+        except (OSError, ValueError):
+            return ""
+        return " ".join(text.split())
 
     def close(self) -> None:
         """Stop the decoder and reap the process.  Both waits are short.
@@ -154,6 +238,10 @@ class FFmpegPipe(VideoPipe):
             if stream is not None and not stream.closed:
                 with suppress(OSError):  # the reader may hold it
                     stream.close()
+            complaints, self._complaints = self._complaints, None
+            if complaints is not None:
+                with suppress(OSError):
+                    complaints.close()
 
 
 def build_command(

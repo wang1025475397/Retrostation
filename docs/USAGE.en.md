@@ -379,3 +379,49 @@ Two rows at the bottom of the settings menu (press START) manage it:
 Deleting is safe: the cache is always rebuildable and never touches ROMs, original artwork or metadata.
 
 > The background scan after launch also prunes **stale** entries — ones whose cover was replaced, or generations left behind by older builds. For reclaiming space in one go, the row above is the direct route.
+
+---
+
+## 14. No picture on the bottom-screen video
+
+### Symptom
+
+Selecting a game shows only its cover — or nothing — on the bottom screen, while a bit of sound still comes through (sound travels a separate decode path, so it can keep working).
+
+### Cause
+
+This is a **firmware fault, not a Retrostation one**.
+
+The firmware ships **two builds of fontconfig** and, after every reboot, points `libfontconfig.so.1` back at the **older** one. That build has no `FcWeightFromOpenTypeDouble`, which ffmpeg's `libpangoft2` needs — so ffmpeg dies on startup (`symbol lookup error`).
+
+The firmware's way around it is a library path of its own for the player, but the libavformat on that path is a **cut-down build**: just adts / asf / ipod / latm / mov / mpegts / spdif — ten muxers, **all of them audio containers, no `rawvideo`**. ffmpeg then starts fine but cannot emit a single frame, reporting:
+
+```
+Requested output format 'rawvideo' is not a suitable output format
+```
+
+Two symptoms, one root cause.
+
+### The program already handles it
+
+`retrostation.sh` checks this on **every start**: it re-points `libfontconfig.so.1` at the newer build the firmware also ships — and only when the one in place **actually lacks the symbol**.
+
+- A machine where this is already right: **nothing happens**, no system file is touched.
+- Every architecture directory is checked (aarch64, armhf, …), each using its own newer build — no cross-architecture mixing.
+- When it does repair something, the log gains a line:
+  `retrostation: re-pointed libfontconfig at libfontconfig.so.1.12.0`
+
+So a normal install needs **no manual step** — it just works.
+
+### If it still fails
+
+Look at the tail of `/mnt/mmc/Roms/APPS/Retrostation/log.txt`; the decoder's own words are recorded there:
+
+```
+ffmpeg exited with 1 after 0 frame(s): <what ffmpeg said>
+  argv: ffmpeg ...            ← the exact command run
+  resolved: ffmpeg -> /usr/bin/ffmpeg
+  muxers: 10, rawvideo=False  ← this should normally be well over 100
+```
+
+A single-digit `muxers` with `rawvideo=False` means the cut-down library is still being loaded — reboot once so the launcher can repair it again (the firmware resets the symlink on every boot).

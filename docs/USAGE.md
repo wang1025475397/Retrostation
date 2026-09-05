@@ -360,3 +360,48 @@ Retrostation 的界面支持在**中文 / 英文 / 自动**之间实时切换：
 删除是安全的：缓存随时可以重建，不影响 ROM、封面原图与任何元数据。
 
 > 启动后的后台扫描会顺带清理**失效**的条目 —— 比如换过封面、或旧版本留下的那几代缓存文件。想一次性腾空间，用上面那一行最直接。
+
+---
+
+## 十四、副屏视频不出画面
+
+### 现象
+
+选中游戏后副屏只显示封面，或者一片黑，但能听到一点声音（声音走的是另一条解码链路，所以它可能照常工作）。
+
+### 原因
+
+这是**固件的问题，不是 Retrostation 的**：
+
+固件里装了**两个版本的 fontconfig**，并且每次重启都会把 `libfontconfig.so.1` 指回**旧版**。旧版缺 `FcWeightFromOpenTypeDouble` 这个符号，而 ffmpeg 的 `libpangoft2` 需要它 —— 于是 ffmpeg 一启动就崩（`symbol lookup error`）。
+
+固件的绕法是给播放器一套自己的库路径，但那条路径上的 libavformat 是**精简版**：只有 adts / asf / ipod / latm / mov / mpegts / spdif 十个 muxer，**全是音频容器，没有 `rawvideo`**。于是 ffmpeg 能起来，却解不出任何一帧画面，报：
+
+```
+Requested output format 'rawvideo' is not a suitable output format
+```
+
+两个症状，同一个根因。
+
+### 程序已经自动处理
+
+`retrostation.sh` 每次启动都会检查一遍：只有当当前 `libfontconfig.so.1` **确实缺那个符号**时，才把它重新指向固件自带的新版本。
+
+- 机器上本来就是对的 → **什么都不会发生**，不碰系统任何文件；
+- 各种架构目录（aarch64 / armhf 等）都会检查，各自用自己的新版本，不会交叉混用；
+- 修好后日志里会有一行 `retrostation: re-pointed libfontconfig at libfontconfig.so.1.12.0`。
+
+所以正常安装的用户**不需要任何手工操作**，装上就能用。
+
+### 万一还是不行
+
+看 `/mnt/mmc/Roms/APPS/Retrostation/log.txt` 末尾，程序会把解码器的原话记下来：
+
+```
+ffmpeg exited with 1 after 0 frame(s): <ffmpeg 的报错>
+  argv: ffmpeg ...            ← 实际执行的命令
+  resolved: ffmpeg -> /usr/bin/ffmpeg
+  muxers: 10, rawvideo=False  ← 这个数字正常应该是 100 以上
+```
+
+`muxers` 只有个位数、且 `rawvideo=False`，就说明还是加载到了精简库 —— 重启一次让启动器再修一遍即可（固件每次重启都会把链接改回去）。

@@ -21,6 +21,35 @@ export PYSDL2_DLL_PATH="${PYSDL2_DLL_PATH:-/usr/lib}"
 export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/var/run}"
 export WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}"
 
+# This firmware ships two fontconfig builds and -- again after every reboot --
+# points libfontconfig.so.1 at the older one, which has no
+# FcWeightFromOpenTypeDouble.  ffmpeg's libpangoft2 needs that symbol, so the
+# decoder cannot start at all with the system libavformat ("symbol lookup
+# error"); the stock launcher's way around it is a library path of its own, and
+# that lands on a cut-down libavformat -- ten muxers, all of them audio
+# containers, no rawvideo -- so every clip then dies with "not a suitable
+# output format".  Two symptoms, one fault, and it is the firmware's to own.
+#
+# So: re-point at a build that carries the symbol, and only when the one in
+# place does not -- on a machine where this is already right, nothing here
+# runs.  Every architecture's directory is checked; the glob is what keeps
+# this from being an aarch64-only fix.
+for fontconfig_link in /usr/lib/*/libfontconfig.so.1 \
+                       /usr/lib64/libfontconfig.so.1 \
+                       /usr/lib32/libfontconfig.so.1 \
+                       /usr/lib/libfontconfig.so.1; do
+    [ -e "$fontconfig_link" ] || continue
+    if grep -aq FcWeightFromOpenTypeDouble "$fontconfig_link" 2>/dev/null; then
+        continue
+    fi
+    newest=$(ls -1 "$(dirname "$fontconfig_link")"/libfontconfig.so.1.* 2>/dev/null \
+             | sort -t. -k4 -n | tail -1)
+    if [ -n "$newest" ] && grep -aq FcWeightFromOpenTypeDouble "$newest" 2>/dev/null; then
+        ln -sf "$newest" "$fontconfig_link"
+        echo "retrostation: re-pointed libfontconfig at $(basename "$newest")" >&2
+    fi
+done
+
 # Exit-code contract (src/retrostation/main.py):
 #   0  -> the player quit the frontend; stop and hand the screen back.
 #  42  -> a game is queued in $LAUNCH_CMD; run it, then start fresh again.
