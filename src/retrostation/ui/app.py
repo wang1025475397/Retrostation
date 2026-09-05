@@ -12,6 +12,7 @@ one-to-one.
 from __future__ import annotations
 
 import logging
+import math
 import subprocess
 import time
 from pathlib import Path
@@ -80,6 +81,22 @@ _TOP_GRACE = 0.25
 #: own clock, so the loop has to come back and look for it.  8 ms costs about
 #: four wake-ups per frame and removes that delay.
 _POLL_SLICE = 0.008
+#: How long the hand-off splash keeps spinning before we exit and the bootstrap
+#: launches the emulator (DESIGN §8): long enough to read "正在启动", not so long
+#: it delays the game.  The spinner animates for this whole window.
+_LAUNCH_SPIN_SECONDS = 0.9
+_SPIN_FRAME = 0.05
+#: Cursor moves repaint only the selection highlight (~3 ms).  Refreshing the
+#: game's backdrop (a synchronous fanart decode) on every move is what made fast
+#: scrolling stutter, so the backdrop is deferred until the selection rests for
+#: this long -- long enough to skip it while scrolling, short enough that it
+#: appears the instant the player stops (DESIGN §9.2).
+_BACKDROP_DEBOUNCE = 0.12
+#: Same idea for the bottom detail strip's *static* content (cover + metadata).
+#: The video frame stays real-time, but decoding a cover on every cursor move is
+#: what made fast scrolling stutter, so the static part catches up only after the
+#: selection rests (DESIGN §9.2).
+_STRIP_DEBOUNCE = 0.12
 #: Width of the single-screen detail strip's artwork slot, in reference px.
 #: 16:9 in a 118 px strip, so a clip fills the slot instead of being
 #: letterboxed into a cover-shaped box.
@@ -121,6 +138,10 @@ class App:
         #: here: running it alongside the first paint doubled its cost.
         self.on_ready: Callable[[], None] | None = None
         self._launch_plan = None
+        self._launching = False
+        self._launch_resident_mode = False
+        self._launch_game_name = ""
+        self._launch_at = 0.0
         self._restart_ui = False
         self._top_at = 0.0
         self._bottom_at = 0.0
@@ -135,6 +156,20 @@ class App:
         #: Structural signature (everything but the selection cursor) of the
         #: cached panel.
         self._top_struct: tuple = ()
+        #: Backdrop (fanart/screenshot) of the last fully-painted game.  Cursor
+        #: moves repaint only the highlight; the backdrop refreshes after a pause
+        #: so fast scrolling stays inside the 33 ms frame budget (see :meth:`_draw`).
+        self._top_backdrop = None
+        self._backdrop_pending = False
+        self._backdrop_at = 0.0
+        #: Static (cover + metadata) part of the bottom detail strip, debounced
+        #: like the backdrop so fast scrolling does not decode a cover per move.
+        self._strip_state_pending = False
+        self._strip_state_at = 0.0
+        #: Same as ``_strip_state_*`` but for the dual-screen bottom panel, which
+        #: is only used when there are two painters (see :meth:`_bottom_due`).
+        self._bottom_state_pending = False
+        self._bottom_state_at = 0.0
         #: Selection cursor at the time the cached panel was painted.
         self._top_sel: int = -1
         #: First visible row/cell of the cached games panel.
@@ -182,12 +217,27 @@ class App:
         frames = 0
         try:
             while self._running:
+                now = time.monotonic()
+                if self._launching:
+                    # Hand-off splash: keep spinning it so the player sees motion.
+                    # Resident devices hand off by hiding the windows (no exit), so
+                    # the spin ends by running the game rather than stopping the loop.
+                    self._draw(now)
+                    if now - self._launch_at >= _LAUNCH_SPIN_SECONDS:
+                        if self._launch_resident_mode:
+                            self._launch_resident(self._launch_plan)
+                        else:
+                            self._running = False
+                        self._launching = False
+                        self._launch_resident_mode = False
+                    time.sleep(_SPIN_FRAME)
+                    continue
                 self._resume_once()
                 # Sleep only until the next frame is due, and never longer than
                 # ``_POLL_SLICE``: a video frame can land at any moment and has
                 # to be picked up promptly, but the frame itself must still land
                 # on a 33 ms boundary rather than on a multiple of the slice.
-                remaining = _TARGET_FPS - (time.monotonic() - last_frame)
+                remaining = _TARGET_FPS - (now - last_frame)
                 timeout = min(_POLL_SLICE, remaining) if remaining > 0 else 0.0
                 for event in self.platform.poll_events(timeout=timeout):
                     self._handle(event)
@@ -198,7 +248,6 @@ class App:
                 # last frame of a bounded run was never applied at all.
                 self._tick_settings()
 
-                now = time.monotonic()
                 if now - last_frame < _TARGET_FPS:
                     # Sleep the sliver that is actually left, never a flat 2 ms:
                     # overshooting the boundary every frame is what held the
@@ -298,7 +347,21 @@ class App:
         single row/cell (~3 ms) instead of the whole list (~39 ms).  See
         :meth:`_paint_full` / :meth:`_paint_incremental` / :meth:`_reuse`.
         """
+        if self._launching:
+            # Hand-off splash: the emulator takes a moment to appear, so show
+            # "正在启动" instead of letting the last frame / a black screen sit
+            # there with no sign the tap registered (DESIGN §8).
+            self._draw_launch_overlay()
+            return
         key = self._state_key()
+        # Track the backdrop separately from the structural key: a different
+        # game usually means a different fanart, and re-decoding it on every
+        # cursor move is what made fast scrolling stutter.  Refresh it after a
+        # pause (see the ``full`` test below) instead of on every move.
+        bk = self._backdrop_key()
+        if bk != self._top_backdrop:
+            self._backdrop_pending = True
+            self._backdrop_at = now
         due = key != self._top_key or self._top_dirty
         # Postpone a repaint that would land on top of a video frame: the frame
         # is published on the decoder's clock, so it waits for us.  ``overdue``
@@ -310,7 +373,9 @@ class App:
         # that back for a frame that is about to land made the list feel slow
         # whenever a clip was playing, which is most of the time.
         full = (self._top_cache is None or self._top_dirty
-                or self._struct_changed() or not self._same_page())
+                or self._struct_changed() or not self._same_page()
+                or (self._backdrop_pending
+                    and now - self._backdrop_at >= _BACKDROP_DEBOUNCE))
         blocked = (due and full and not overdue
                    and next_frame is not None and next_frame < _TOP_DRAW_COST)
 
@@ -328,15 +393,29 @@ class App:
             self._top_at = now
             self._top_key = key
             self._top_dirty = False
+            if full:
+                # A full repaint re-decodes the backdrop, so it is now current.
+                self._top_backdrop = bk
+                self._backdrop_pending = False
 
         if len(self._painters) < 2:
             # One panel.  The strip is baked into the top cache (see
             # _paint_full), so a cache restore brings it back for free --
             # repainting it every frame measured 38 ms on the device, more than
-            # a whole frame budget.  Only a new clip frame, or a state change
-            # that alters what the strip says, needs it repainted.
-            strip_due = (key != self._bottom_key
-                         or self._video.frame_seq != self._bottom_seq)
+            # a whole frame budget.  A new clip frame is real-time (the video
+            # plays), but the static part -- cover + metadata -- is debounced
+            # exactly like the backdrop: decoding a cover on every cursor move
+            # is what made fast scrolling stutter, so it catches up only after
+            # the selection rests (DESIGN §9.2).
+            state_due = key != self._bottom_key
+            if state_due:
+                if not self._strip_state_pending:
+                    self._strip_state_at = now
+                self._strip_state_pending = True
+            video_due = self._video.frame_seq != self._bottom_seq
+            state_ready = (self._strip_state_pending
+                           and now - self._strip_state_at >= _STRIP_DEBOUNCE)
+            strip_due = video_due or state_ready
             if top_painted and not strip_due:
                 self._draw_overlays(painter)
                 status_bar(painter, dual=False)
@@ -350,6 +429,9 @@ class App:
                 self._draw_overlays(painter)
                 status_bar(painter, dual=False)
                 self.platform.present(0)
+                if state_ready:
+                    # The debounced static content is now current.
+                    self._strip_state_pending = False
             self._bottom_at = now
             self._bottom_key = key
             self._bottom_seq = self._video.frame_seq
@@ -366,6 +448,36 @@ class App:
             self._bottom_key = key
             self._bottom_seq = self._video.frame_seq
 
+    def _draw_launch_overlay(self) -> None:
+        """Full-screen splash shown while we hand the device over to a game.
+
+        The emulator can take a few seconds to paint its first frame on a slow
+        box; without this the player stares at the frozen last UI frame (or a
+        black screen after the display is released) with no clue the tap worked.
+        Painted on every screen so dual-panel devices show it on both -- the
+        bottom panel would otherwise stay frozen on the old list while the top
+        spins.
+        """
+        title = self.translator.t("launch.starting", name=self._launch_game_name)
+        angle = (time.monotonic() * 7.0) % (2 * math.pi)
+        for i, painter in enumerate(self._painters):
+            w, h = painter.canvas.size
+            painter.clear((16, 16, 20))
+            size = 22
+            tw = painter.text_width(title, size=size)
+            painter.text(((w - tw) / 2, h * 0.40), title, size=size,
+                         fill=(236, 236, 236), anchor="la")
+            cx, cy, r = w / 2, h * 0.55, 24
+            # NOTE: Painter.ellipse takes (x, y, w, h), not (x0, y0, x1, y1).
+            painter.ellipse((cx - r, cy - r, 2 * r, 2 * r),
+                            outline=(122, 122, 122), width=4)
+            px = cx + (r - 2) * math.cos(angle)
+            py = cy + (r - 2) * math.sin(angle)
+            pr = 5
+            painter.ellipse((px - pr, py - pr, 2 * pr, 2 * pr),
+                            fill=(236, 236, 236))
+            self.platform.present(i)
+
     def _state_key(self) -> tuple:
         session = self.session
         return (
@@ -376,11 +488,30 @@ class App:
         )
 
     def _bottom_due(self, now: float, key: tuple) -> bool:
-        """Video drives the bottom panel; static content is throttled (§9.2)."""
-        if key != self._bottom_key or self._video.frame_seq != self._bottom_seq:
+        """Video drives the bottom panel in real time; the static part (cover +
+        metadata) is debounced so fast scrolling does not decode a cover on every
+        move -- it catches up after the selection rests (DESIGN §9.2).
+
+        A new clip frame repaints immediately (the video plays); a selection
+        change only repaints once it has been still for ``_STRIP_DEBOUNCE``.
+        """
+        video_due = self._video.frame_seq != self._bottom_seq
+        state_due = key != self._bottom_key
+        if state_due:
+            if not self._bottom_state_pending:
+                self._bottom_state_at = now
+            self._bottom_state_pending = True
+        state_ready = (self._bottom_state_pending
+                       and now - self._bottom_state_at >= _STRIP_DEBOUNCE)
+        if video_due:
+            # The bottom panel is being repainted anyway (and now shows the
+            # current game), so the debounced static content is current too.
+            self._bottom_state_pending = False
             return True
-        refresh = max(0.03, self.config.bottom_refresh_ms / 1000.0)
-        return now - self._bottom_at >= refresh
+        if state_ready:
+            self._bottom_state_pending = False
+            return True
+        return False
 
     def _draw_top(self, painter: Painter, highlight: bool = True) -> None:
         """The top panel's content, painted *without* the selection highlight.
@@ -402,14 +533,17 @@ class App:
         return self.session.game_index if self.session.view == VIEW_GAMES else -1
 
     def _struct_key(self) -> tuple:
-        """State signature with the selection cursor removed."""
+        """Structural signature: everything but the selection cursor *and* the
+        backdrop.
+
+        The cursor is dropped so moving within a page repaints only the
+        highlight (~3 ms).  The backdrop is dropped too: it changes with the
+        game, but re-decoding the fanart on every move stutters fast scrolling,
+        so :meth:`_draw` tracks it separately and refreshes it after a pause
+        (``_BACKDROP_DEBOUNCE``) instead of forcing a full repaint per move.
+        """
         key = self._state_key()
-        # Drop session.game_index (position 3) -- moving the cursor within a
-        # page is cheap and repainted on top.  But the backdrop (if any) is
-        # painted under everything, so it must go in the key: a different game
-        # means a different backdrop, and without it the cached panel would
-        # simply hide the new one.
-        return key[:3] + key[4:] + (self._backdrop_key(),)
+        return key[:3] + key[4:]
 
     def _backdrop_key(self) -> object:
         """The backdrop behind the current game, or None when there is none.
@@ -883,6 +1017,8 @@ class App:
     # ------------------------------------------------------------------ #
 
     def _launch(self, game: Game) -> None:
+        if self._launching:
+            return  # already handing off; ignore further input
         system_key = self.session.current_system_key()
         try:
             plan = build_plan(game, self.config)
@@ -902,7 +1038,15 @@ class App:
         self._save_resume()
 
         if self.platform.can_stay_resident():
-            self._launch_resident(plan)
+            # Resident path: still show the hand-off splash so the player sees
+            # motion while the emulator spins up.  run()'s launch spin paints it
+            # for _LAUNCH_SPIN_SECONDS, then calls _launch_resident() -- which
+            # hides the windows and runs the game -- instead of exiting (DESIGN §8).
+            self._launch_resident_mode = True
+            self._launching = True
+            self._launch_game_name = game.name
+            self._launch_at = time.monotonic()
+            self._launch_plan = plan
             return
 
         # Low-memory device, or a platform that cannot hide its windows: hand
@@ -911,8 +1055,17 @@ class App:
         # bootstrap runs once we exit, and an inherited ffmpeg would keep
         # decoding behind the game.
         self._video.close()
+        # Show the hand-off splash and keep spinning it: the emulator's first
+        # frame is seconds away on a slow box, and the frozen last UI frame (or
+        # black screen) would otherwise look like a hang.  We do NOT set
+        # ``_running = False`` here -- run() enters a spin loop that paints the
+        # animation for _LAUNCH_SPIN_SECONDS, then exits so the bootstrap can
+        # launch the emulator.  The launch command is already written, so the
+        # brief delay only costs the player a beat of spinner, not game time.
+        self._launching = True
+        self._launch_game_name = game.name
+        self._launch_at = time.monotonic()
         self._launch_plan = plan
-        self._running = False
         self.platform.launch_game(plan.argv)
 
     def _launch_resident(self, plan: LaunchPlan) -> None:
