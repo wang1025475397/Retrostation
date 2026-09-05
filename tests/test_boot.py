@@ -16,6 +16,7 @@ from retrostation.data.library import Library
 from retrostation.main import run_ui
 from retrostation.platform.base import InputAction, InputEvent, InputKind
 from retrostation.ui.app import EXIT_OK, EXIT_RESTART, App
+from retrostation.ui.session import MODAL_NONE
 from tests.conftest import FakePlatform
 
 
@@ -185,3 +186,132 @@ class TestLaunch:
 
         text = (rom_root / "FC" / "gamelist.xml").read_text(encoding="utf-8")
         assert "<favorite>true</favorite>" in text
+
+
+class TestAutostart:
+    def test_row_is_present_and_off_by_default(self, app: App) -> None:
+        keys = [k for k, _label, _value in app.session.menu_rows()]
+        assert "autostart" in keys
+        assert app.config.boot.enabled is False
+
+    def test_toggle_flips_the_config_flag(self, app: App) -> None:
+        before = app.config.boot.enabled
+        app.session._toggle_menu_row("autostart")
+        assert app.config.boot.enabled is not before
+        app.session._toggle_menu_row("autostart")
+        assert app.config.boot.enabled is before
+
+    def test_config_round_trips_enabled_and_target(self) -> None:
+        from retrostation.core.config import Config
+
+        assert Config().boot.enabled is False  # off by default
+        cfg = Config.from_dict({"boot": {"enabled": True, "target": "/x/autostart"}})
+        assert cfg.boot.enabled is True
+        assert cfg.boot.target == "/x/autostart"
+        # Missing boot key falls back to defaults, and a typo'd value must not
+        # crash loading -- it is left as-is and coerced truthily by the caller.
+        assert Config.from_dict({}).boot.enabled is False
+        assert Config.from_dict({"boot": {"enabled": "yes"}}).boot.enabled == "yes"
+
+
+class TestAutostartHook:
+    """The firmware-patching logic lives in a pure-stdlib module, so it can be
+    exercised without SDL or a real device."""
+
+    def test_enable_patches_and_flags(self, tmp_path: Path) -> None:
+        from retrostation.platform.linux.autostart import _apply_autostart
+
+        target = tmp_path / "autostart"
+        target.write_text("echo stock launcher\nexit 0\n", encoding="utf-8")
+        state = tmp_path / "state"
+        app_dir = tmp_path / "app"
+
+        _apply_autostart(True, target=str(target), state_dir=str(state), app_dir=app_dir)
+
+        assert (state / "autostart.enabled").is_file()
+        assert (state / "autostart_launch.sh").is_file()
+        text = target.read_text(encoding="utf-8")
+        assert "# BEGIN RETROSTATION AUTOSTART" in text
+        assert "# END RETROSTATION AUTOSTART" in text
+        # The block sits before the stock launcher's last exit 0.
+        assert text.index("# BEGIN RETROSTATION AUTOSTART") < text.index("exit 0")
+        # Enabling again is idempotent -- no second block.
+        _apply_autostart(True, target=str(target), state_dir=str(state), app_dir=app_dir)
+        assert target.read_text(encoding="utf-8").count("# BEGIN RETROSTATION AUTOSTART") == 1
+
+    def test_disable_keeps_hook_and_drops_flag(self, tmp_path: Path) -> None:
+        from retrostation.platform.linux.autostart import _apply_autostart
+
+        target = tmp_path / "autostart"
+        target.write_text("echo stock launcher\nexit 0\n", encoding="utf-8")
+        state = tmp_path / "state"
+
+        _apply_autostart(True, target=str(target), state_dir=str(state), app_dir=tmp_path / "app")
+        _apply_autostart(False, target=str(target), state_dir=str(state), app_dir=tmp_path / "app")
+
+        assert not (state / "autostart.enabled").exists()
+        # The injected block stays, but the stock launcher line is untouched.
+        text = target.read_text(encoding="utf-8")
+        assert "echo stock launcher" in text
+        assert "# BEGIN RETROSTATION AUTOSTART" in text
+
+    def test_missing_target_is_created(self, tmp_path: Path) -> None:
+        from retrostation.platform.linux.autostart import _apply_autostart
+
+        target = tmp_path / "autostart.sh"  # does not exist yet
+        state = tmp_path / "state"
+
+        _apply_autostart(True, target=str(target), state_dir=str(state), app_dir=tmp_path / "app")
+
+        assert target.is_file()
+        assert "# BEGIN RETROSTATION AUTOSTART" in target.read_text(encoding="utf-8")
+
+
+class TestExitMenu:
+    """The power/quit dialog is a selectable list: 退出 / 重启 / 关机."""
+
+    def test_options_are_quit_reboot_poweroff(self, app: App) -> None:
+        keys = [k for k, _label in app.session.exit_options()]
+        assert keys == ["quit", "reboot", "poweroff"]
+
+    def test_default_selection_is_quit(self, app: App) -> None:
+        app.session._open_exit_dialog()
+        assert app.session.exit_selected == 0
+        out = app.session._handle_exit_modal(InputEvent(InputAction.A))
+        assert out.quit is True
+        assert out.power is None
+
+    def test_reboot_returns_power_request(self, app: App) -> None:
+        app.session._open_exit_dialog()
+        app.session._handle_exit_modal(InputEvent(InputAction.DOWN))  # -> reboot
+        out = app.session._handle_exit_modal(InputEvent(InputAction.A))
+        assert out.power == "reboot"
+        assert out.quit is False
+
+    def test_poweroff_returns_power_request(self, app: App) -> None:
+        app.session._open_exit_dialog()
+        app.session._handle_exit_modal(InputEvent(InputAction.DOWN))
+        app.session._handle_exit_modal(InputEvent(InputAction.DOWN))  # -> poweroff
+        out = app.session._handle_exit_modal(InputEvent(InputAction.A))
+        assert out.power == "poweroff"
+
+    def test_b_cancels_without_action(self, app: App) -> None:
+        app.session._open_exit_dialog()
+        out = app.session._handle_exit_modal(InputEvent(InputAction.B))
+        assert out.power is None and out.quit is False
+        assert app.session.modal == MODAL_NONE
+
+    def test_power_request_reaches_the_platform(self, app: App, monkeypatch) -> None:
+        """End to end: picking reboot releases the display then reboots."""
+        seen: dict[str, bool] = {}
+        monkeypatch.setattr(app.platform, "reboot", lambda: seen.setdefault("reboot", True))
+
+        send(app.platform, InputEvent(InputAction.MENU, InputKind.LONG_PRESS))
+        frames(app, app.platform, n=1)
+        assert app.session.modal == "exit"
+        send(app.platform, InputEvent(InputAction.DOWN))   # -> reboot
+        send(app.platform, InputEvent(InputAction.A))      # confirm
+        code = app.run(max_frames=1)
+
+        assert seen.get("reboot") is True
+        assert code == EXIT_OK

@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
+import subprocess
 from pathlib import Path
 from typing import Sequence
 
@@ -20,6 +22,7 @@ from ..base import AudioPipe, Canvas, FileEntry, InputEvent, Platform, VideoPipe
 from .canvas import PilCanvas, save_bitmap
 from .display import SDLDisplay
 from .fonts import FontBook
+from .autostart import _apply_autostart
 from . import ffmpeg as ffmpeg_codec
 from .input import EvdevInput
 from . import hw as sysfs
@@ -358,3 +361,84 @@ class LinuxPlatform(Platform):
             return False        # cannot tell -- take the safe path
         return (fields.get("MemTotal", 0) >= _RESIDENT_MIN_TOTAL_KB
                 and fields.get("MemAvailable", 0) >= _RESIDENT_MIN_AVAILABLE_KB)
+
+    # -- power-on autostart ----------------------------------------------- #
+
+    def set_autostart(self, enabled: bool, *, target: str = "", state_dir: str = "") -> None:
+        """Patch the firmware's autostart hook so the device boots into us.
+
+        ``enabled`` only toggles a flag file; the firmware script is patched
+        once, idempotently, and left untouched on disable -- so switching
+        autostart off can never strand the device.  Failures are logged, never
+        raised, because a broken boot setting must not crash the UI.
+        """
+        try:
+            _apply_autostart(
+                enabled,
+                target=target,
+                state_dir=state_dir,
+                app_dir=self._config_dir,
+            )
+        except OSError as exc:
+            log.warning("boot autostart change failed: %s", exc)
+
+    # -- power ------------------------------------------------------------ #
+
+    def power_off(self) -> None:
+        """Power the device down (see :class:`Platform`)."""
+        self._system_power("poweroff")
+
+    def reboot(self) -> None:
+        """Restart the device (see :class:`Platform`)."""
+        self._system_power("reboot")
+
+    @staticmethod
+    def _system_power(command: str) -> None:
+        """Run a power command with several fallbacks.
+
+        Most handheld firmwares are BusyBox (``reboot``/``poweroff`` live in
+        ``/sbin`` and may be absent from a non-root ``PATH``), but Ubuntu-based
+        ones (e.g. Anbernic) are systemd, where those names are symlinks to
+        ``/bin/systemctl``.  We try, in order:
+
+        1. ``systemctl <cmd> -i``  -- ignore inhibitors; root may do this.
+        2. ``<cmd> -f``            -- BusyBox / direct binary, forced.
+        3. ``/sbin/<cmd> -f`` etc.  -- off-PATH sbin locations.
+        4. the kernel SysRq trigger  -- last resort when nothing else exists.
+
+        A missing command is a warning, never an error: the player simply
+        stays in the frontend.
+        """
+        if shutil.which("systemctl"):
+            try:
+                subprocess.run(["systemctl", command, "-i"], check=False)
+                return
+            except OSError:
+                pass
+        if shutil.which(command):
+            try:
+                subprocess.run([command, "-f"], check=False)
+                return
+            except OSError:
+                pass
+        for candidate in (f"/sbin/{command}", f"/usr/sbin/{command}"):
+            if Path(candidate).exists():
+                try:
+                    subprocess.run([candidate, "-f"], check=False)
+                    return
+                except OSError:
+                    continue
+        trigger = {"reboot": "b", "poweroff": "o"}.get(command)
+        if trigger is not None:
+            try:
+                with open("/proc/sys/kernel/sysrq", "w") as fh:
+                    fh.write("1\n")
+                with open("/proc/sysrq-trigger", "w") as fh:
+                    fh.write(trigger + "\n")
+                return
+            except OSError:
+                pass
+        log.warning("power command %r unavailable on this device", command)
+
+
+

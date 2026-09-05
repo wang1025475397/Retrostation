@@ -18,10 +18,13 @@ def draw(painter: Painter, session: Session) -> None:
 
 
 def draw_exit(painter: Painter, session: Session) -> None:
+    options = session.exit_options()
     dialog(
         painter,
         title=painter.translator("dialog.exit_title"),
         body=painter.translator("dialog.exit_body"),
+        rows=[(label, "") for _key, label in options],
+        selected=session.exit_selected,
     )
 
 

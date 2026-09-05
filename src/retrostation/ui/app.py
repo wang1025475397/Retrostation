@@ -143,6 +143,7 @@ class App:
         self._launch_game_name = ""
         self._launch_at = 0.0
         self._restart_ui = False
+        self._power_request: str | None = None
         self._top_at = 0.0
         self._bottom_at = 0.0
         self._bottom_seq = -1
@@ -273,9 +274,22 @@ class App:
             return EXIT_RESTART
         if self._restart_ui:
             return EXIT_RESTART_UI
+        # Honour a power request *before* any state write.  The card can be
+        # mounted read-only (vfat ``errors=remount-ro``), in which case saving
+        # would raise and -- before this reorder -- abort the call below, so the
+        # device would only quit the app instead of actually rebooting/powering
+        # off.  A power action must never depend on a writable filesystem.
+        if self._power_request == "reboot":
+            self.platform.reboot()
+        elif self._power_request == "poweroff":
+            self.platform.power_off()
         # A plain quit remembers the place too: opening the app again should
-        # feel like picking up where you left off, not like a cold boot.
-        self._save_resume()
+        # feel like picking up where you left off, not like a cold boot.  Best
+        # effort only -- a read-only card must not crash the shutdown path.
+        try:
+            self._save_resume()
+        except OSError as exc:
+            log.warning("could not persist resume state (%s); continuing", exc)
         return EXIT_OK
 
     # ------------------------------------------------------------------ #
@@ -285,6 +299,13 @@ class App:
     def _handle(self, event: InputEvent) -> None:
         outcome = self.session.handle(event)
         if outcome.quit:
+            self._running = False
+            return
+        if outcome.power is not None:
+            # Release the display in the loop's ``finally`` first, then actually
+            # power off / reboot -- so the OS command never runs while SDL still
+            # owns the windows (EGL/Wayland state would be left dirty).
+            self._power_request = outcome.power
             self._running = False
             return
         if outcome.redraw:
@@ -1152,13 +1173,29 @@ class App:
             sound=self.config.video_sound,
             volume=max(0.0, min(1.0, self.config.video_volume / 100.0)),
         )
-        self.config.save(Path(self.platform.config_dir) / "config.json")
+        # Boot autostart: only the flag file flips; the firmware hook was
+        # patched idempotently the first time it was enabled, and is left alone
+        # on disable -- so turning it off never rewrites the firmware script.
+        self.platform.set_autostart(
+            self.config.boot.enabled,
+            target=self.config.boot.target,
+            state_dir=self.config.boot.state_dir,
+        )
+        # Best effort: the card may be read-only, in which case persisting the
+        # config must not crash the settings dialog.
+        try:
+            self.config.save(Path(self.platform.config_dir) / "config.json")
+        except OSError as exc:
+            log.warning("could not persist config (%s); continuing", exc)
 
         if self.session.restart_requested:
             if self.session.card_changed:
                 # The snapshot names a game on the card we are leaving; keeping
                 # it would restore us onto a ROM that is no longer mounted.
-                update_state(self._state_path, resume=None)
+                try:
+                    update_state(self._state_path, resume=None)
+                except OSError as exc:
+                    log.warning("could not clear resume state (%s)", exc)
                 self.session.card_changed = False
             # Screen mode (or card) changed: we need new windows, and the only
             # safe way to get them is a fresh process.  Saved above, so the

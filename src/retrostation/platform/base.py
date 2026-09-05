@@ -566,3 +566,25 @@ class Platform(abc.ABC):
         device over by exiting, which costs time but no extra memory.
         """
         return False
+
+    # -- power-on ---------------------------------------------------------- #
+
+    def set_autostart(self, enabled: bool, *, target: str = "", state_dir: str = "") -> None:
+        """Register or unregister the frontend as the device's power-on app.
+
+        ``enabled`` flips a flag file; the default does nothing, so platforms
+        without a boot hook simply leave power-on behaviour to the firmware.
+        Linux overrides this to patch the firmware's autostart script in place.
+        """
+        return None
+
+    # -- power ------------------------------------------------------------ #
+
+    def power_off(self) -> None:
+        """Power the device down.  Default no-op, so headless/dev platforms
+        simply leave the machine running when the player picks "关机"."""
+        return None
+
+    def reboot(self) -> None:
+        """Restart the device.  Default no-op for the same reason as above."""
+        return None

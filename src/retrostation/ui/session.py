@@ -122,7 +122,7 @@ SORTS = ("name", "play", "recent")
 _CYCLING_ROWS = frozenset(
     {"screen", "card", "layout", "bvideo", "video_sound", "sort",
      "show_hidden", "search_by", "theme", "variant", "language", "status_bar",
-     "tcache"}
+     "tcache", "autostart"}
 )
 
 
@@ -156,6 +156,10 @@ class Outcome:
     redraw: bool = False
     quit: bool = False
     launch: Game | None = None
+    #: System power request from the exit dialog: ``"reboot"`` or ``"poweroff"``.
+    #: The app releases the display and then calls the platform, so the OS
+    #: command never runs while we still own the SDL windows.
+    power: str | None = None
 
 
 @dataclass
@@ -833,6 +837,10 @@ class Session:
             # Staged like the rest: the cache only actually switches off when A
             # commits, so flicking the switch back and forth costs nothing.
             self.config.thumbnail_cache = not self.config.thumbnail_cache
+        elif key == "autostart":
+            # Staged like the rest: the firmware hook is only patched when A
+            # commits, so the flag file flips without rewriting anything yet.
+            self.config.boot.enabled = not self.config.boot.enabled
 
     def _adjust_menu(self, key: str, direction: int) -> Outcome:
         """**Stage** a row's value with LEFT/RIGHT; the dialog stays open and
@@ -942,6 +950,8 @@ class Session:
             # deliberate act -- not something to land on while arrowing down.
             ("tcache", self.translator("menu.tcache"),
              self.translator("value.on" if config.thumbnail_cache else "value.off")),
+            ("autostart", self.translator("menu.autostart"),
+             self.translator("value.on" if config.boot.enabled else "value.off")),
             ("clear_cache", self.translator("menu.clear_cache"), ""),
             ("about", self.translator("menu.about"), f"v{__version__}"),
         ]
@@ -1157,12 +1167,41 @@ class Session:
     def _handle_exit_modal(self, event: InputEvent) -> Outcome:
         if not event.is_press:
             return Outcome()
-        if event.action in (InputAction.A, InputAction.MENU):
-            return Outcome(quit=True)
+        options = self.exit_options()
+        if event.action is InputAction.UP:
+            self.exit_selected = (self.exit_selected - 1) % len(options)
+            return Outcome(redraw=True)
+        if event.action is InputAction.DOWN:
+            self.exit_selected = (self.exit_selected + 1) % len(options)
+            return Outcome(redraw=True)
         if event.action is InputAction.B:
+            # B backs out of the dialog without doing anything -- the destructive
+            # rows (reboot, power off) are only ever reached by a deliberate A.
             self.modal = MODAL_NONE
             return Outcome(redraw=True)
+        if event.action in (InputAction.A, InputAction.MENU):
+            # A / MENU confirm the highlighted row.  The default (index 0) is
+            # "quit", so a long-press MENU followed by A still just exits -- the
+            # old behaviour -- while reboot / power off need an explicit pick.
+            key = options[self.exit_selected % len(options)][0]
+            if key == "quit":
+                return Outcome(quit=True)
+            return Outcome(power=key)
         return Outcome()
+
+    def exit_options(self) -> list[tuple[str, str]]:
+        """``(key, label)`` for the power/quit dialog; see :meth:`_handle_exit_modal`.
+
+        ``quit`` is first so the dialog opens on the harmless choice; reboot and
+        power off follow.  All three are real system actions, not settings, so
+        they are not part of the menu transaction.
+        """
+        t = self.translator
+        return [
+            ("quit", t("dialog.exit_option_quit")),
+            ("reboot", t("dialog.exit_option_reboot")),
+            ("poweroff", t("dialog.exit_option_poweroff")),
+        ]
 
     # -- toasts -------------------------------------------------------------- #
 

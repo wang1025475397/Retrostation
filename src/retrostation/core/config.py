@@ -81,6 +81,29 @@ class LauncherConfig:
 
 
 @dataclass
+class BootConfig:
+    """Power-on autostart (see docs/DESIGN §...).
+
+    Mirrors the PegasusG-by-ROC scheme: the firmware's own autostart script is
+    patched in place with a marked block, and an ``autostart.enabled`` flag file
+    is the only thing the UI toggles -- so switching autostart *off* never
+    rewrites the firmware script, and an interrupted write cannot strand the
+    device on a black screen.
+    """
+
+    #: Boot straight into the frontend, replacing the stock launcher.
+    enabled: bool = False
+    #: Firmware autostart hook to patch (e.g. ``/mnt/vendor/ctrl/autostart`` on
+    #: H700 firmwares, or ``/storage/.config/autostart.sh`` on EmuELEC-like
+    #: ones).  Empty lets the platform probe a list of known candidates.
+    target: str = ""
+    #: Where the managed flag file and launch helper live.  Must be on a
+    #: partition mounted early at boot (``/mnt/data`` on H700), not the ROM card
+    #: that may still be spinning up.
+    state_dir: str = ""
+
+
+@dataclass
 class Config:
     """Root configuration object."""
 
@@ -132,6 +155,7 @@ class Config:
 
     # integration --------------------------------------------------------- #
     launcher: LauncherConfig = field(default_factory=LauncherConfig)
+    boot: BootConfig = field(default_factory=BootConfig)
     core_overrides: dict[str, str] = field(default_factory=dict)
     brightness: dict[str, int] = field(default_factory=lambda: {"top": 140, "bottom": 140})
 
@@ -178,6 +202,8 @@ class Config:
                 kwargs[key] = _build_section(MetadataConfig, value, "metadata")
             elif key == "launcher":
                 kwargs[key] = _build_section(LauncherConfig, value, "launcher")
+            elif key == "boot":
+                kwargs[key] = _build_section(BootConfig, value, "boot")
             else:
                 kwargs[key] = value
 
