@@ -2,6 +2,12 @@
 
 > 中文 · [English](USAGE.en.md)
 
+> **30 秒装好**：把发布包里的 `APPS` 文件夹整个拷进 TF 卡根目录的 `Roms/APPS/` 里
+> （得到 `Roms/APPS/Retrostation.sh` 和 `Roms/APPS/Retrostation/`），然后到掌机的
+> **APPS 菜单**里启动 `Retrostation.sh` —— 就这一步，没有别的。
+>
+> 注意**必须走 APPS 菜单**进入：原厂前端会占用触摸屏与按键，从 SSH 直接启动会失败。
+
 > 面向玩家 / 折腾固件的人。本文讲三件事：**界面长什么样**、**配置文件在哪**、以及最常见的自定义——**怎么换模拟核心**。
 >
 > 完整的机种 → 默认核心对照表见仓库根的 [`../systems.reference.json`](../systems.reference.json)。

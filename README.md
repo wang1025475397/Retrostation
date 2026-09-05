@@ -214,7 +214,31 @@ cd prototype && python -m http.server 8899
 
 ## 构建与发布
 
-本项目**以 Python 源码形式直接部署**，不做字节码打包。改完 `.py` 后，用 `deploy.py` 一键推送到设备即可（部署文件清单见上文「快速开始：部署到掌机」）。
+### 打发布包（给别人用）
+
+```bash
+python scripts/package_release.py          # 产出 dist/Retrostation-<版本>.zip
+python scripts/package_release.py --list   # 只看会打进哪些文件
+```
+
+包里就是一个 `APPS/` 目录树，解压后整个拷进 TF 卡的 `Roms/APPS/` 即可使用：
+
+```
+APPS/
+  Retrostation.sh           菜单入口（必须在 APPS 根目录）
+  Imgs/Retrostation.png     菜单图标
+  Retrostation/
+    retrostation.sh         启动器
+    src/…                   应用源码
+    scripts/…               设备端自检脚本
+    README.md  CHANGELOG.md
+```
+
+以**源码**形式分发，不编译 `.pyc`：字节码不能跨 Python 小版本，而这几台设备分别是 3.10 和 3.11。打包时会剔除 `__pycache__`、测试、文档与截图，并为两个 `.sh` 显式设置可执行位（解压和拷贝都会丢掉它）。
+
+### 开发时推送到设备
+
+改完 `.py` 后，用 `deploy.py` 一键推送：
 
 ```bash
 python scripts/deploy.py root@<掌机IP>             # 推源码到设备
@@ -224,9 +248,15 @@ python scripts/deploy.py --reset   root@<掌机IP>   # 部署前清掉设备 /tm
 python scripts/deploy.py root@<掌机IP> --password root
 ```
 
-部署前 `deploy.py` 会自动清除本地的 `__pycache__` 缓存，避免把开发机（如 Python 3.12）编译的 `.pyc` 带上设备、与设备的 3.11 解释器冲突。
+部署前 `deploy.py` 会自动清除本地的 `__pycache__` 缓存，避免把开发机（如 Python 3.12）编译的 `.pyc` 带上设备、与设备的解释器冲突。
 
-> 历史方案 `scripts/build_release.py` 曾把 `.py` 编译成 `.pyc` 再发布（仅混淆、非加密，且字节码不能跨 Python 大版本）。当前版本不再打包，脚本保留仅供特殊分发需求参考。
+想验证打好的包而不是仓库本身，用 `--source` 指向解压出来的目录：
+
+```bash
+python scripts/deploy.py root@<掌机IP> --source /tmp/bundle --variant Retrostation-Release
+```
+
+（历史方案 `scripts/build_release.py` 曾把 `.py` 编译成 `.pyc` 再发布，仅混淆、非加密，且字节码不能跨 Python 大版本，已废弃。）
 
 ---
 

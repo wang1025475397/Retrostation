@@ -216,7 +216,31 @@ Or open `prototype/index.html` with any static server. Key mapping see [docs/PRO
 
 ## Build & Release
 
-This project is **deployed directly as Python source**, no bytecode packaging. After changing `.py`, use `deploy.py` to push to device in one click (deployment file list see above "Quick Start: Deploy to Handheld").
+### Build a release bundle (for others)
+
+```bash
+python scripts/package_release.py          # emits dist/Retrostation-<version>.zip
+python scripts/package_release.py --list   # just show what would be packaged
+```
+
+The bundle is an `APPS/` tree; unpack it and copy `APPS/` onto the card's `Roms/APPS/`:
+
+```
+APPS/
+  Retrostation.sh           menu entry (must sit in APPS itself)
+  Imgs/Retrostation.png     menu icon
+  Retrostation/
+    retrostation.sh         launcher
+    src/…                   the application
+    scripts/…               on-device diagnostics
+    README.md  CHANGELOG.md
+```
+
+Shipped as **source**, not compiled to `.pyc`: bytecode does not survive a different Python minor version, and these devices span 3.10 and 3.11. The packer strips `__pycache__`, tests, docs and screenshots, and sets the executable bit on the two `.sh` files explicitly (unzip and file copies both drop it).
+
+### Push to a device during development
+
+After editing `.py`, use `deploy.py` to push in one click:
 
 ```bash
 python scripts/deploy.py root@<掌机IP>             # Push source to device
@@ -226,9 +250,15 @@ python scripts/deploy.py --reset   root@<掌机IP>   # Clean device /tmp/retrost
 python scripts/deploy.py root@<掌机IP> --password root
 ```
 
-Before deploy, `deploy.py` automatically clears local `__pycache__` cache, avoiding bringing the dev machine's (e.g. Python 3.12) compiled `.pyc` to the device, which would conflict with the device's 3.11 interpreter.
+Before deploying, `deploy.py` clears local `__pycache__` so the dev machine's compiled `.pyc` (e.g. Python 3.12) never reaches a device whose interpreter differs.
 
-> Historical approach `scripts/build_release.py` once compiled `.py` into `.pyc` for release (obfuscation only, not encryption, and bytecode can't cross Python major versions). Current version no longer packages; the script is retained only as a reference for special distribution needs.
+To validate a built bundle instead of the repo, point `--source` at the unpacked directory:
+
+```bash
+python scripts/deploy.py root@<掌机IP> --source /tmp/bundle --variant Retrostation-Release
+```
+
+(The historical `scripts/build_release.py` compiled `.py` into `.pyc` for release — obfuscation only, not encryption, and bytecode could not cross Python major versions. It has been retired in favour of `scripts/package_release.py`.)
 
 ---
 

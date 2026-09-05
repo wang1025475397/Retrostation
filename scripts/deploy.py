@@ -65,11 +65,12 @@ def artifacts(source_root: Path, variant: str = DEFAULT_VARIANT) -> list[tuple[P
     """Existing artifacts under ``source_root``, in deployment order.
 
     ``source_root`` is the repository during development and a built bundle for
-    a release (see ``scripts/build_release.py``), where every ``.py`` has been
-    replaced by a ``.pyc`` and the diagnostics may have been left out.
+    a release (see ``scripts/package_release.py``), shipped as ``.py`` source with
+    the diagnostics optionally left out.
     """
     # Keyed by remote path so the first match wins: a variant icon beats the
-    # shared one, and a bundle's .pyc replaces the .py rather than adding to it.
+    # shared one, and a bundle built by scripts/package_release.py replaces the
+    # repo copy rather than adding to it.
     found: dict[str, Path] = {}
     for relative, remote in artifact_paths(variant):
         if remote in found:
@@ -191,7 +192,7 @@ def main() -> int:
                         help="SSH password; enables paramiko (no key needed)")
     parser.add_argument("--source", type=Path, default=ROOT,
                         help="directory to deploy from; defaults to the repository, "
-                             "or point it at a bundle from scripts/build_release.py")
+                             "or point it at a bundle from scripts/package_release.py")
     parser.add_argument("--variant", default=DEFAULT_VARIANT,
                         help=f"install directory / menu entry name "
                              f"(default: {DEFAULT_VARIANT}; use Retrostation-Release "

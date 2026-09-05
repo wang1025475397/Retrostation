@@ -2,6 +2,14 @@
 
 # Retrostation Usage & Configuration Guide
 
+> **Install in 30 seconds**: copy the `APPS` folder from the release archive into
+> `Roms/APPS/` at the root of your TF card (you end up with `Roms/APPS/Retrostation.sh`
+> and `Roms/APPS/Retrostation/`), then launch `Retrostation.sh` from the handheld's
+> **APPS menu**. That is the whole procedure.
+>
+> It **has** to be started from the APPS menu: the stock frontend owns the touchscreen
+> and the buttons, so starting it over SSH fails.
+
 > For players / firmware tinkerers. This document covers three things: **what the UI looks like**, **where the config files live**, and the most common customization — **how to swap emulator cores**.
 >
 > Full system → default core mapping is in the repo-root [`../systems.reference.json`](../systems.reference.json).
