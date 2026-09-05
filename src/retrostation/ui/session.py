@@ -17,6 +17,8 @@ Navigation rules come from DESIGN §5.2; the notable ones:
 from __future__ import annotations
 
 import copy
+import logging
+import threading
 import time
 import unicodedata
 from dataclasses import dataclass, field, fields
@@ -34,6 +36,8 @@ from ..core.theme import THEMES, VARIANTS
 from ..data.library import Library
 from ..data.systems import AGGREGATE_KEYS, AGGREGATES, lookup
 from ..platform.base import InputAction, InputEvent, InputKind
+
+log = logging.getLogger(__name__)
 
 VIEW_PLATFORMS = "platforms"
 VIEW_GAMES = "games"
@@ -117,7 +121,8 @@ SORTS = ("name", "play", "recent")
 #: and stays on A only.
 _CYCLING_ROWS = frozenset(
     {"screen", "card", "layout", "bvideo", "video_sound", "sort",
-     "show_hidden", "search_by", "theme", "variant", "language", "status_bar"}
+     "show_hidden", "search_by", "theme", "variant", "language", "status_bar",
+     "tcache"}
 )
 
 
@@ -707,6 +712,10 @@ class Session:
             self.modal = MODAL_NONE
             self._menu_stash = None
             return self._toggle_hidden()
+        if key == "clear_cache":
+            self.modal = MODAL_NONE
+            self._menu_stash = None
+            return self._clear_cache()
 
         stashed = self._menu_stash[0] if self._menu_stash is not None else None
         if stashed is not None:
@@ -716,6 +725,8 @@ class Session:
                 self.translator.set_language(self.config.language)
             if stashed.screen_mode != self.config.screen_mode:
                 self.restart_requested = True
+            if stashed.thumbnail_cache != self.config.thumbnail_cache:
+                self.library.set_thumbnail_cache(self.config.thumbnail_cache)
         # The card comparison is against the menu's own baseline, never the
         # app's resolved root: config.rom_root may legitimately still be
         # "auto" (never committed), and comparing against the resolved path
@@ -730,6 +741,34 @@ class Session:
         self.settings_dirty = True
         self.modal = MODAL_NONE
         return Outcome(redraw=True)
+
+    def _clear_cache(self) -> Outcome:
+        """A on "clear cache": empty every thumbnail cache on the card.
+
+        Walking the media tree of a full card is seconds of ``stat`` calls --
+        long enough that doing it on the input thread would drop frames the
+        whole time -- so it runs like the background scan does.  The toast
+        arrives when it is finished; :meth:`notify` only sets fields the next
+        frame reads, which is the same contract ``library_changed`` uses.
+        """
+        self._menu_stash = None
+        self.modal = MODAL_NONE
+        self.notify(self.translator("toast.cache_clearing"))
+        threading.Thread(
+            target=self._clear_cache_worker, name="retrostation-clear-cache", daemon=True,
+        ).start()
+        return Outcome(redraw=True)
+
+    def _clear_cache_worker(self) -> None:
+        try:
+            removed = self.library.clear_thumbnails()
+        except Exception:  # noqa: BLE001 - a failed cleanup must not kill the UI
+            log.exception("clearing the thumbnail cache failed")
+            self.notify(self.translator("toast.cache_clear_failed"))
+            return
+        self.notify(self.translator("toast.cache_cleared", count=removed))
+        # Whatever is on screen was drawn from the bitmaps we just dropped.
+        self.invalidate()
 
     def _cancel_menu(self) -> None:
         """B: restore what the dialog opened with; nothing staged survives."""
@@ -790,6 +829,10 @@ class Session:
             self._step_brightness(BRIGHTNESS_STEP)
         elif key == "status_bar":
             self.config.show_status_bar = not self.config.show_status_bar
+        elif key == "tcache":
+            # Staged like the rest: the cache only actually switches off when A
+            # commits, so flicking the switch back and forth costs nothing.
+            self.config.thumbnail_cache = not self.config.thumbnail_cache
 
     def _adjust_menu(self, key: str, direction: int) -> Outcome:
         """**Stage** a row's value with LEFT/RIGHT; the dialog stays open and
@@ -894,6 +937,12 @@ class Session:
              f"{int(config.brightness.get('top', 140))}"),
             ("status_bar", self.translator("menu.status_bar"),
              self.translator("value.on" if config.show_status_bar else "value.off")),
+            # The cache pair sits together and last but one: the switch is a
+            # set-and-forget preference, and emptying the card is a rare,
+            # deliberate act -- not something to land on while arrowing down.
+            ("tcache", self.translator("menu.tcache"),
+             self.translator("value.on" if config.thumbnail_cache else "value.off")),
+            ("clear_cache", self.translator("menu.clear_cache"), ""),
             ("about", self.translator("menu.about"), f"v{__version__}"),
         ]
         return rows

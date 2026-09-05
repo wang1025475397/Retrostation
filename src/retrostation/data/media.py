@@ -19,7 +19,11 @@ import functools
 import hashlib
 import io
 import logging
+import os
 import queue
+import re
+import shutil
+import struct
 import threading
 import time
 from dataclasses import dataclass, field
@@ -372,17 +376,32 @@ _WRITE_PAUSE = 0.08
 #: See :meth:`ThumbnailCache._stat`.
 _STAT_TTL = 5.0
 _STAT_LIMIT = 4000
+#: How long a cache entry that could not be deleted is left alone.
+#: See :meth:`ThumbnailCache._discard`.
+_BROKEN_TTL = 30.0
+
+#: Everything Pillow raises for a file it cannot decode.  ``ValueError`` and
+#: ``struct.error`` turn up for truncated files; :class:`OSError` covers
+#: "not an image at all".  Any of them must send the caller to the next
+#: candidate rather than take the frame loop down.
+_DECODE_ERRORS: tuple[type[BaseException], ...] = (OSError, ValueError, struct.error)
 
 
 #: How to encode a thumbnail for each suffix.  Format-specific on purpose:
 #: passing ``quality`` to PNG does nothing, and PNG ignores it silently.
+#:
+#: 80 rather than 86: at thumbnail size the difference does not survive the
+#: scaling, and the cache is written to an SD card that also holds the ROMs.
 _SAVE_ARGS: dict[str, dict[str, object]] = {
-    ".webp": {"format": "WEBP", "quality": 86, "method": 4},
-    ".jpg": {"format": "JPEG", "quality": 86},
-    ".jpeg": {"format": "JPEG", "quality": 86},
+    ".webp": {"format": "WEBP", "quality": 80, "method": 4},
+    ".jpg": {"format": "JPEG", "quality": 80},
+    ".jpeg": {"format": "JPEG", "quality": 80},
     ".png": {"format": "PNG", "optimize": True},
 }
 
+#: Dot-directory holding the thumbnails, one per media directory.  A dot keeps
+#: it out of the way of the ROM scanner and of anything else listing the card.
+_CACHE_DIR_NAME = ".cache"
 #: Sub-directory (inside ``.cache``) holding readable copies of sources that
 #: Pillow on this device cannot open -- see :meth:`ThumbnailCache._readable_copy`.
 _COPY_DIR = "src"
@@ -412,10 +431,15 @@ def cache_suffix() -> str:
 
     Probing once beats guessing, because a cache file we cannot read is worse
     than having no cache at all.
+
+    The probe is transparent and the alpha channel has to survive: logos are
+    transparent PNGs, and a format that drops it turns every logo into a slab
+    of the background colour it was flattened onto.  JPEG fails this probe on
+    purpose -- it has no alpha, so it can never cache a logo correctly.
     """
     from PIL import Image
 
-    probe = Image.new("RGB", (8, 8), (12, 34, 56))
+    probe = Image.new("RGBA", (8, 8), (12, 34, 56, 0))
     for suffix, name in _CACHE_FORMATS:
         buffer = io.BytesIO()
         try:
@@ -423,10 +447,39 @@ def cache_suffix() -> str:
             buffer.seek(0)
             with Image.open(buffer) as handle:
                 handle.load()
+                if handle.mode != "RGBA" or handle.getchannel("A").getextrema()[0] != 0:
+                    continue
         except Exception:  # noqa: BLE001 - any failure means "not this format"
             continue
         return suffix
     return ".png"
+
+
+def _entry_digest(source: Path, width: int, height: int, mtime: int) -> str:
+    """Name hash of one thumbnail: ``<hash>_<w>x<h>[c]<suffix>``.
+
+    ``mtime`` is in it for two reasons.  A re-scraped cover has to stop being
+    served by the thumbnail of the picture it replaced -- the name was the only
+    thing that outlived the process -- and it doubles as a version stamp: when
+    what we put *in* the file changes (it did, when thumbnails stopped being
+    flattened), every entry written before that stops being found and is
+    cleaned up by :meth:`ThumbnailCache.prune` instead of being shown wrong.
+    """
+    return hashlib.sha1(
+        f"{source}|{width}x{height}|{mtime}".encode("utf-8")
+    ).hexdigest()[:16]
+
+
+def _copy_digest(source: Path, mtime: int) -> str:
+    """Name hash of a readable source copy.  See :func:`_entry_digest`."""
+    return hashlib.sha1(f"{source}|{mtime}".encode("utf-8")).hexdigest()[:16]
+
+
+#: One thumbnail: ``<16 hex>_<width>x<height>[c]``.  Parsed back by
+#: :meth:`ThumbnailCache.prune` to decide whether a source still claims it.
+_ENTRY_RE = re.compile(r"([0-9a-f]{16})_(\d+)x(\d+)(c?)\Z")
+#: One readable source copy: just the hash.
+_COPY_RE = re.compile(r"[0-9a-f]{16}\Z")
 
 
 class ThumbnailCache:
@@ -445,6 +498,9 @@ class ThumbnailCache:
         self._memory_order: list[tuple[str, int, int, int]] = []
         self._dirs: set[Path] = set()
         self._stats: dict[str, tuple[float, int, bool]] = {}
+        #: Cache entries we could not read *and* could not delete, with the
+        #: time until which we stop trying.  See :meth:`_discard`.
+        self._broken: dict[str, float] = {}
         # Saving a thumbnail to the SD card measured ~0.5 s, which the UI paid
         # in full the first time a game came on screen.  The bitmap is already
         # decoded by then, so hand the write to a background thread and keep
@@ -454,6 +510,14 @@ class ThumbnailCache:
             target=self._write_loop, name="retrostation-thumbs", daemon=True
         )
         self._writer.start()
+        # Cleaning a cache directory costs an ``iterdir`` plus a stat per
+        # source -- fine once, but a scroll passes a new game's directory every
+        # few frames, so it runs on its own thread like the writer does.
+        self._to_prune: queue.Queue = queue.Queue()
+        self._pruner = threading.Thread(
+            target=self._prune_loop, name="retrostation-prune", daemon=True
+        )
+        self._pruner.start()
 
     # ------------------------------------------------------------------ #
 
@@ -499,34 +563,39 @@ class ThumbnailCache:
         if cached is not None:
             return cached
 
-        bitmap = self._decode(source, width, height, cover=cover)
+        bitmap = self._decode(source, width, height, mtime=mtime, cover=cover)
         if bitmap is None:
             return None
 
         self._remember(key, bitmap)
         return bitmap
 
-    def _decode(self, source: Path, width: int, height: int,
+    def _decode(self, source: Path, width: int, height: int, mtime: int,
                 *, cover: bool = False) -> object | None:
-        disk = self._disk_path(source, width, height, cover=cover)
-        if disk is not None and disk.is_file():
+        disk = self._disk_path(source, width, height, mtime, cover=cover)
+        if disk is not None and disk.is_file() and self._usable(disk):
             try:
                 return self._platform.load_image(disk)
-            except OSError:
-                disk.unlink(missing_ok=True)
+            except _DECODE_ERRORS:
+                # An entry we cannot read is a write that was cut short -- a
+                # process killed, a card pulled -- or one the format probe got
+                # wrong.  Either way the original is the truth, so drop the
+                # entry and decode from there.
+                log.debug("unreadable thumbnail %s, regenerating", disk, exc_info=True)
+                self._discard(disk)
 
         try:
             original = self._platform.load_image(source)
-        except OSError:
+        except _DECODE_ERRORS:
             # This device's Pillow cannot open JPEG at all (see cache_suffix),
             # and cover art is frequently JPEG.  Fall back to a readable copy
             # rather than showing the placeholder.
-            readable = self._readable_copy(source)
+            readable = self._readable_copy(source, mtime)
             if readable is None:
                 return None
             try:
                 original = self._platform.load_image(readable)
-            except OSError:
+            except _DECODE_ERRORS:
                 return None
 
         scaled = cover_bitmap(original, width, height) if cover else fit_bitmap(original, width, height)
@@ -534,7 +603,44 @@ class ThumbnailCache:
             self._store(disk, scaled)
         return scaled
 
-    def _readable_copy(self, source: Path) -> Path | None:
+    def _discard(self, disk: Path) -> None:
+        """Delete a cache entry we cannot read, tolerating a locked file.
+
+        Deleting is best effort, and on Windows it genuinely fails: a file
+        that is open for writing cannot be unlinked (CPython opens with
+        ``FILE_SHARE_READ | FILE_SHARE_WRITE`` but not ``FILE_SHARE_DELETE``),
+        so an entry being written by the background thread right now raises
+        ``PermissionError`` -- which used to escape from inside the ``except``
+        that was cleaning up after the failed read, and killed the frame loop.
+
+        A lost cache entry costs one re-decode; a crashed frame costs the app.
+        The entry is remembered for :data:`_BROKEN_TTL` so a file that could
+        not be removed is not re-read on every frame in the meantime.
+        """
+        if not self._remove(disk):
+            self._broken[str(disk)] = time.monotonic() + _BROKEN_TTL
+
+    def _usable(self, disk: Path) -> bool:
+        """False while an entry is known to be unreadable.  See :meth:`_discard`."""
+        until = self._broken.get(str(disk))
+        if until is None:
+            return True
+        if time.monotonic() < until:
+            return False
+        self._broken.pop(str(disk), None)
+        return True
+
+    @staticmethod
+    def _remove(path: Path) -> bool:
+        """Delete ``path``; ``False`` when the operating system refused."""
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as exc:
+            log.debug("could not delete %s: %s", path, exc)
+            return False
+        return True
+
+    def _readable_copy(self, source: Path, mtime: int) -> Path | None:
         """A Pillow-readable stand-in for a file Pillow cannot open.
 
         Cached on disk, so the external decoder (ffmpeg, ~80 ms a call) runs
@@ -548,8 +654,8 @@ class ThumbnailCache:
         if not self._enabled:
             return None
 
-        directory = source.parent / ".cache" / _COPY_DIR
-        digest = hashlib.sha1(str(source).encode("utf-8")).hexdigest()[:16]
+        directory = source.parent / _CACHE_DIR_NAME / _COPY_DIR
+        digest = _copy_digest(source, mtime)
         target = directory / f"{digest}{cache_suffix()}"
         if target.is_file():
             return target
@@ -568,7 +674,7 @@ class ThumbnailCache:
         except OSError:
             return None
         finally:
-            temporary.unlink(missing_ok=True)
+            self._remove(temporary)
 
         # Through the same writer as the thumbnails, so both layers end up in a
         # format this device can actually read back.
@@ -579,7 +685,7 @@ class ThumbnailCache:
             return None
         return target
 
-    def _disk_path(self, source: Path, width: int, height: int,
+    def _disk_path(self, source: Path, width: int, height: int, mtime: int,
                    *, cover: bool = False) -> Path | None:
         """``Imgs/.cache/<hash>_<w>x<h><suffix>``; ``None`` when caching is off.
 
@@ -588,19 +694,111 @@ class ThumbnailCache:
         """
         if not self._enabled:
             return None
-        digest = hashlib.sha1(f"{source}|{width}x{height}".encode("utf-8")).hexdigest()[:16]
         suffix = cache_suffix()
-        directory = source.parent / ".cache"
+        directory = source.parent / _CACHE_DIR_NAME
         # mkdir() is a round trip to the card on every miss; remember the ones
-        # that already exist instead of asking again each time.
+        # that already exist instead of asking again each time.  First visit
+        # to a directory is also when its stale entries go: see :meth:`prune`.
         if directory not in self._dirs:
             try:
                 directory.mkdir(parents=True, exist_ok=True)
             except OSError:
                 return None
             self._dirs.add(directory)
+            self._to_prune.put(directory)
+        digest = _entry_digest(source, width, height, mtime)
         marker = "c" if cover else ""
         return directory / f"{digest}_{width}x{height}{marker}{suffix}"
+
+    # ------------------------------------------------------------------ #
+    # Pruning
+    # ------------------------------------------------------------------ #
+
+    def prune(self, directory: Path) -> int:
+        """Drop entries in ``directory`` that no source can claim; count them.
+
+        Every entry name is a hash of ``(source, size, mtime)``, so an entry
+        whose source was deleted -- or replaced, which moves its mtime -- no
+        longer answers to anything in the folder and can go.  So can anything
+        an older build wrote under a different rule: thumbnails used to be
+        flattened onto a background colour and keyed without the mtime, so a
+        card that has been through those versions carries a full generation of
+        files per version, none of which will ever be read again.
+
+        Deleting artwork the player still uses would be unforgivable, so the
+        rule is the other way round: an entry stays only if a source in the
+        folder right above it hashes to exactly this name.
+        """
+        if not self._enabled:
+            return 0
+        parent = directory.parent
+        if not parent.is_dir():
+            # The media folder itself is gone -- the whole cache directory is
+            # an orphan, readable copies and all.
+            shutil.rmtree(directory, ignore_errors=True)
+            return 0
+
+        stamps = self._source_stamps(parent)
+        removed = 0
+        for entry in self._platform.list_dir(directory):
+            path = directory / entry.name
+            if entry.is_dir:
+                if entry.name == _COPY_DIR:
+                    removed += self._prune_copies(path, stamps)
+                continue
+            if self._claimed(path, stamps):
+                continue
+            removed += self._remove(path)
+        return removed
+
+    def _source_stamps(self, directory: Path) -> dict[Path, int]:
+        """``{source: mtime}`` for the artwork a cache directory sits under."""
+        stamps: dict[Path, int] = {}
+        for entry in self._platform.list_dir(directory):
+            if entry.is_dir or not entry.name.lower().endswith(_IMAGE_SUFFIXES):
+                continue
+            stamps[directory / entry.name] = int(entry.mtime)
+        return stamps
+
+    @staticmethod
+    def _claimed(path: Path, stamps: dict[Path, int]) -> bool:
+        """Whether some source in ``stamps`` hashes to this entry's name."""
+        match = _ENTRY_RE.match(path.stem)
+        if match is None or path.suffix.lower() != cache_suffix():
+            # Not a name this build would produce (older layout, a temporary
+            # left behind, a stray file): it can never be read again.
+            return False
+        digest = match.group(1)
+        width, height = int(match.group(2)), int(match.group(3))
+        return any(
+            digest == _entry_digest(source, width, height, mtime)
+            for source, mtime in stamps.items()
+        )
+
+    def _prune_copies(self, directory: Path, stamps: dict[Path, int]) -> int:
+        """Same rule as :meth:`prune`, for the readable source copies."""
+        removed = 0
+        for entry in self._platform.list_dir(directory):
+            if _COPY_RE.match(Path(entry.name).stem) and any(
+                Path(entry.name).stem == _copy_digest(source, mtime)
+                for source, mtime in stamps.items()
+            ):
+                continue
+            removed += self._remove(directory / entry.name)
+        return removed
+
+    def _prune_loop(self) -> None:
+        while True:
+            directory = self._to_prune.get()
+            try:
+                removed = self.prune(directory)
+            except Exception:  # noqa: BLE001 - a missed cleanup only costs space
+                log.debug("prune failed for %s", directory, exc_info=True)
+            else:
+                if removed:
+                    log.debug("pruned %d stale thumbnail(s) from %s", removed, directory)
+
+    # ------------------------------------------------------------------ #
 
     def _store(self, target: Path, bitmap: object) -> None:
         """Queue the bitmap for the writer thread; never blocks the caller."""
@@ -633,15 +831,28 @@ class ThumbnailCache:
 
         image: Image.Image = bitmap  # type: ignore[assignment]
         if image.mode in ("RGBA", "LA", "P"):
-            # Flatten onto the app background: the cache format is chosen for
-            # size, and keeping an alpha channel there costs more than it saves.
             image = image.convert("RGBA")
-            background = Image.new("RGB", image.size, (20, 20, 20))
-            background.paste(image, mask=image.split()[-1])
-            image = background
+            # Used to flatten everything onto a dark background to save a few
+            # bytes.  Logos are transparent PNGs, so they came back out of the
+            # cache as an opaque slab of that colour over whatever they were
+            # drawn on.  Only drop the channel when it has nothing in it.
+            if _is_opaque(image):
+                image = image.convert("RGB")
 
         kwargs = _SAVE_ARGS.get(target.suffix.lower()) or _SAVE_ARGS[".png"]
-        image.save(target, **kwargs)  # type: ignore[arg-type]
+        # Save beside the entry, then rename it into place.  ``image.save``
+        # truncates the target first, so writing straight to it leaves a
+        # half-written file behind whenever the process dies mid-write -- and
+        # on Windows that file cannot even be deleted while it is still open
+        # (see :meth:`_discard`).  A rename is atomic, so a reader only ever
+        # sees the old entry or the complete new one.
+        temporary = target.with_name(f"{target.name}.{os.getpid()}.tmp")
+        try:
+            image.save(temporary, **kwargs)  # type: ignore[arg-type]
+            os.replace(temporary, target)
+        except OSError:
+            self._remove(temporary)
+            raise
 
     # -- memory LRU ------------------------------------------------------- #
 
@@ -656,6 +867,51 @@ class ThumbnailCache:
     def clear_memory(self) -> None:
         self._memory.clear()
         self._memory_order.clear()
+
+    @property
+    def enabled(self) -> bool:
+        return self._enabled
+
+    @enabled.setter
+    def enabled(self, value: bool) -> None:
+        """Switch the cache on or off while the app is running.
+
+        Off means off: no entry is written and no entry is read, so a player
+        who turns it off stops all traffic to the card.  What is already there
+        is left alone -- it is still valid, and turning the switch back on
+        should give the cache back, not a cold card.
+        """
+        if value == self._enabled:
+            return
+        self._enabled = value
+        self.clear()
+
+    def clear(self) -> None:
+        """Forget everything this side of the card: bitmaps, known
+        directories, entries we gave up on deleting.
+
+        Called after the player empties the cache, whose directories are gone;
+        keeping the old ones would skip the ``mkdir`` and make the next write
+        fail on a missing parent.
+        """
+        self.clear_memory()
+        self._dirs.clear()
+        self._broken.clear()
+
+
+def _is_opaque(image: object) -> bool:
+    """Whether a bitmap has no transparent pixel at all.
+
+    Decided on the real channel rather than on ``mode``: plenty of logos are
+    saved as RGBA with a fully opaque alpha channel, and those lose nothing by
+    being written without one.
+    """
+    from PIL import Image
+
+    source: Image.Image = image  # type: ignore[assignment]
+    if source.mode not in ("RGBA", "LA", "PA"):
+        return True
+    return source.getchannel("A").getextrema()[0] >= 255
 
 
 def fit_bitmap(bitmap: object, width: int, height: int) -> object:

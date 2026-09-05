@@ -134,6 +134,12 @@ def _scan_in_background(app: App, library: Library) -> None:
         return
     # The listing is in; tell the UI so it stops showing the index's version.
     app.library_changed()
+    # Thumbnails are pruned a directory at a time as they are used, but a game
+    # the player never opens keeps whatever an older build left there.
+    try:
+        library.prune_thumbnails()
+    except Exception:  # noqa: BLE001 - a missed cleanup only costs card space
+        log.exception("thumbnail prune failed")
 
 
 def main(argv: list[str] | None = None) -> int:

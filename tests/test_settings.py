@@ -12,6 +12,7 @@ import json
 from pathlib import Path
 
 import pytest
+from PIL import Image
 
 from retrostation.core.config import Config
 from retrostation.core.i18n import Translator
@@ -206,6 +207,143 @@ class TestPersistence:
 
         saved = json.loads((Path(platform.config_dir) / "config.json").read_text(encoding="utf-8"))
         assert saved["show_status_bar"] is False
+
+
+class TestThumbnailCache:
+    """The switch and the "empty it" row.
+
+    ``enabled`` is read once, when the library builds its cache, so the row has
+    to reach into the live object -- a config field that nobody applies would
+    look like a working switch and do nothing.
+    """
+
+    @staticmethod
+    def _cover(rom_root: Path) -> Path:
+        media = rom_root / "FC" / "Imgs"
+        media.mkdir(parents=True, exist_ok=True)
+        cover = media / "cover.png"
+        Image.new("RGB", (300, 400), (10, 20, 30)).save(cover)
+        return cover
+
+    @staticmethod
+    def _cache_dir(rom_root: Path) -> Path:
+        return rom_root / "FC" / "Imgs" / ".cache"
+
+    @staticmethod
+    def _cache_files(rom_root: Path) -> list[str]:
+        """Every cached file on the card, as stable relative paths.
+
+        The home page renders covers before the test gets to the switch, so
+        "the cache directory exists" proves nothing -- what matters is whether
+        anything was added after the switch went off.
+        """
+        return sorted(
+            str(path.relative_to(rom_root))
+            for path in rom_root.rglob("*")
+            if path.is_file() and ".cache" in path.parts
+        )
+
+    def test_both_rows_are_offered(self, rom_root: Path) -> None:
+        app, _platform, _config = settings_app(rom_root)
+        app.run(max_frames=1)
+        keys = [key for key, _label, _value in app.session.menu_rows()]
+        assert "tcache" in keys
+        assert "clear_cache" in keys
+
+    def test_the_switch_only_takes_effect_on_commit(self, rom_root: Path) -> None:
+        app, platform, config = settings_app(rom_root)
+        app.run(max_frames=1)
+        cache = app.session.library._thumbnails  # noqa: SLF001
+
+        open_menu(app, platform)
+        nudge(app, platform, "tcache")
+        assert config.thumbnail_cache is False       # staged
+        assert cache.enabled is True                 # not applied yet
+
+        press(app, platform, InputEvent(InputAction.A))
+        assert cache.enabled is False
+
+    def test_switching_off_stops_writing_to_the_card(self, rom_root: Path) -> None:
+        """Artwork still shows -- it is just decoded instead of cached."""
+        app, platform, _config = settings_app(rom_root)
+        app.run(max_frames=1)
+        open_menu(app, platform)
+        nudge(app, platform, "tcache")
+        press(app, platform, InputEvent(InputAction.A))
+
+        cover = self._cover(rom_root)
+        cache = app.session.library._thumbnails  # noqa: SLF001
+        before = self._cache_files(rom_root)
+        assert cache.get("cover", cover, 40, 40) is not None
+        cache.flush()
+        assert self._cache_files(rom_root) == before, "wrote to the card with the cache off"
+
+    def test_the_switch_survives_a_restart(self, rom_root: Path) -> None:
+        app, platform, _config = settings_app(rom_root)
+        app.run(max_frames=1)
+        open_menu(app, platform)
+        nudge(app, platform, "tcache")
+        press(app, platform, InputEvent(InputAction.A))
+
+        saved = json.loads((Path(platform.config_dir) / "config.json").read_text(encoding="utf-8"))
+        assert saved["thumbnail_cache"] is False
+
+    def test_clearing_removes_every_entry(self, rom_root: Path) -> None:
+        app, _platform, _config = settings_app(rom_root)
+        app.run(max_frames=1)
+        cache = app.session.library._thumbnails  # noqa: SLF001
+        self._cover(rom_root)
+        assert cache.get("cover", self._cover(rom_root), 40, 40) is not None
+        cache.flush()
+        assert any(self._cache_dir(rom_root).iterdir())
+
+        assert app.session.library.clear_thumbnails() >= 1
+        assert not self._cache_dir(rom_root).exists()
+
+    def test_the_cache_starts_over_after_being_cleared(self, rom_root: Path) -> None:
+        """Its directories are gone, and so is our memory of them.
+
+        Keeping the old ones would skip the ``mkdir`` and make the next write
+        fail on a missing parent -- which would look exactly like a cache that
+        silently does nothing.
+        """
+        app, _platform, _config = settings_app(rom_root)
+        app.run(max_frames=1)
+        cache = app.session.library._thumbnails  # noqa: SLF001
+        cover = self._cover(rom_root)
+        assert cache.get("cover", cover, 40, 40) is not None
+        cache.flush()
+        app.session.library.clear_thumbnails()
+
+        assert cache.get("cover", cover, 40, 40) is not None
+        cache.flush()
+        assert any(self._cache_dir(rom_root).iterdir())
+
+    def test_the_row_does_not_block_the_frame(self, rom_root: Path) -> None:
+        """Walking a full card is seconds of stat() calls; the input thread
+        hands it off and answers with a toast, like the background scan does."""
+        app, platform, _config = settings_app(rom_root)
+        app.run(max_frames=1)
+        cover = self._cover(rom_root)
+        cache = app.session.library._thumbnails  # noqa: SLF001
+        assert cache.get("cover", cover, 40, 40) is not None
+        cache.flush()
+        expected = len(self._cache_files(rom_root))
+        assert expected, "nothing to clear"
+
+        open_menu(app, platform)
+        choose(app, platform, "clear_cache")
+
+        assert app.session.modal == ""
+        # The worker is a daemon thread; give it frames rather than racing it.
+        for _ in range(200):
+            if app.session.toast_message != app.translator("toast.cache_clearing"):
+                break
+            app.run(max_frames=1)
+        assert app.session.toast_message == app.translator(
+            "toast.cache_cleared", count=expected
+        )
+        assert self._cache_files(rom_root) == []
 
 
 class TestStorageCard:

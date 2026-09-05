@@ -16,7 +16,10 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
+import shutil
 import threading
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -24,11 +27,27 @@ from ..core.config import Config
 from ..core.model import ASSET_VIDEO, Game, game_key
 from ..platform.base import Platform
 from . import sources as source_registry
-from .media import MediaDirs, ThumbnailCache, media_dirs_for, resolve_assets
+from .media import (
+    _CACHE_DIR_NAME,
+    MediaDirs,
+    ThumbnailCache,
+    media_dirs_for,
+    resolve_assets,
+)
 from .scanner import Rom, ScanResult, scan_library, scan_system
 from .systems import AGGREGATES, lookup
 
 log = logging.getLogger(__name__)
+
+#: How deep under a system directory to look for ``.cache`` folders.  Three
+#: covers both layouts: ``<SYS>/Imgs/.cache`` (depth 2) and the per-game packs
+#: ``<SYS>/media/<game>/.cache`` (depth 3).
+_PRUNE_DEPTH = 3
+
+
+def _count_files(directory: Path) -> int:
+    """Files under ``directory``, however deep -- for "cleared N files"."""
+    return sum(len(files) for _root, _dirs, files in os.walk(directory))
 
 
 @dataclass
@@ -339,6 +358,58 @@ class Library:
         if source is None:
             return None
         return self._thumbnails.get(kind, source, width, height, cover=cover)
+
+    def set_thumbnail_cache(self, enabled: bool) -> None:
+        """Turn the thumbnail cache on or off for this session.
+
+        What is already on the card stays: turning the switch back on should
+        hand the cache back rather than a cold card.  Clearing it is the other
+        menu row's job.
+        """
+        self._thumbnails.enabled = enabled
+
+    def prune_thumbnails(self) -> int:
+        """Sweep the thumbnail caches of every system; return how many went.
+
+        Browsing prunes a cache directory the first time it is used, but a game
+        the player never opens keeps whatever a previous build left there, and
+        that is most of a card.  Run once behind the UI after a scan.
+        """
+        removed = sum(self._thumbnails.prune(path) for path in self._cache_dirs())
+        if removed:
+            log.info("pruned %d stale thumbnail(s)", removed)
+        return removed
+
+    def clear_thumbnails(self) -> int:
+        """Delete every thumbnail cache on the card; return how many files went.
+
+        No asking whether an entry is still in use -- the player asked for the
+        card space back, and every one of them is rebuilt on demand.
+        """
+        removed = 0
+        for path in self._cache_dirs():
+            removed += _count_files(path)
+            shutil.rmtree(path, ignore_errors=True)
+        self._thumbnails.clear()
+        if removed:
+            log.info("cleared %d cached thumbnail(s)", removed)
+        return removed
+
+    def _cache_dirs(self) -> Iterator[Path]:
+        """Every ``.cache`` directory under the ROM tree, one system at a time."""
+        for key in list(self._roms):
+            yield from self._walk_cache_dirs(self._platform.system_dir(key), _PRUNE_DEPTH)
+
+    def _walk_cache_dirs(self, root: Path, depth: int) -> Iterator[Path]:
+        if depth <= 0:
+            return
+        for entry in self._platform.list_dir(root):
+            if not entry.is_dir:
+                continue
+            if entry.name == _CACHE_DIR_NAME:
+                yield root / entry.name
+                continue
+            yield from self._walk_cache_dirs(root / entry.name, depth - 1)
 
     def has_video(self, game: Game) -> bool:
         return game.has_asset(ASSET_VIDEO)

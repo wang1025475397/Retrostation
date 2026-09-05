@@ -362,3 +362,20 @@ The Retrostation UI supports switching between **Chinese / English / Auto** at r
 - After switching, UI text, system names and descriptions all change; your ROM files and configs are unaffected.
 
 > Tip: system display names come from `systems.json`'s `label` (English/generic) and `label_zh` (Chinese); the UI picks based on current language. To add more languages (e.g. Japanese), add a `label_ja` field — no code change.
+
+---
+
+## 13. Thumbnail Cache (space and clearing)
+
+Covers and logos are pre-scaled **per display size** and stored in a `.cache/` folder next to the source image (dot-prefixed, so the scanner never mistakes it for a ROM or for artwork). The handheld's CPU is slow enough that decoding a full-size cover while scrolling costs tens of milliseconds; the cache is what keeps the first frame at 1.2 s.
+
+The price is card space: **one file per source-image × size**, typically 2–8 files and 100–400 KB per game.
+
+Two rows at the bottom of the settings menu (press START) manage it:
+
+- **Thumbnail cache** — press A to toggle. Off means no cache file is read or written; artwork is scaled on the fly. **Barely noticeable on a desktop** (measured 5–10 ms per image) but visibly slower on the handheld, so leave it on there. Existing entries are not deleted, so switching back on restores the cache.
+- **Clear image cache** — press A to delete **every** `.cache` directory on the card and reclaim the space. A toast reports how many files went; entries are rebuilt on demand as you browse.
+
+Deleting is safe: the cache is always rebuildable and never touches ROMs, original artwork or metadata.
+
+> The background scan after launch also prunes **stale** entries — ones whose cover was replaced, or generations left behind by older builds. For reclaiming space in one go, the row above is the direct route.

@@ -20,6 +20,7 @@ The top screen (DSI-1) is the interactive main view; the bottom screen (DSI-2) i
 - **Bottom-screen video with sound**: ffmpeg pipeline software decoding; the soundtrack plays through ALSA and the **volume rocker** adjusts it (±5, takes effect at once); automatic fallback to cover when there is no video or decoding fails; measured ~4.5% single core.
 - **Fast cold start, light footprint**: index cache + thumbnail cache, cold start to first frame ~1.2 s, resident memory ~40 MB.
 - **Instant settings persistence**: theme / brightness / language / status bar written immediately, no restart needed.
+- **Controllable thumbnail cache**: the settings menu can switch it off entirely (artwork is then scaled on the fly and nothing is written to the card) or **clear the image cache** to reclaim card space; the background scan prunes stale entries on its own.
 - **Cross-platform ready**: only `platform/` is allowed platform-specific code; all dimensions go through theme tokens, preparing for a future Android app.
 
 ---
