@@ -114,7 +114,11 @@ def cover_art(
     drawn = _dimmed(painter, bitmap, opacity) if opacity < 255 else bitmap
     if cover:
         drawn = cover_bitmap(drawn, w, h)
-    if radius:
+    if radius and cover:
+        # Only a picture that fills its slot touches the card's corners, so
+        # only that one is rounded.  A letterboxed one sits in the middle of
+        # the plate with the card's colour around it, and rounding it just
+        # bites a notch out of each of its own corners.
         drawn = _round_corners(drawn, radius)
     painter.image_fit(drawn, box)
 
@@ -340,13 +344,19 @@ def _card(
     name_h = m.u(24)
 
     if selected:
-        box = (x - m.u(3), y - m.u(3), w + m.u(6), h + m.u(6))
-        painter.rounded_rect(box, radius=m.u(7), fill=panel_fill(painter), outline=COLORS.accent, width=2)
-    else:
-        painter.rounded_rect(box, radius=m.u(7), fill=panel_fill(painter), outline=COLORS.border)
+        # The only thing still drawn around a cell.  No plate and no resting
+        # border: a frame on every slot turned a wall of artwork into a wall
+        # of boxes, and once the art is letterboxed there were two rectangles
+        # per game competing -- the card's and the picture's.
+        halo = (x - m.u(3), y - m.u(3), w + m.u(6), h + m.u(6))
+        painter.rounded_rect(halo, radius=m.u(9), outline=COLORS.accent, width=2)
 
     art_h = h - name_h
-    cover_art(painter, art, game, (x, y, w, art_h), cover=True, radius=m.u(7))
+    # Letterboxed, not cropped.  The cell is a fixed slot, but cover art is
+    # not one shape: a square GBA box, a wide FC shot and a tall MD cover all
+    # have to be shown whole, so the art takes the largest box of *its own*
+    # proportions that fits and the card's colour fills the rest.
+    cover_art(painter, art, game, (x, y, w, art_h), cover=False, radius=m.u(7))
 
     if game.favorite:
         painter.text((x + w - m.u(8), y + m.u(10)), _STAR, size=12, fill=COLORS.accent, anchor="rm")
@@ -458,11 +468,13 @@ def _cover_card(
     m = painter.metrics
     x, y, w, h = box
 
-    # No border: the cover fills the whole card and is cropped to its rounded
-    # corners, so the carousel reads as a row of pictures rather than outlined
-    # boxes.  The selected card stays distinct through its size and full opacity.
+    # The card used to *be* the cover, cropped to 3:4 -- which took the top and
+    # bottom off every square GBA box and most of a wide FC shot.  It is now
+    # the cover at its own proportions, sitting straight on the page with no
+    # plate and no frame of its own.  The selected card stays distinct through
+    # its size and full opacity.
     cover_art(painter, art, game, (x, y, w, h), opacity=opacity,
-              cover=True, radius=m.u(8))
+              cover=False, radius=m.u(8))
 
     if game.favorite:
         painter.text((x + w - m.u(8), y + m.u(10)), _STAR, size=13, fill=COLORS.accent, anchor="rm")

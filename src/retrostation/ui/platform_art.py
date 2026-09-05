@@ -144,7 +144,7 @@ class PlatformArt:
             return None
 
         # Logos are composited over the background, so they must fit *inside*
-        # the box rather than fill it; fit_bitmap already never upscales.
+        # the box rather than fill it.
         scaled = fit_bitmap(bitmap, width, height)
         self._remember(cache_key, scaled)
         return scaled

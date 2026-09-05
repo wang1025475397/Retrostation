@@ -915,10 +915,15 @@ def _is_opaque(image: object) -> bool:
 
 
 def fit_bitmap(bitmap: object, width: int, height: int) -> object:
-    """Scale to fit inside ``width x height``, never upscaling.
+    """Scale to fit inside ``width x height``, keeping the aspect ratio.
 
-    Shared by the game thumbnail cache and the shipped platform artwork, so
-    both end up as RGBA bitmaps ready to paste.
+    Upscaling is allowed, and has to be: the slot is a fixed size, and a
+    picture smaller than it would otherwise sit in the middle of an empty box
+    rather than fill it.  That is not a corner case -- the desktop renders at
+    3x for crisp text, so its slots are three times their on-screen size and
+    most cover art (400x400 GBA boxes, 350x478 FC shots) is smaller than the
+    slot it is drawn into.  The scaled copy is what gets cached, so the cost
+    is paid once per slot, not once per frame.
     """
     from PIL import Image
 
@@ -930,8 +935,8 @@ def fit_bitmap(bitmap: object, width: int, height: int) -> object:
         resample = Image.LANCZOS
 
     image: Image.Image = bitmap  # type: ignore[assignment]
-    scale = min(width / image.width, height / image.height, 1.0)
-    if scale < 1.0:
+    scale = min(width / image.width, height / image.height)
+    if scale != 1.0:
         size = (max(1, round(image.width * scale)), max(1, round(image.height * scale)))
         image = image.resize(size, resample)
     if image.mode != "RGBA":

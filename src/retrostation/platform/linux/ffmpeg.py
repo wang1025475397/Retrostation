@@ -54,10 +54,10 @@ def transcode(source: Path, target: Path, width: int, height: int) -> bool:
         log.debug("ffmpeg fallback writes PNG only, not %s", target.suffix)
         return False
 
-    # min(...) stops a cover smaller than the box from being upscaled, which is
-    # what fit_bitmap() does for the files Pillow can open itself.
-    scale = (f"scale='min({int(width)},iw)':'min({int(height)},ih)'"
-             f":force_original_aspect_ratio=decrease")
+    # Same rule as fit_bitmap(): fit inside the box at the source's own aspect
+    # ratio, upscaling included -- a slot that is larger than the artwork has
+    # to be filled, not left with a border around a small picture.
+    scale = f"scale={int(width)}:{int(height)}:force_original_aspect_ratio=decrease"
     command = [
         FFMPEG, "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
         "-i", str(source),
