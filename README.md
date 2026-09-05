@@ -8,6 +8,10 @@ Linux 掌机**双屏游戏前端**，兼容单屏。基于 SDL2 + Pillow 渲染�
 
 ---
 
+> **30 秒装好**：把发布包里的 `APPS` 文件夹整个拷进 TF 卡根目录的 `Roms/APPS/` 里（得到 `Roms/APPS/Retrostation.sh` 和 `Roms/APPS/Retrostation/`），然后到掌机的 **APPS 菜单**里启动 `Retrostation.sh` —— 就这一步，没有别的。
+>
+> 注意**必须走 APPS 菜单**进入：原厂前端会占用触摸屏与按键，从 SSH 直接启动会失败。
+
 ## 特性
 
 - **真双屏体验**：上屏游戏列表 / 网格 / 封面轮播，下屏视频优先、缺则封面的媒体联动。

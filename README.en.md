@@ -8,6 +8,14 @@ The top screen (DSI-1) is the interactive main view; the bottom screen (DSI-2) i
 
 ---
 
+> **Install in 30 seconds**: copy the `APPS` folder from the release archive into
+> `Roms/APPS/` at the root of your TF card (you end up with `Roms/APPS/Retrostation.sh`
+> and `Roms/APPS/Retrostation/`), then launch `Retrostation.sh` from the handheld's
+> **APPS menu**. That is the whole procedure.
+>
+> It **has** to be started from the APPS menu: the stock frontend owns the touchscreen
+> and the buttons, so starting it over SSH fails.
+
 ## Features
 
 - **True dual-screen experience**: top screen shows the game list / grid / cover-flow; bottom screen prioritizes video and falls back to cover for media linkage.
