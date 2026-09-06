@@ -72,7 +72,6 @@ def available() -> bool:
     return runs(FFMPEG)
 
 
-@functools.lru_cache(maxsize=1)
 def decoder_env() -> dict[str, str]:
     """Environment to spawn the decoder with: the system's own libraries.
 
@@ -90,11 +89,9 @@ def decoder_env() -> dict[str, str]:
     decoder then still reports the muxer we ask for, so a device that really
     does keep its libraries somewhere unusual is left alone.
     """
-    clean = {key: value for key, value in os.environ.items() if key != "LD_LIBRARY_PATH"}
-    return clean if _has_muxer(clean, "rawvideo") else dict(os.environ)
+    return _picked_env("video", "rawvideo")
 
 
-@functools.lru_cache(maxsize=1)
 def audio_env() -> dict[str, str]:
     """Environment for the soundtrack decoder -- same hijack, other half.
 
@@ -104,12 +101,41 @@ def audio_env() -> dict[str, str]:
     and with its stderr discarded that reads as "this clip has no soundtrack",
     which is how previews stayed silent on one device for weeks.
     """
+    return _picked_env("audio", "s16le")
+
+
+#: Decided environments, by role ("video" / "audio"); see :func:`_picked_env`.
+_ENV_CACHE: dict[str, dict[str, str]] = {}
+
+
+def _picked_env(role: str, muxer: str) -> dict[str, str]:
+    """The environment for ``role``, cached once it has been decided.
+
+    Only a *decided* answer is cached.  A probe that could not run -- the
+    machine is busy, most often just after a game has closed -- is not an
+    answer, and caching it used to pin the decoder to the hijacked library
+    path for the rest of the session: every clip afterwards failed with
+    "not a suitable output format".  Undecided, we hand back the clean
+    environment (the one that behaves like a shell) and try again next time.
+    """
+    cached = _ENV_CACHE.get(role)
+    if cached is not None:
+        return cached
     clean = {key: value for key, value in os.environ.items() if key != "LD_LIBRARY_PATH"}
-    return clean if _has_muxer(clean, "s16le") else dict(os.environ)
+    available = _has_muxer(clean, muxer)
+    if available is None:
+        return clean
+    env = clean if available else dict(os.environ)
+    _ENV_CACHE[role] = env
+    return env
 
 
-def _has_muxer(env: dict[str, str], name: str) -> bool:
-    """Whether the decoder under ``env`` lists ``name`` among its muxers."""
+def _has_muxer(env: dict[str, str], name: str) -> bool | None:
+    """Whether the decoder under ``env`` lists ``name`` among its muxers.
+
+    ``None`` when it could not be asked -- see :func:`_picked_env` for why
+    that is not the same as ``False``.
+    """
     try:
         result = subprocess.run(
             [FFMPEG, "-hide_banner", "-loglevel", "error", "-muxers"],
@@ -117,8 +143,10 @@ def _has_muxer(env: dict[str, str], name: str) -> bool:
         )
     except (OSError, subprocess.SubprocessError) as exc:
         log.debug("muxer probe failed: %s", exc)
-        return False
+        return None
     text = result.stdout.decode("utf-8", "replace")
+    if not text.strip():
+        return None
     return any(
         len(parts) > 1 and parts[1] == name
         for parts in (line.split() for line in text.splitlines())

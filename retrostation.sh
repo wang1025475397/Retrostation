@@ -34,21 +34,31 @@ export WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}"
 # place does not -- on a machine where this is already right, nothing here
 # runs.  Every architecture's directory is checked; the glob is what keeps
 # this from being an aarch64-only fix.
-for fontconfig_link in /usr/lib/*/libfontconfig.so.1 \
-                       /usr/lib64/libfontconfig.so.1 \
-                       /usr/lib32/libfontconfig.so.1 \
-                       /usr/lib/libfontconfig.so.1; do
-    [ -e "$fontconfig_link" ] || continue
-    if grep -aq FcWeightFromOpenTypeDouble "$fontconfig_link" 2>/dev/null; then
-        continue
-    fi
-    newest=$(ls -1 "$(dirname "$fontconfig_link")"/libfontconfig.so.1.* 2>/dev/null \
-             | sort -t. -k4 -n | tail -1)
-    if [ -n "$newest" ] && grep -aq FcWeightFromOpenTypeDouble "$newest" 2>/dev/null; then
-        ln -sf "$newest" "$fontconfig_link"
-        echo "retrostation: re-pointed libfontconfig at $(basename "$newest")" >&2
-    fi
-done
+#
+# It has to run before *every* start of the frontend, not just once here:
+# the stock launcher's own game script (RA_launch.sh) re-points the very same
+# link at the old build on its way into a game, so a session that comes back
+# after playing would otherwise find the decoder broken -- ffmpeg dying with
+# "symbol lookup error" and no preview at all -- until the device rebooted.
+fix_fontconfig() {
+    for fontconfig_link in /usr/lib/*/libfontconfig.so.1 \
+                           /usr/lib64/libfontconfig.so.1 \
+                           /usr/lib32/libfontconfig.so.1 \
+                           /usr/lib/libfontconfig.so.1; do
+        [ -e "$fontconfig_link" ] || continue
+        if grep -aq FcWeightFromOpenTypeDouble "$fontconfig_link" 2>/dev/null; then
+            continue
+        fi
+        newest=$(ls -1 "$(dirname "$fontconfig_link")"/libfontconfig.so.1.* 2>/dev/null \
+                 | sort -t. -k4 -n | tail -1)
+        if [ -n "$newest" ] && grep -aq FcWeightFromOpenTypeDouble "$newest" 2>/dev/null; then
+            ln -sf "$newest" "$fontconfig_link"
+            echo "retrostation: re-pointed libfontconfig at $(basename "$newest")" >&2
+        fi
+    done
+}
+
+fix_fontconfig
 
 # Exit-code contract (src/retrostation/main.py):
 #   0  -> the player quit the frontend; stop and hand the screen back.
@@ -94,6 +104,9 @@ rm -f "$LAUNCH_CMD"
 
 crashes=0
 while true; do
+    # Re-applied per start: a game has just been playing, and its launcher
+    # undoes this -- see fix_fontconfig above.
+    fix_fontconfig
     # ``-m`` matters: running main.py by path would break relative imports.
     python3 -u -m retrostation.main --config "$DIR/config.json" >>"$LOG" 2>&1
     code=$?

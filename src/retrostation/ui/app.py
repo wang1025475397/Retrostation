@@ -438,7 +438,12 @@ class App:
                 or self._struct_changed() or not self._same_page()
                 or (self._backdrop_pending
                     and now - self._backdrop_at >= _BACKDROP_DEBOUNCE))
-        blocked = (due and full and not overdue
+        # With an empty cache there is nothing to reuse, so there is nothing to
+        # wait for either: postponing that repaint used to leave the panel
+        # unpainted and the restore below then pasted None, which crashed the
+        # frontend outright -- most often on the first frames after a game,
+        # when the cache has not been built yet but a clip is already playing.
+        blocked = (self._top_cache is not None and due and full and not overdue
                    and next_frame is not None and next_frame < _TOP_DRAW_COST)
 
         painter = self._painters[0]
@@ -484,8 +489,12 @@ class App:
                 self.platform.present(0)
             else:
                 if not top_painted:
-                    painter.canvas.pil_image.paste(self._top_cache)
-                    self._draw_selection(painter, only=self._top_sel)
+                    # A guard rather than decoration: paste() treats a non-image
+                    # as a colour and demands a box, so a missing cache has to
+                    # be caught here and not just in the scheduling above.
+                    if self._top_cache is not None:
+                        painter.canvas.pil_image.paste(self._top_cache)
+                        self._draw_selection(painter, only=self._top_sel)
                 self._draw_detail_strip(painter)
                 self._cache_strip(painter)
                 self._draw_overlays(painter)

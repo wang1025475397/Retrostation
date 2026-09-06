@@ -157,10 +157,13 @@ class _AudioSink:
         self._proc: subprocess.Popen | None = None
         self._lock = threading.Lock()
         self._warned = False
+        #: Set by :meth:`release`; see there for why a write may not reopen.
+        self._released = False
 
     def start(self) -> bool:
         """Open the card; ``False`` when somebody else is holding it."""
         with self._lock:
+            self._released = False
             return self._start_locked()
 
     def write(self, pcm: bytes) -> bool:
@@ -168,13 +171,21 @@ class _AudioSink:
         if not pcm:
             return True
         with self._lock:
+            if self._released:
+                return False
             if self._proc is None and not self._start_locked():
                 return False
             return self._write_locked(pcm)
 
     def release(self) -> None:
-        """Let go of the card -- a game is about to want it."""
+        """Let go of the card -- a game is about to want it.
+
+        Nothing takes it back until :meth:`start` is called again.  Without
+        that, the clip still fading out would reopen ALSA a few milliseconds
+        later and the game would start silent.
+        """
         with self._lock:
+            self._released = True
             self._close_locked()
 
     # -- internals, all with the lock held ------------------------------- #
@@ -508,6 +519,10 @@ class SfxPlayer:
         while True:
             kind = self._queue.get()
             if not self._enabled:
+                continue
+            # start() also clears "released", so blips come back by themselves
+            # once the card is ours again (after a resident game, say).
+            if not sink.start():
                 continue
             sink.write(sfx_pcm(kind, volume=self._volume, rate=self._rate,
                                channels=self._channels))
