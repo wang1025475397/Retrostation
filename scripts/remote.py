@@ -75,7 +75,7 @@ def _sftp_put(sftp, local: Path, remote: str) -> None:
                 continue
             _sftp_put(sftp, child, f"{remote.rstrip('/')}/{child.name}")
         return
-    _sftp_mkdirs(sftp, str(Path(remote).parent))
+    _sftp_mkdirs(sftp, str(PurePosixPath(remote).parent))
     sftp.put(str(local), remote)
     print(f"  <- {local} -> {remote}")
 

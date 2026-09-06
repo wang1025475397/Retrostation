@@ -84,8 +84,22 @@ class PlatformArt:
         return roots
 
     def candidates(self, kind: str, key: str) -> list[Path]:
-        """Every existing file that could hold ``kind`` artwork for ``key``."""
+        """Every existing file that could hold ``kind`` artwork for ``key``.
+
+        A directory named ``"<system> <variant>"`` (``FBNEO ACT``, ``GBA Hank``)
+        ships no artwork of its own, so when the exact key yields nothing we
+        also probe its leading word -- the base system -- matching how
+        :func:`retrostation.data.systems.lookup` resolves the launch core.
+        """
         stem = key.casefold()
+        found = self._probe(kind, stem)
+        if not found:
+            head = key.split()[0] if key.split() else key
+            if head.casefold() != stem:
+                found = self._probe(kind, head.casefold())
+        return found
+
+    def _probe(self, kind: str, stem: str) -> list[Path]:
         found: list[Path] = []
         for directory in self._roots(kind):
             for suffix in _SUFFIXES.get(kind, ()):
@@ -115,7 +129,13 @@ class PlatformArt:
                     for candidate in directory.iterdir():
                         known[candidate.stem.casefold()] = True
             self._known = known
-        return key.casefold() in self._known
+        stem = key.casefold()
+        if stem in self._known:
+            return True
+        # "<system> <variant>" directory with no art of its own: fall back to
+        # the leading word, the same way lookup() resolves its core.
+        head = key.split()[0] if key.split() else key
+        return head.casefold() in self._known
 
     # ------------------------------------------------------------------ #
     # Bitmaps

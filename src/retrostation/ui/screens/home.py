@@ -111,10 +111,26 @@ def _card_art(painter: Painter, art: ArtProvider, tile: Tile,
 
     # Square and centred horizontally: the selected card is wider than the
     # others, and stretching the background to fill it would distort it.
+    art_box = (x + (w - art_side) // 2, y, art_side, art_side)
     background = art.platform_background(tile.key, art_side, art_side)
+    logo = art.platform_logo(tile.key, w - m.u(10), logo_h)
+
     if background is None:
-        background = art.placeholder(tile.key, art_side, art_side)
-    painter.image(background, (x + (w - art_side) // 2, y, art_side, art_side))
+        # No cover: paint a neutral placeholder.  When the platform also ships
+        # no logo there is nothing to identify it by, so write its name
+        # straight onto the cover instead of leaving a blank invalid tile.
+        painter.image(art.placeholder(tile.key, art_side, art_side), art_box)
+        if logo is None:
+            # Dim the gradient behind the name so it stays legible no matter
+            # which hue the deterministic placeholder picked.
+            painter.rounded_rect(art_box, radius=m.u(6), fill=(0, 0, 0, 120))
+            painter.text(
+                (art_box[0] + art_side // 2, art_box[1] + art_side // 2),
+                painter.ellipsize(tile.title, size=14, max_width=art_side - m.u(16)),
+                size=14, fill=COLORS.text, anchor="mm",
+            )
+    else:
+        painter.image(background, art_box)
 
     # The logo band sits in whatever is left below the artwork, vertically
     # centred so the selected card's extra padding is shared above and below.
@@ -122,18 +138,18 @@ def _card_art(painter: Painter, art: ArtProvider, tile: Tile,
     below_h = max(logo_h, (y + h) - below_top)
     band = (x, below_top + (below_h - logo_h) // 2, w, logo_h)
 
-    logo = art.platform_logo(tile.key, w - m.u(10), logo_h)
     if logo is not None:
         painter.image_fit(logo, band)
-        return
-
-    # A handful of platforms ship no logo (RECENT, PORTS, ...).  Name them
-    # rather than leave a blank strip under the artwork.
-    painter.text(
-        (band[0] + w // 2, band[1] + logo_h // 2),
-        painter.ellipsize(tile.title, size=11, max_width=w - m.u(10)),
-        size=11, fill=COLORS.text_dim, anchor="mm",
-    )
+    else:
+        # No logo (RECENT, PORTS, or a platform with no artwork at all): name it
+        # below the art.  When the cover is also missing the name already sits
+        # on the cover placeholder above, but repeating it here keeps the strip
+        # from looking broken.
+        painter.text(
+            (band[0] + w // 2, band[1] + logo_h // 2),
+            painter.ellipsize(tile.title, size=11, max_width=w - m.u(10)),
+            size=11, fill=COLORS.text_dim, anchor="mm",
+        )
 
 
 def _info(painter: Painter, title: str, subtitle: str, right: str) -> None:

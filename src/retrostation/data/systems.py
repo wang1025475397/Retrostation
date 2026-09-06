@@ -226,6 +226,19 @@ SYSTEMS: dict[str, SystemDef] = _build()
 _UNKNOWN = SystemDef(key="", label="Unknown", label_zh="未知", extensions=())
 
 
+def _base_token(key: str) -> str:
+    """Leading word of a ``"<system> <variant>"`` directory name, folded.
+
+    The firmware and users sometimes create directories such as ``FBNEO ACT``
+    or ``GBA Hank`` that are absent from the system table, but their first word
+    *is* the real system (``fbneo`` / ``gba``).  Callers fall back to it so a
+    platform's artwork and launch core resolve to the base system instead of
+    going missing.
+    """
+    head = key.split()[0] if key.split() else key
+    return head.casefold()
+
+
 @lru_cache(maxsize=256)
 def lookup(key: str) -> SystemDef:
     """Definition for ``key``; unknown keys still get a usable default.
@@ -234,8 +247,14 @@ def lookup(key: str) -> SystemDef:
     system's label and order on every frame, and firmware directories are
     UPPER CASE while the table is lower case -- without the cache every one of
     those ~250 calls allocated a fresh ``SystemDef`` through ``replace``.
+
+    When the exact key is unknown, a directory spelled ``"<system> <variant>"``
+    falls back to its leading word (``FBNEO ACT`` -> ``fbneo``), so artwork and
+    the launch core still resolve to the base platform.
     """
     definition = SYSTEMS.get(key) or SYSTEMS.get(key.casefold())
+    if definition is None:
+        definition = SYSTEMS.get(_base_token(key))
     if definition is not None and definition.key:
         if key != definition.key:  # directory uses a different case than the table
             return replace(definition, key=key)

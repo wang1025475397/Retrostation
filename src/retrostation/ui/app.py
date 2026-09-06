@@ -1051,7 +1051,14 @@ class App:
         game.play_count += 1
         game.last_played = _now()
         self.library.save_state(game, Session.system_of(game))
-        self.config.save(Path(self.platform.config_dir) / "config.json")
+        # Best-effort only: on a read-only user partition (fstab
+        # ``errors=remount-ro`` after a reboot) this must not take the whole
+        # frontend down -- the launch command itself goes to /tmp, which is
+        # always writable, so the game still starts.
+        try:
+            self.config.save(Path(self.platform.config_dir) / "config.json")
+        except OSError as exc:
+            log.warning("could not persist config (%s); launching anyway", exc)
 
         log.info("launching %s via %s", game.key, plan.core_label)
         # Save the place first (DESIGN §8.1 step ①): with enough RAM we stay
@@ -1123,7 +1130,14 @@ class App:
 
     def _save_resume(self) -> None:
         """Record where the player is, for the bootstrap to restore."""
-        update_state(self._state_path, resume=self.session.capture_resume())
+        # Best-effort only: on a read-only user partition (fstab
+        # ``errors=remount-ro`` after a reboot) this must not take the frontend
+        # down -- the launch command itself goes to /tmp, so the game still
+        # starts even if we cannot remember where the player was.
+        try:
+            update_state(self._state_path, resume=self.session.capture_resume())
+        except OSError as exc:
+            log.warning("could not persist resume state (%s); continuing", exc)
 
     def _resume_once(self) -> None:
         """Apply a pending resume snapshot once the scan has something to match.
