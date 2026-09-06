@@ -107,6 +107,7 @@ def bundle_entries(root: Path) -> list[tuple[Path, str]]:
     add(root / "README.md", "APPS/Retrostation/README.md")
     add(root / "README.en.md", "APPS/Retrostation/README.en.md")
     add(root / "CHANGELOG.md", "APPS/Retrostation/CHANGELOG.md")
+    add(root / "CHANGELOG.en.md", "APPS/Retrostation/CHANGELOG.en.md")
     return entries
 
 
