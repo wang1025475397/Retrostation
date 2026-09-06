@@ -139,12 +139,30 @@ class PilCanvas(Canvas):
         font: object,
         fill: Sequence[int],
         anchor: str = "la",
+        clip: Sequence[float] | None = None,
     ) -> None:
         patch, dx, dy = self._text_patch(content, font, tuple(fill), anchor)
         # ``alpha_composite``, not ``paste``: paste would multiply the glyph
         # coverage into the alpha channel twice (once as colour, once as mask)
         # and every antialiased edge would come out too dark.
-        self._image.alpha_composite(patch, (round(xy[0]) + dx, round(xy[1]) + dy))
+        left = round(xy[0]) + dx
+        top = round(xy[1]) + dy
+        if clip is None:
+            self._image.alpha_composite(patch, (left, top))
+            return
+        # Composite only the intersection of the run and the window: cropping
+        # first keeps the cost proportional to what is visible, so a marquee
+        # scrolling a 400-character blurb costs the same as a short one.
+        cx, cy, cw, ch = (round(value) for value in clip)
+        x0 = max(left, cx)
+        y0 = max(top, cy)
+        x1 = min(left + patch.width, cx + cw)
+        y1 = min(top + patch.height, cy + ch)
+        if x0 >= x1 or y0 >= y1:
+            return
+        self._image.alpha_composite(
+            patch.crop((x0 - left, y0 - top, x1 - left, y1 - top)), (x0, y0)
+        )
 
     def _gradient(self, w: int, h: int, start, end) -> Image.Image:
         """A cached ``w x h`` horizontal gradient.

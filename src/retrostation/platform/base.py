@@ -231,8 +231,15 @@ class Canvas(abc.ABC):
         font: object,
         fill: Sequence[int],
         anchor: str = "la",
+        clip: Sequence[float] | None = None,
     ) -> None:
-        """Draw ``content`` with its anchor at ``xy`` (PIL anchor syntax)."""
+        """Draw ``content`` with its anchor at ``xy`` (PIL anchor syntax).
+
+        ``clip`` is an optional ``(x, y, w, h)`` window: only the part of the
+        run that falls inside it is drawn.  That is what lets a line wider than
+        its slot scroll through it (a marquee) without painting over whatever
+        sits next door.
+        """
 
     @abc.abstractmethod
     def text_width(self, content: str, *, font: object) -> int:

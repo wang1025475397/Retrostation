@@ -122,6 +122,22 @@ _STRIP_ART_W = 160
 #: Characters of description the strip will even try to fit.  Real blurbs run
 #: to 400+; measuring them costs more than the whole frame budget.
 _STRIP_DESC_CHARS = 60
+#: Characters a scrolling description is allowed to carry.  Longer than the
+#: static cut because the marquee shows all of it eventually, but still capped:
+#: the run is rendered once into a bitmap, and an unbounded one would be a
+#: waste of both memory and the first paint.
+_MARQUEE_DESC_CHARS = 200
+#: Sideways speed of a description that overflows, in reference px per second.
+#: Slow enough to read, fast enough that a long blurb does not take a minute.
+_MARQUEE_SPEED = 30
+#: Blank space between the tail of the text and its head coming round again.
+_MARQUEE_GAP = 48
+#: Speed of the bottom screen's scrolling description, reference px per second.
+#: A line is 19px, so a screenful takes several seconds -- that panel is the
+#: one the player actually reads, unlike the strip's glance-and-go blurb.
+_DESC_SCROLL_SPEED = 16
+#: Seconds a scrolling description rests at each end before turning back.
+_DESC_SCROLL_PAUSE = 1.5
 
 
 class App:
@@ -198,6 +214,17 @@ class App:
         #: Set by :meth:`_handle` when an event changed something the state key
         #: does not cover, e.g. the selected game's favourite flag.
         self._top_dirty = False
+        #: Marquee state for the single-screen description: the text being
+        #: scrolled, how far it has travelled, the frame clock it was last
+        #: advanced on, and whether the last paint actually needed to scroll.
+        self._marquee_text = ""
+        self._marquee_offset = 0.0
+        self._marquee_at = 0.0
+        self._marquee_active = False
+        #: Current frame's timestamp; the marquee advances off it.
+        self._now = 0.0
+        #: Vertical scroll of the bottom screen's description (dual screen).
+        self._desc_scroll = bottom.DescScroll()
         #: Where the player was standing.  A game runs as a *different* process
         #: and the bootstrap starts us fresh afterwards, so the only way back
         #: is through this file (DESIGN §8.2).
@@ -420,6 +447,7 @@ class App:
         # game usually means a different fanart, and re-decoding it on every
         # cursor move is what made fast scrolling stutter.  Refresh it after a
         # pause (see the ``full`` test below) instead of on every move.
+        self._now = now
         bk = self._backdrop_key()
         if bk != self._top_backdrop:
             self._backdrop_pending = True
@@ -482,7 +510,10 @@ class App:
             video_due = self._video.frame_seq != self._bottom_seq
             state_ready = (self._strip_state_pending
                            and now - self._strip_state_at >= _STRIP_DEBOUNCE)
-            strip_due = video_due or state_ready
+            # A scrolling description is animation: the strip has to be
+            # repainted every frame while one is running, or the blurb would
+            # sit frozen at whatever offset the last repaint happened to use.
+            strip_due = video_due or state_ready or self._marquee_active
             if top_painted and not strip_due:
                 self._draw_overlays(painter)
                 status_bar(painter, dual=False)
@@ -512,6 +543,7 @@ class App:
             self._draw_overlays(painter)
             status_bar(painter, dual=True)
             self.platform.present(0)
+        self._advance_desc_scroll(now)
         if self._bottom_due(now, key):
             self._draw_bottom(self._painters[1])
             self.platform.present(1)
@@ -582,7 +614,9 @@ class App:
         if state_ready:
             self._bottom_state_pending = False
             return True
-        return False
+        # A scrolling description is animation: the panel has to come back
+        # every frame, not only when its content changes.
+        return self._desc_scroll.active
 
     def _draw_top(self, painter: Painter, highlight: bool = True) -> None:
         """The top panel's content, painted *without* the selection highlight.
@@ -889,10 +923,6 @@ class App:
             (game.display_name, 14, COLORS.text),
             (f"{meta.system_label} · {meta.publisher}", 11, COLORS.text_dim),
             (f"{meta.genre} · {meta.players} · {meta.release}", 11, COLORS.text_dim),
-            # The strip is ~426px wide at 11px, so roughly 38 characters fit.
-            # Hand ellipsize a string of that order rather than a whole blurb:
-            # even a binary search has to measure what it is given.
-            ((meta.description or "")[:_STRIP_DESC_CHARS], 11, COLORS.text_dim),
         )
         for index, (text, size, colour) in enumerate(lines):
             painter.text(
@@ -900,9 +930,59 @@ class App:
                 painter.ellipsize(text, size=size, max_width=text_w),
                 size=size, fill=colour, anchor="lm",
             )
+        # The blurb gets the last line and scrolls when it does not fit, instead
+        # of being cut off mid-sentence (see :meth:`_draw_marquee`).
+        self._draw_marquee(painter, (meta.description or "")[:_MARQUEE_DESC_CHARS],
+                           text_x, y + m.u(24) + 3 * m.u(25), text_w)
         if game.favorite:
             painter.text((x + w - m.u(12), y + m.u(24)), "★", size=13,
                          fill=COLORS.accent, anchor="rm")
+
+    def _draw_marquee(self, painter: Painter, text: str, x: int, y: int,
+                      max_width: int) -> None:
+        """One line of text, scrolled sideways when it is wider than its slot.
+
+        Blurbs run to hundreds of characters and the strip shows a few dozen,
+        so they used to be truncated mid-sentence.  Scrolling is only ever
+        entered for a line that actually overflows -- a short blurb is drawn
+        statically and costs nothing extra.
+
+        The run is drawn twice, a ``span`` apart, so the tail leaves the window
+        as the head comes back in; both draws are clipped to the slot, which is
+        what keeps them off the artwork next door.
+        """
+        size = 11
+        self._marquee_active = False
+        if not text:
+            self._marquee_text = ""
+            return
+        if painter.text_width(text, size=size) <= max_width:
+            self._marquee_text = ""
+            painter.text((x, y), text, size=size, fill=COLORS.text_dim, anchor="lm")
+            return
+
+        m = painter.metrics
+        tall = painter.text_height(text, size=size) or m.u(14)
+        window = (x, y - tall, max_width, tall * 2)
+        # Restart on a new blurb: an offset carried over from the previous game
+        # would show this one already halfway through.
+        if text != self._marquee_text:
+            self._marquee_text = text
+            self._marquee_offset = 0.0
+        else:
+            step = max(0.0, min(0.25, self._now - self._marquee_at)) if self._marquee_at else 0.0
+            self._marquee_offset += step * m.u(_MARQUEE_SPEED)
+        self._marquee_at = self._now
+
+        span = painter.text_width(text, size=size) + m.u(_MARQUEE_GAP)
+        offset = self._marquee_offset % span if span else 0.0
+        # Erase the slot first: unlike the rest of the strip, this line is
+        # repainted on its own while the panel around it is reused.
+        painter.rect(window, fill=COLORS.panel)
+        for shift in (x - offset, x - offset + span):
+            painter.text((shift, y), text, size=size, fill=COLORS.text_dim,
+                         anchor="lm", clip=window)
+        self._marquee_active = True
 
     def _cache_strip(self, painter: Painter) -> None:
         """Copy the strip just drawn into the cached panel.
@@ -964,7 +1044,40 @@ class App:
             clip_pending=(game is not None and not searching and self._video.is_pending(game.key)),
             system_desc=self._system_desc(key),
             game_count=game_count,
+            desc_scroll=self._desc_scroll,
         )
+
+    def _advance_desc_scroll(self, now: float) -> None:
+        """Scroll a description taller than its window, down and then back up.
+
+        Ping-pong with a pause at each end rather than a loop: a blurb that
+        jumped from its last line straight back to its first is unreadable at
+        both ends, and the bottom screen is the panel the player reads.
+
+        How far there is to go comes from the panel itself (:class:`DescScroll`
+        is filled in while drawing), so no layout knowledge is duplicated here.
+        """
+        state = self._desc_scroll
+        if not state.active or state.overflow <= 0:
+            state.offset = 0.0
+            state.direction = 1
+            state.wait_until = 0.0
+            state.at = now
+            return
+        step = max(0.0, min(0.25, now - state.at)) if state.at else 0.0
+        state.at = now
+        if now < state.wait_until:
+            return
+        speed = self._painters[-1].metrics.u(_DESC_SCROLL_SPEED)
+        state.offset += step * state.direction * speed
+        if state.offset >= state.overflow:
+            state.offset = state.overflow
+            state.direction = -1
+            state.wait_until = now + _DESC_SCROLL_PAUSE
+        elif state.offset <= 0:
+            state.offset = 0.0
+            state.direction = 1
+            state.wait_until = now + _DESC_SCROLL_PAUSE
 
     # ------------------------------------------------------------------ #
     # View models

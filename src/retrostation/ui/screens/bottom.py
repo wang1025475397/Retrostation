@@ -37,11 +37,40 @@ class Meta:
     favorite: bool
 
 
+#: Lines the description block shows at once.
+_DESC_VISIBLE_LINES = 4
+#: Lines it will wrap to at most.  Past this the rest of a blurb is not worth
+#: the bitmap: the panel is a summary, not a reader.
+_DESC_MAX_LINES = 16
+
+
+@dataclass
+class DescScroll:
+    """Vertical scroll state for the description block.
+
+    Owned by the app -- it has to survive frames -- but *filled in* by
+    :func:`draw`, which is the only place that knows how many lines the blurb
+    wraps to and how tall the window is.  The app advances :attr:`offset` and
+    nothing else; the rest is the panel reporting what it drew.
+    """
+
+    offset: float = 0.0
+    #: Pixels the text runs past the window; 0 when it fits.
+    overflow: float = 0.0
+    #: Whether the last paint actually had to scroll.
+    active: bool = False
+    #: Animation bookkeeping, maintained by the app.
+    direction: int = 1
+    at: float = 0.0
+    wait_until: float = 0.0
+
+
 def draw(painter: Painter, art: ArtProvider, game: Game | None, meta: Meta | None, *,
          key_label: str, hints: list[tuple[str, str]],
          video_frame=None, video_progress: float | None = None,
          clip_pending: bool = False, system_desc: str = "",
-         game_count: int | None = None) -> None:
+         game_count: int | None = None,
+         desc_scroll: DescScroll | None = None) -> None:
     m = painter.metrics
     painter.clear()
     _title_bar(painter, meta, key_label, game_count)
@@ -68,7 +97,8 @@ def draw(painter: Painter, art: ArtProvider, game: Game | None, meta: Meta | Non
     _media(painter, art, game, media_box, video_frame, video_progress, clip_pending)
     logo_banner(painter, art, game, (m.u(12), top + m.media_h + m.u(8), m.media_w, m.logo_strip_h))
 
-    _meta(painter, meta, (m.u(12) + m.media_w + m.body_gap, top, m.meta_w, m.bottom_body_h()))
+    _meta(painter, meta, (m.u(12) + m.media_w + m.body_gap, top, m.meta_w, m.bottom_body_h()),
+          desc_scroll)
     _hints(painter, hints)
 
 
@@ -140,7 +170,8 @@ def progress_bar(painter: Painter, x: int, y: int, w: int, h: int,
     painter.rect((x, y, filled, h), fill=COLORS.accent)
 
 
-def _meta(painter: Painter, meta: Meta, box: tuple[int, int, int, int]) -> None:
+def _meta(painter: Painter, meta: Meta, box: tuple[int, int, int, int],
+          desc_scroll: DescScroll | None = None) -> None:
     m = painter.metrics
     x, _, w, _ = box
     inner = w - m.u(4)
@@ -179,9 +210,29 @@ def _meta(painter: Painter, meta: Meta, box: tuple[int, int, int, int]) -> None:
     painter.text((x, y), painter.translator("bottom.desc").upper(), size=10,
                  fill=(106, 106, 114, 255), anchor="la")
     y += m.u(15)
-    for line in painter.wrap_text(meta.description, size=12, max_width=inner, max_lines=4):
-        painter.text((x, y), line, size=12, fill=COLORS.text_dim, anchor="la")
-        y += m.u(19)
+    lines = painter.wrap_text(meta.description, size=12, max_width=inner,
+                              max_lines=_DESC_MAX_LINES)
+    if desc_scroll is not None:
+        desc_scroll.active = False
+        desc_scroll.overflow = 0.0
+    if desc_scroll is None or len(lines) <= _DESC_VISIBLE_LINES:
+        for line in lines:
+            painter.text((x, y), line, size=12, fill=COLORS.text_dim, anchor="la")
+            y += m.u(19)
+    else:
+        # A blurb taller than its window scrolls through it instead of being
+        # cut off.  Clipped to the window, so a line on its way out does not
+        # paint over the rows below.
+        step = m.u(19)
+        window_h = _DESC_VISIBLE_LINES * step
+        window = (x, y, inner, window_h)
+        desc_scroll.overflow = max(0.0, len(lines) * step - window_h)
+        desc_scroll.active = True
+        offset = max(0.0, min(desc_scroll.overflow, desc_scroll.offset))
+        for index, line in enumerate(lines):
+            painter.text((x, y + index * step - offset), line, size=12,
+                         fill=COLORS.text_dim, anchor="la", clip=window)
+        y += window_h
 
     y = _divider(painter, x, y + m.u(4), inner)
     painter.text((x, y), meta.play_count, size=12, fill=COLORS.accent, anchor="la")

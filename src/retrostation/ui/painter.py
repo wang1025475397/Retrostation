@@ -78,8 +78,11 @@ class Painter:
     def ellipse(self, box: Sequence[float], *, fill=None, outline=None, width: int = 1) -> None:
         self.canvas.ellipse(box, fill=fill, outline=outline, width=width)
 
-    def text(self, xy: Sequence[float], content: str, *, size: int, fill, anchor: str = "la") -> None:
-        self.canvas.text(xy, content, font=self.font(size), fill=fill, anchor=anchor)
+    def text(self, xy: Sequence[float], content: str, *, size: int, fill, anchor: str = "la",
+             clip: Sequence[float] | None = None) -> None:
+        """Draw ``content``; ``clip`` is an optional ``(x, y, w, h)`` window."""
+        self.canvas.text(xy, content, font=self.font(size), fill=fill, anchor=anchor,
+                         clip=clip)
 
     def text_width(self, content: str, *, size: int) -> int:
         return self.canvas.text_width(content, font=self.font(size))
