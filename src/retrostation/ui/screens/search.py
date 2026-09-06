@@ -9,8 +9,9 @@ painter, so covers and the selection style stay consistent with browsing.
 from __future__ import annotations
 
 from ...core.theme import COLORS
+from ...data.systems import display_name
 from ..painter import Painter
-from ..session import SEARCH_CODES, SEARCH_COLS, Session
+from ..session import SEARCH_CODES, SEARCH_COLS, Session, VIEW_PLATFORMS
 from . import games
 
 #: Overlay that lets the game list show through, like the dialogs do.
@@ -40,10 +41,20 @@ def draw(painter: Painter, art, session: Session) -> None:
     results = session.search_results()
     rpp = max(1, (kb_top - m.u(8) - m.content_top) // m.row_step)
     if results:
+        # On the platform overview the search spans the whole library, so each
+        # hit needs its platform name to be tellable apart; inside a platform
+        # every result shares the platform and the second line would be noise.
+        if session.view == VIEW_PLATFORMS:
+            lang = painter.translator.language
+            def sublabel_for(game):
+                return display_name(session.system_of(game), lang)
+        else:
+            sublabel_for = None
         games.draw_list(
             painter, art, results, session.search_result_index,
             rows_per_page=rpp,
             highlight=session.search_focus == "results",
+            sublabel_for=sublabel_for,
         )
         games.draw_scrollbar(
             painter, session.search_result_index, len(results), rpp,

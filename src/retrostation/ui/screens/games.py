@@ -212,11 +212,14 @@ def draw_list(
     rows_per_page: int,
     highlight: bool = True,
     only: int | None = None,
+    sublabel_for: Callable[[Game], str] | None = None,
 ) -> int:
     """Returns the first visible row, which the app keeps across frames.
 
     ``highlight=False`` paints every row unselected (so the panel can be cached
     and the selection repainted on top later); ``only`` repaints just one row.
+    ``sublabel_for`` adds a second line under each name (used for the platform
+    a result belongs to on a global search); pass ``None`` for a single line.
     """
     m = painter.metrics
     row_step = m.row_step
@@ -229,7 +232,8 @@ def draw_list(
         y = m.content_top + m.u(8) + row * row_step
         selected = highlight and position == index
         _row(painter, art, game, (m.u(8), y, m.width - m.u(24), m.row_h), selected=selected,
-             position=position, total=len(games))
+             position=position, total=len(games),
+             sublabel=sublabel_for(game) if sublabel_for else None)
 
     return first
 
@@ -243,6 +247,7 @@ def _row(
     selected: bool,
     position: int,
     total: int,
+    sublabel: str | None = None,
 ) -> None:
     m = painter.metrics
     x, y, w, h = box
@@ -262,31 +267,46 @@ def _row(
            prefer_logo=True)
 
     text_x = x + thumb_w + m.u(10)
-    max_name_w = w - thumb_h - m.u(150)
+    center = y + h // 2
+    if sublabel:
+        # Two lines: the name sits above centre, the platform label below it.
+        name_y = center - m.u(7)
+        sub_y = center + m.u(9)
+        max_name_w = w - thumb_w - m.u(150)
+    else:
+        name_y = center
+        sub_y = center
+        max_name_w = w - thumb_h - m.u(150)
     name = painter.ellipsize(game.display_name, size=15, max_width=max_name_w)
     painter.text(
-        (text_x, y + h // 2),
+        (text_x, name_y),
         name,
         size=15, fill=name_color, anchor="lm",
     )
+    if sublabel:
+        painter.text(
+            (text_x, sub_y),
+            painter.ellipsize(sublabel, size=10, max_width=w - thumb_w - m.u(60)),
+            size=10, fill=meta_color, anchor="lm",
+        )
     if game.hidden:
         _hidden_badge(painter, text_x + painter.text_width(name, size=15) + m.u(6),
-                      y + h // 2 - m.u(7))
+                      name_y - m.u(7))
 
     meta_x = x + w - m.u(46)
     if game.favorite:
-        painter.text((meta_x, y + h // 2), _STAR, size=14, fill=(122, 82, 0, 255) if selected else COLORS.accent,
+        painter.text((meta_x, center), _STAR, size=14, fill=(122, 82, 0, 255) if selected else COLORS.accent,
                      anchor="rm")
     else:
         genre = game.genres[0] if game.genres else ""
         painter.text(
-            (meta_x, y + h // 2),
+            (meta_x, center),
             painter.ellipsize(genre, size=11, max_width=m.u(90)),
             size=11, fill=meta_color, anchor="rm",
         )
 
     painter.text(
-        (x + w - m.u(8), y + h // 2),
+        (x + w - m.u(8), center),
         f"{position + 1}/{total}",
         size=11, fill=index_color, anchor="rm",
     )

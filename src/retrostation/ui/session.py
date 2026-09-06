@@ -203,6 +203,9 @@ class Session:
     search_origin: str = ""
     #: ``(text, results)`` -- filtering re-runs only when the query changed.
     _search_cache: tuple[str, list] | None = field(default=None, init=False, repr=False)
+    #: The game list the search filters -- built once when the dialog opens so
+    #: every keystroke stays instant.  ``None`` until the dialog is open.
+    _search_games: list | None = field(default=None, init=False, repr=False)
 
     #: Set when a settings row changed something that outlives the dialog: the
     #: app applies it (palette, backlight) and writes ``config.json``.  A
@@ -1015,19 +1018,30 @@ class Session:
     # -- search (SELECT) ---------------------------------------------------- #
 
     def _open_search(self) -> Outcome:
-        """Search the context the player is looking at: the whole library from
-        an aggregate page, one system's games from inside it."""
+        """Search the context the player is looking at.
+
+        From the platform overview the search spans the *whole* library
+        (global): the highlighted platform there is just a cursor, not a
+        filter, so scoping to it would hide every other system's matches.
+        Inside a platform's game list the search stays scoped to that system.
+        The list is built once here -- while the player expects a beat of work
+        -- so each keystroke filters a ready list instead of re-walking the
+        library and freezing the UI for seconds.
+        """
         self.search_origin = self.current_system_key()
         self.search_text = ""
         self.search_kb = 0
         self.search_focus = "kb"
         self.search_result_index = 0
         self._search_cache = None
+        if self.view == VIEW_PLATFORMS:
+            games = list(self.library.aggregate("ALL"))
+        else:
+            games = self.games()
+        if not self.config.show_hidden:
+            games = [game for game in games if not game.hidden]
+        self._search_games = games
         self.modal = MODAL_SEARCH
-        # Build the game list now, while the player expects a beat of work:
-        # the first keystroke then filters a ready list instead of freezing
-        # mid-typing on a cold library.
-        self.games()
         return Outcome(redraw=True)
 
     def _close_search(self) -> None:
@@ -1036,6 +1050,7 @@ class Session:
         self.search_focus = "kb"
         self.search_result_index = 0
         self._search_cache = None
+        self._search_games = None
 
     def search_results(self) -> list[Game]:
         """Games matching the query, prefix hits before containment hits."""
@@ -1047,12 +1062,13 @@ class Session:
         query = self.search_text.strip().upper()
         if not query:
             return []
-        # The list the player is already looking at -- loaded and cached, since
-        # it is the page the search was opened from.  Filtering that in-memory
-        # list keeps every keystroke instant; pulling a fresh aggregate here
-        # instead re-walked every system's metadata on the first character and
-        # froze the UI for seconds.
-        games = self.games()
+        # ``_search_games`` was built when the dialog opened (see
+        # :meth:`_open_search`) -- the whole library from the overview, the
+        # current system's games from inside one.  Filtering that ready list
+        # keeps every keystroke instant; rebuilding an aggregate here would
+        # re-walk every system's metadata on the first character and freeze the
+        # UI for seconds.
+        games = self._search_games or []
         scored: list[tuple[int, str, Game]] = []
         for game in games:
             rank = _search_rank(game, query, self.config.search_by)
