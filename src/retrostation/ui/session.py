@@ -120,7 +120,7 @@ SORTS = ("name", "play", "recent")
 #: stage, and the restart happens when A commits.  "hide_game" is an action
 #: and stays on A only.
 _CYCLING_ROWS = frozenset(
-    {"screen", "card", "layout", "bvideo", "video_sound", "sort",
+    {"screen", "card", "layout", "bvideo", "video_sound", "sfx", "sort",
      "show_hidden", "search_by", "theme", "variant", "language", "status_bar",
      "tcache", "autostart"}
 )
@@ -832,6 +832,8 @@ class Session:
                 self.config.language = "auto"
         elif key == "video_sound":
             self.config.video_sound = not self.config.video_sound
+        elif key == "sfx":
+            self.config.sfx = not self.config.sfx
         elif key == "brightness":
             self._step_brightness(BRIGHTNESS_STEP)
         elif key == "status_bar":
@@ -858,6 +860,10 @@ class Session:
         elif key == "video_volume":
             value = max(0, min(100, int(self.config.video_volume) + direction * self._VOLUME_STEP))
             self.config.video_volume = value
+            self.notify(self.translator("toast.volume", value=value))
+        elif key == "sfx_volume":
+            value = max(0, min(100, int(self.config.sfx_volume) + direction * self._VOLUME_STEP))
+            self.config.sfx_volume = value
             self.notify(self.translator("toast.volume", value=value))
         elif key in _CYCLING_ROWS:
             self._toggle_menu_row(key, direction)
@@ -933,6 +939,13 @@ class Session:
              self.translator("value.on" if config.video_sound else "value.off")),
             ("video_volume", self.translator("menu.video_volume"),
              f"{int(config.video_volume)}"),
+            # Button sounds sit right below the clip's own pair: both are
+            # "does this thing make noise" and a player looking for one is
+            # looking for the other.
+            ("sfx", self.translator("menu.sfx"),
+             self.translator("value.on" if config.sfx else "value.off")),
+            ("sfx_volume", self.translator("menu.sfx_volume"),
+             f"{int(config.sfx_volume)}"),
             ("sort", self.translator("menu.sort"), self.translator(f"value.sort_{self.sort}")),
             ("show_hidden", self.translator("menu.show_hidden"),
              self.translator("value.on" if config.show_hidden else "value.off")),

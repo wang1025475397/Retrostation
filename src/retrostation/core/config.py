@@ -141,6 +141,13 @@ class Config:
     #: Preview volume, 0-100.  Deliberately moderate: a game clip at full
     #: scale next to a handheld speaker is startling.
     video_volume: int = 70
+    #: Click on every button press.  On by default -- a handheld that answers
+    #: nothing feels broken -- but it costs nothing to turn off, and a device
+    #: whose card is held by something else simply stays silent.
+    sfx: bool = True
+    #: Button volume, 0-100.  Lower than the clip's: these fire on every
+    #: keypress, so they are meant to be felt more than heard.
+    sfx_volume: int = 45
 
     # metadata ------------------------------------------------------------ #
     metadata: MetadataConfig = field(default_factory=MetadataConfig)
@@ -248,6 +255,8 @@ class Config:
             raise ConfigError("config.video_fps must be positive")
         if not 0 <= self.video_volume <= 100:
             raise ConfigError("config.video_volume must be between 0 and 100")
+        if not 0 <= self.sfx_volume <= 100:
+            raise ConfigError("config.sfx_volume must be between 0 and 100")
         if len(self.video_size) != 2 or any(s <= 0 for s in self.video_size):
             raise ConfigError("config.video_size must be [width, height] with positive values")
         if self.bottom_refresh_ms < 0:

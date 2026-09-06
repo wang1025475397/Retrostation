@@ -368,8 +368,13 @@ class VideoPlayer:
         try:
             audio = self._platform.open_audio_pipe(path, volume=self._settings.volume)
         except Exception:  # noqa: BLE001 - silence is an acceptable outcome
-            log.debug("no audio for %s", path, exc_info=True)
+            # Warning, not debug: this branch used to be invisible, so a device
+            # on which sound never worked looked exactly like one where the
+            # clips simply had no soundtrack.
+            log.warning("no audio for %s", path, exc_info=True)
             return
+        if audio is None:
+            log.warning("no soundtrack for %s", path)
         with self._lock:
             if (self._generation == generation and not self._closed
                     and self._current is not None):

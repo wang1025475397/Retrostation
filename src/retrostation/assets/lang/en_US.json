@@ -78,6 +78,8 @@
   "menu.about": "About",
   "menu.video_sound": "Preview sound",
   "menu.video_volume": "Preview volume",
+  "menu.sfx": "Button sounds",
+  "menu.sfx_volume": "Button volume",
   "menu.tcache": "Thumbnail cache",
   "menu.clear_cache": "Clear image cache",
   "toast.volume": "Volume {value}",

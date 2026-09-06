@@ -543,6 +543,19 @@ class Platform(abc.ABC):
         """
         return None
 
+    def play_sfx(self, kind: str) -> None:
+        """Sound a button press.  Silent by default -- see :meth:`open_audio_pipe`."""
+
+    def configure_sfx(self, *, enabled: bool, volume: float) -> None:
+        """Apply the button-sound settings.  No-op where there is no sound."""
+
+    def release_sfx(self) -> None:
+        """Give up the sound card so something else can have it.
+
+        Called before a game starts: a blip player still holding ALSA would
+        leave the emulator silent.
+        """
+
     @abc.abstractmethod
     def shutdown(self) -> None:
         """Release display/input resources before handing over to a game."""

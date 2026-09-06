@@ -77,6 +77,8 @@
   "menu.about": "关于",
   "menu.video_sound": "预览声音",
   "menu.video_volume": "预览音量",
+  "menu.sfx": "按键音效",
+  "menu.sfx_volume": "按键音量",
   "menu.tcache": "缩略图缓存",
   "menu.clear_cache": "清空图片缓存",
   "toast.volume": "音量 {value}",

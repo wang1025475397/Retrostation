@@ -94,6 +94,20 @@ def decoder_env() -> dict[str, str]:
     return clean if _has_muxer(clean, "rawvideo") else dict(os.environ)
 
 
+@functools.lru_cache(maxsize=1)
+def audio_env() -> dict[str, str]:
+    """Environment for the soundtrack decoder -- same hijack, other half.
+
+    :func:`decoder_env` exists because the stock launcher's library path hides
+    ``rawvideo``.  The very same cut-down libavformat has no ``s16le`` either,
+    so a decoder spawned the naive way dies the instant it is asked for PCM --
+    and with its stderr discarded that reads as "this clip has no soundtrack",
+    which is how previews stayed silent on one device for weeks.
+    """
+    clean = {key: value for key, value in os.environ.items() if key != "LD_LIBRARY_PATH"}
+    return clean if _has_muxer(clean, "s16le") else dict(os.environ)
+
+
 def _has_muxer(env: dict[str, str], name: str) -> bool:
     """Whether the decoder under ``env`` lists ``name`` among its muxers."""
     try:

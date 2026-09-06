@@ -145,6 +145,11 @@ class LinuxPlatform(Platform):
         self._display: SDLDisplay | None = None
         self._canvases: list[Canvas] = []
         self._input = EvdevInput(input_device, keymap=keymap)  # type: ignore[arg-type]
+        # Button blips, built on first use: SfxPlayer starts a thread and would
+        # otherwise reach for a sound card during a headless scan or screenshot.
+        self._sfx: object | None = None
+        self._sfx_enabled = True
+        self._sfx_volume = 0.6
 
     # -- display ---------------------------------------------------------- #
 
@@ -302,13 +307,50 @@ class LinuxPlatform(Platform):
         from .audio import AlsaAudioPipe, available
 
         if not available():
-            log.debug("aplay/ffmpeg not available; preview stays silent")
+            # Warning, not debug: a preview that is silently muted is
+            # indistinguishable from one with no soundtrack, and that hid a
+            # real fault on one device for a long time.
+            log.warning("aplay/ffmpeg not found; preview stays silent")
             return None
+        # No handing over: blips and the soundtrack share one player
+        # (see ``audio._AudioSink``), so there is nothing to win back.
         try:
-            return AlsaAudioPipe(path, volume=volume)
+            pipe = AlsaAudioPipe(path, volume=volume)
         except (OSError, ValueError) as exc:
             log.warning("cannot play audio for %s: %s", path, exc)
             return None
+        log.info("soundtrack on for %s", path.name)
+        return pipe
+
+    def play_sfx(self, kind: str) -> None:
+        """Click for a button press; silent when the card cannot be had.
+
+        Its own player, not the clip's: clips only start once a selection has
+        rested, so a button being pressed and a clip sounding do not overlap in
+        practice -- and riding the clip's stream would add its buffering to
+        every click.
+        """
+        if not self._sfx_enabled:
+            return
+        if self._sfx is None:
+            from .audio import SfxPlayer
+
+            self._sfx = SfxPlayer(volume=self._sfx_volume)
+        self._sfx.play(kind)
+
+    def configure_sfx(self, *, enabled: bool, volume: float) -> None:
+        """Apply the settings row; blips are off until the first call."""
+        self._sfx_enabled = enabled
+        self._sfx_volume = max(0.0, min(1.0, float(volume)))
+        if self._sfx is not None:
+            self._sfx.configure(enabled=enabled, volume=self._sfx_volume)
+        if not enabled and self._sfx is not None:
+            self._sfx.release()
+
+    def release_sfx(self) -> None:
+        """Let go of the card: a game is about to want it."""
+        if self._sfx is not None:
+            self._sfx.release()
 
     def load_metrics(self, index: int = 0) -> object:
         """Convenience helper for building :class:`Metrics` for a canvas."""
@@ -324,6 +366,10 @@ class LinuxPlatform(Platform):
         """Nothing to restore: we come back as a fresh process by design."""
 
     def shutdown(self) -> None:
+        # Hand the sound card back before anything else: it is exclusive, and
+        # the shared player would otherwise still hold it when the stock menu
+        # comes back -- which is what plays the sounds from there on.
+        self.release_sfx()
         if self._display is not None:
             self._display.close()
             self._display = None

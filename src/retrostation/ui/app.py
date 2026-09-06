@@ -86,6 +86,24 @@ _POLL_SLICE = 0.008
 #: it delays the game.  The spinner animates for this whole window.
 _LAUNCH_SPIN_SECONDS = 0.9
 _SPIN_FRAME = 0.05
+#: Which blip each button makes.  Only the buttons that move or commit
+#: something answer: the volume rocker already changes something audible, and
+#: typing a query is confirmed by the results appearing.
+_SFX_FOR_ACTION = {
+    InputAction.UP: "move",
+    InputAction.DOWN: "move",
+    InputAction.LEFT: "move",
+    InputAction.RIGHT: "move",
+    InputAction.L1: "move",
+    InputAction.R1: "move",
+    InputAction.X: "move",
+    InputAction.A: "confirm",
+    InputAction.START: "confirm",
+    InputAction.Y: "confirm",
+    InputAction.SEARCH: "confirm",
+    InputAction.B: "back",
+    InputAction.MENU: "back",
+}
 #: Cursor moves repaint only the selection highlight (~3 ms).  Refreshing the
 #: game's backdrop (a synchronous fanart decode) on every move is what made fast
 #: scrolling stutter, so the backdrop is deferred until the selection rests for
@@ -206,6 +224,9 @@ class App:
         self._painters[0].single = not dual
         # Backlight is saved per panel; only the platform knows how to set it.
         self._apply_brightness()
+        # Button sounds: the platform owns the player, and it needs the
+        # setting before the first press rather than after the first change.
+        self._apply_sfx()
 
         # Decode at the size the media box actually draws (no per-frame resize).
         # One screen has no bottom panel, so the clip plays in the detail
@@ -297,6 +318,7 @@ class App:
     # ------------------------------------------------------------------ #
 
     def _handle(self, event: InputEvent) -> None:
+        self._blip(event)
         outcome = self.session.handle(event)
         if outcome.quit:
             self._running = False
@@ -318,6 +340,25 @@ class App:
 
     def _notify(self, message: str) -> None:
         self.session.notify(message)
+
+    def _blip(self, event: InputEvent) -> None:
+        """Click for a press -- the UI answering back that it heard you.
+
+        Only real presses: auto-repeat would turn a held direction into a
+        machine-gun of clicks, and releases are not actions.
+        """
+        if event.kind is not InputKind.PRESS or not self.config.sfx:
+            return
+        kind = _SFX_FOR_ACTION.get(event.action)
+        if kind is not None:
+            self.platform.play_sfx(kind)
+
+    def _apply_sfx(self) -> None:
+        """Push the button-sound settings down to the platform."""
+        self.platform.configure_sfx(
+            enabled=self.config.sfx,
+            volume=max(0.0, min(1.0, self.config.sfx_volume / 100.0)),
+        )
 
     # ------------------------------------------------------------------ #
     # Drawing
@@ -1049,6 +1090,10 @@ class App:
             self.session.notify(str(exc))
             return
 
+        # The emulator wants the sound card next: a blip player still holding
+        # ALSA would leave the game silent.
+        self.platform.release_sfx()
+
         game.play_count += 1
         game.last_played = _now()
         self.library.save_state(game, Session.system_of(game))
@@ -1188,6 +1233,7 @@ class App:
             sound=self.config.video_sound,
             volume=max(0.0, min(1.0, self.config.video_volume / 100.0)),
         )
+        self._apply_sfx()
         # Boot autostart: only the flag file flips; the firmware hook was
         # patched idempotently the first time it was enabled, and is left alone
         # on disable -- so turning it off never rewrites the firmware script.
