@@ -31,6 +31,10 @@ class Tile:
     key: str
     title: str
     subtitle: str
+    #: Text after the first space of a ``"<system> <variant>"`` directory
+    #: (``Hack`` for ``GBA Hack``).  Empty for a plain system: those cards look
+    #: exactly like their key, so there is nothing to disambiguate.
+    variant: str = ""
 
 
 def draw(
@@ -132,6 +136,11 @@ def _card_art(painter: Painter, art: ArtProvider, tile: Tile,
     else:
         painter.image(background, art_box)
 
+    # The cover is the base system's, so a variant directory would be pixel
+    # identical to the platform it borrows from without this tag.
+    if tile.variant:
+        _variant_badge(painter, art_box, tile.variant)
+
     # The logo band sits in whatever is left below the artwork, vertically
     # centred so the selected card's extra padding is shared above and below.
     below_top = y + art_side
@@ -150,6 +159,26 @@ def _card_art(painter: Painter, art: ArtProvider, tile: Tile,
             painter.ellipsize(tile.title, size=11, max_width=w - m.u(10)),
             size=11, fill=COLORS.text_dim, anchor="mm",
         )
+
+
+def _variant_badge(painter: Painter, art_box: tuple[int, int, int, int], text: str) -> None:
+    """Tag a borrowed cover with the variant's own name, top-right corner.
+
+    A translucent plate keeps the label readable on a light cover as well as a
+    dark one; the text is upper-cased because these suffixes are short tags
+    (``HACK``, ``ACT``) rather than words.
+    """
+    m = painter.metrics
+    label = text.upper()
+    size = 10
+    pad_x, pad_y = m.u(4), m.u(2)
+    width = painter.text_width(label, size=size) + pad_x * 2
+    height = painter.text_height(label, size=size) + pad_y * 2
+    x = art_box[0] + art_box[2] - m.u(4) - width
+    y = art_box[1] + m.u(4)
+    painter.rounded_rect((x, y, width, height), radius=m.u(3), fill=(0, 0, 0, 170))
+    painter.text((x + width // 2, y + height // 2), label, size=size,
+                 fill=COLORS.text, anchor="mm")
 
 
 def _info(painter: Painter, title: str, subtitle: str, right: str) -> None:

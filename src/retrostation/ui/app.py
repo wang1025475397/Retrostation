@@ -25,7 +25,7 @@ from typing import Callable
 
 from ..core.theme import COLORS, metrics_for
 from ..data.library import Library
-from ..data.systems import display_name, lookup
+from ..data.systems import display_name, lookup, variant_suffix
 from ..data.video import VideoPlayer, VideoSettings
 from ..launcher.launch import LaunchError, LaunchPlan, build_plan
 from ..platform.base import InputAction, InputEvent, InputKind, Platform
@@ -932,6 +932,7 @@ class App:
                 key=key,
                 title=display_name(key, self.translator.language),
                 subtitle=self._tile_subtitle(key),
+                variant=variant_suffix(key),
             )
             for key in self.session.system_keys()
         ]

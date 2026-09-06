@@ -239,6 +239,32 @@ def _base_token(key: str) -> str:
     return head.casefold()
 
 
+def is_variant(key: str) -> bool:
+    """True for a ``"<system> <variant>"`` directory that borrows its base system.
+
+    ``GBA Hack`` is absent from the table but resolves to ``gba``, so it uses
+    the base system's artwork and launch core.  Those directories still have to
+    be told apart from the platform they borrow from, which is what this test
+    is for.
+    """
+    if SYSTEMS.get(key) or SYSTEMS.get(key.casefold()):
+        return False
+    return SYSTEMS.get(_base_token(key)) is not None
+
+
+def variant_suffix(key: str) -> str:
+    """The text after the first space -- ``Hack`` for the directory ``GBA Hack``.
+
+    Empty for a plain system directory (``gba``) and for the aggregates
+    (``ALL``, ``FAV``, ``RECENT``), so callers can treat it as "nothing to
+    badge".
+    """
+    if not is_variant(key):
+        return ""
+    parts = key.split(None, 1)
+    return parts[1].strip() if len(parts) > 1 else ""
+
+
 @lru_cache(maxsize=256)
 def lookup(key: str) -> SystemDef:
     """Definition for ``key``; unknown keys still get a usable default.
@@ -337,6 +363,11 @@ def display_name(key: str, lang: str | None = None) -> str:
     for akey, en, zh in AGGREGATES:
         if key == akey:
             return zh if _is_zh(lang) else en
+    # A "<system> <variant>" directory keeps its own name.  It borrows the base
+    # system's artwork and core, but showing the base system's label too would
+    # make "GBA Hack" and "GBA" indistinguishable in the UI.
+    if is_variant(key):
+        return key
     code = _lang_code(lang)
     sdef = lookup(key)
     if code:

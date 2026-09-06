@@ -118,6 +118,12 @@ def test_platform_context_searches_only_that_system() -> None:
     keys = session.system_keys()
     session.platform_index = keys.index("snes")
     session.handle(press(InputAction.SEARCH))   # close the dialog opened on ALL
+    # Entering the platform is what scopes the search.  Merely highlighting it
+    # on the carousel is not enough: there the highlighted platform is a
+    # cursor, not a filter, so the search stays global (see
+    # test_aggregate_context_searches_the_whole_library).
+    session.handle(press(InputAction.A))
+    assert session.view == VIEW_GAMES
     session.handle(press(InputAction.SEARCH))   # reopen from the snes page
     assert session.search_origin == "snes"
     type_text(session, "HDL")  # 魂斗罗 is not in snes
