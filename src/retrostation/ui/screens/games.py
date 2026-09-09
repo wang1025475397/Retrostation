@@ -13,6 +13,60 @@ from ...data.media import cover_bitmap
 from ..painter import Painter
 
 
+#: One artwork slot the views ask the cache for: ``(kind, width, height, cover)``.
+#: Exactly the key the cache is built on, so warming a slot produces the file
+#: the screen will later look for -- a slot guessed at a different size would
+#: only fill the card.
+Slot = tuple[str, int, int, bool]
+
+
+def art_slots(painter: Painter, layout: str) -> list[Slot]:
+    """Every artwork size ``layout`` is going to ask for, before it asks.
+
+    Mirrors the boxes the draw functions below compute, in the same terms
+    (``Metrics``), so the two cannot drift: a carousel is the card plus each
+    scaled neighbour plus the logo band; a grid is one cell; a list is the
+    row's logo.  The single-screen detail strip is the caller's to add -- it
+    owns that box, and this module must not import the app.
+    """
+    m = painter.metrics
+    single = _single(painter)
+    if layout == "carousel":
+        card_h = m.carousel_card_h(single=single)
+        card_w = m.carousel_card_w(single=single)
+        banner_h = m.content_h(single=single) - (card_h + m.u(10)) - m.u(6)
+        slots: list[Slot] = [
+            ("cover", round(card_w * scale), round(card_h * scale), False)
+            for scale in _SCALE
+        ]
+        slots.append(("logo", m.u(240), min(m.u(56), banner_h), False))
+        return slots
+    if layout == "grid":
+        cols = m.grid_cols
+        padding, gap = m.grid_padding, m.grid_gap
+        cell_w = (m.width - 2 * padding - gap * (cols - 1)) // cols
+        # The cell carries a name bar; only what is left is artwork.
+        art_h = m.grid_cell_h(single=single) - m.u(24)
+        return [("cover", cell_w, art_h, False)]
+    return [("logo", m.thumb_w, m.thumb_h, False)]
+
+
+def all_slots(painter: Painter) -> list[Slot]:
+    """Every size the game views can ask for, whatever the current one is.
+
+    One game's artwork is one set: switching views must not mean "your cache
+    just got smaller", and it must not mean a stutter either.  So the warm-up
+    fills the whole set and the progress count judges the whole set -- the
+    figure then means "this many games are completely cached" and reads the
+    same in the list, the grid and the carousel.
+    """
+    merged: dict[Slot, None] = {}
+    for layout in ("carousel", "grid", "list"):
+        for slot in art_slots(painter, layout):
+            merged.setdefault(slot, None)
+    return list(merged)
+
+
 def _round_corners(bitmap: object, radius: int) -> object:
     """Return ``bitmap`` with its corners clipped to a rounded rectangle.
 

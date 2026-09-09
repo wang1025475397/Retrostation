@@ -87,6 +87,36 @@ class ArtProvider:
             self._placeholders[key] = bitmap
         return bitmap
 
+    def prefetch(self, game: Game, slots) -> bool:
+        """Queue ``game``'s artwork for every slot in ``slots``.
+
+        A slot is ``(kind, width, height, cover)`` -- the same triple the
+        cache keys on, so the warm-up produces exactly the files the screen
+        will ask for.  Slots are grouped by kind first because one source has
+        to be decoded once no matter how many sizes it feeds.
+
+        Returns ``True`` when there is nothing more to do for this game --
+        queued, or no artwork to queue -- and ``False`` only when the warm-up
+        queue is full.  The caller has to be able to tell those apart: a full
+        queue means "ask again in a moment", a game with no cover means
+        "never ask again".
+        """
+        grouped: dict[str, list[tuple[int, int, bool]]] = {}
+        for kind, width, height, cover in slots:
+            grouped.setdefault(kind, []).append((width, height, cover))
+
+        for kind, sizes in grouped.items():
+            path = game.asset(kind)
+            if path is None:
+                continue
+            if not self._library.warm_thumbnails(Path(path), sizes):
+                return False
+        return True
+
+    def set_prefetch(self, active: bool) -> None:
+        """Let the warm-up thread run, or hold it while the player moves."""
+        self._library.set_thumbnail_warm(active)
+
     def has_cover(self, game: Game) -> bool:
         path = game.asset(ASSET_COVER)
         return bool(path) and Path(path).is_file()

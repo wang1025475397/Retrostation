@@ -26,6 +26,7 @@ import shutil
 import struct
 import threading
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -379,6 +380,10 @@ _STAT_LIMIT = 4000
 #: How long a cache entry that could not be deleted is left alone.
 #: See :meth:`ThumbnailCache._discard`.
 _BROKEN_TTL = 30.0
+#: How many sources may wait for the warm-up thread.  Generous, because a
+#: whole system's worth of covers is what an idle list queues, and a dropped
+#: one only means its thumbnail is decoded again on screen.
+_WARM_QUEUE = 512
 
 #: Everything Pillow raises for a file it cannot decode.  ``ValueError`` and
 #: ``struct.error`` turn up for truncated files; :class:`OSError` covers
@@ -518,6 +523,20 @@ class ThumbnailCache:
             target=self._prune_loop, name="retrostation-prune", daemon=True
         )
         self._pruner.start()
+        # Idle warm-up.  A frame cannot afford the ~55 ms a cold cover costs,
+        # but a list that has been standing still has nothing else to do, so
+        # the artwork around the cursor is decoded here instead.  See
+        # :meth:`warm`.
+        self._warm: queue.Queue = queue.Queue(maxsize=_WARM_QUEUE)
+        self._warm_go = threading.Event()
+        #: How many entries have actually landed on the card.  Only used to
+        #: tell "the count is stale" from "the count is still true" -- see
+        #: ``App._tick_cache_count``.
+        self._writes = 0
+        self._warmer = threading.Thread(
+            target=self._warm_loop, name="retrostation-warm", daemon=True
+        )
+        self._warmer.start()
 
     # ------------------------------------------------------------------ #
 
@@ -569,6 +588,22 @@ class ThumbnailCache:
 
         self._remember(key, bitmap)
         return bitmap
+
+    def cached(self, source: Path, width: int, height: int, *, cover: bool = False) -> bool:
+        """Whether this exact size is already on the card (or in memory).
+
+        Asked by the progress counter, which is why it must not decode: it
+        walks every game in a system, and a decode is ~30 ms each.
+        """
+        if not self._enabled:
+            return False
+        mtime, exists = self._stat(source)
+        if not exists:
+            return False
+        if (str(source), width, height, mtime, cover) in self._memory:
+            return True
+        disk = self._disk_path(source, width, height, mtime, cover=cover)
+        return disk is not None and disk.is_file()
 
     def _decode(self, source: Path, width: int, height: int, mtime: int,
                 *, cover: bool = False) -> object | None:
@@ -709,6 +744,102 @@ class ThumbnailCache:
         digest = _entry_digest(source, width, height, mtime)
         marker = "c" if cover else ""
         return directory / f"{digest}_{width}x{height}{marker}{suffix}"
+
+    # ------------------------------------------------------------------ #
+    # Idle warm-up
+    # ------------------------------------------------------------------ #
+
+    def warm(self, source: Path, sizes: Sequence[tuple[int, int, bool]]) -> bool:
+        """Queue ``source`` for one decode that feeds every size in ``sizes``.
+
+        The whole point is the single decode.  Asking for a size that is not
+        on the card costs a full read of the original -- ~32 ms measured on
+        the RG DS -- and a carousel asks for four of them per game (the card
+        plus each scaled neighbour), so filling them one request at a time
+        pays for the same picture four times over.  Decoding once and scaling
+        the result four ways costs ~103 ms instead of ~300 ms.
+
+        Nothing is decoded here: the caller is the frame loop, and it only
+        ever enqueues.  ``False`` means the queue is full or caching is off,
+        which is not an error -- the size is simply decoded on screen later.
+        """
+        if not self._enabled:
+            return False
+        try:
+            self._warm.put_nowait((str(source), tuple(sizes)))
+        except queue.Full:
+            return False
+        return True
+
+    def warm_active(self, active: bool) -> None:
+        """Let the warm-up thread run, or hold it.
+
+        Held while the player is moving: this thread and the frame loop share
+        one core, and a scroll needs every millisecond of it.  Whatever is
+        still queued waits its turn rather than being dropped.
+        """
+        if active:
+            self._warm_go.set()
+        else:
+            self._warm_go.clear()
+
+    def _warm_loop(self) -> None:
+        while True:
+            self._warm_go.wait()
+            source, sizes = self._warm.get()
+            try:
+                self._warm_one(source, sizes)
+            except Exception:  # noqa: BLE001 - a lost warm-up only costs time
+                log.debug("thumbnail warm-up failed for %s", source, exc_info=True)
+
+    def _warm_one(self, source: str, sizes: tuple[tuple[int, int, bool], ...]) -> None:
+        """Decode ``source`` once, then write every size that is missing."""
+        path = Path(source)
+        mtime, exists = self._stat(path)
+        if not exists:
+            return
+
+        todo: list[tuple[int, int, bool, Path]] = []
+        for width, height, cover in sizes:
+            if width <= 0 or height <= 0:
+                continue
+            if (str(path), width, height, mtime, cover) in self._memory:
+                continue
+            disk = self._disk_path(path, width, height, mtime, cover=cover)
+            # Already on the card: the point of the warm-up is to spare the
+            # frame that would have decoded it, and that frame will hit.
+            if disk is None or disk.is_file():
+                continue
+            todo.append((width, height, cover, disk))
+        if not todo:
+            return
+
+        try:
+            original = self._platform.load_image(path)
+        except _DECODE_ERRORS:
+            # Same rescue as :meth:`_decode`: a device whose Pillow cannot
+            # open the source at all gets a transcoded copy instead.
+            readable = self._readable_copy(path, mtime)
+            if readable is None:
+                return
+            try:
+                original = self._platform.load_image(readable)
+            except _DECODE_ERRORS:
+                return
+
+        for width, height, cover, disk in todo:
+            if not self._enabled:
+                return
+            scaled = (cover_bitmap(original, width, height) if cover
+                      else fit_bitmap(original, width, height))
+            # Straight to the card rather than through the writer thread:
+            # that one paces itself at :data:`_WRITE_PAUSE` to stay out of the
+            # frame's way, which would spread a few hundred entries over
+            # minutes.  Nothing is waiting on this write.
+            try:
+                self._write(disk, scaled)
+            except Exception:  # noqa: BLE001 - see above
+                log.debug("could not write warmed thumbnail %s", disk, exc_info=True)
 
     # ------------------------------------------------------------------ #
     # Pruning
@@ -853,6 +984,12 @@ class ThumbnailCache:
         except OSError:
             self._remove(temporary)
             raise
+        self._writes += 1
+
+    @property
+    def writes(self) -> int:
+        """Entries written to the card so far (approximate; read from a thread)."""
+        return self._writes
 
     # -- memory LRU ------------------------------------------------------- #
 

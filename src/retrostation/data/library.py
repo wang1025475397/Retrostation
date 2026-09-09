@@ -359,6 +359,55 @@ class Library:
             return None
         return self._thumbnails.get(kind, source, width, height, cover=cover)
 
+    def count_cached_games(self, games, slots) -> int:
+        """How many of ``games`` already have every slot on the card.
+
+        Counted in *games*, not files: one game is four or five files, and
+        "85 of 531 games are ready" is the number that means something while
+        the warm-up works through a system.
+
+        A game with no artwork for a slot counts as done rather than as
+        missing -- it draws its placeholder either way, so it is not going to
+        stutter, and a progress figure that can never reach the total is just
+        a puzzle.
+
+        Costs a stat per slot per game (~200 ms for a 530-game system), so it
+        belongs on a background thread.
+        """
+        count = 0
+        for game in games:
+            wanted = [
+                (Path(source), width, height, cover)
+                for kind, width, height, cover in slots
+                if (source := game.asset(kind)) is not None
+            ]
+            if not wanted:
+                count += 1
+                continue
+            if all(
+                self._thumbnails.cached(source, width, height, cover=cover)
+                for source, width, height, cover in wanted
+            ):
+                count += 1
+        return count
+
+    def warm_thumbnails(self, source: Path, sizes) -> bool:
+        """Queue one source for a warm-up that decodes it once for many sizes.
+
+        The frame loop is the caller, so this only ever enqueues; see
+        :meth:`retrostation.data.media.ThumbnailCache.warm`.
+        """
+        return self._thumbnails.warm(source, sizes)
+
+    @property
+    def thumbnail_writes(self) -> int:
+        """Thumbnails written to the card so far; see :meth:`count_cached_games`."""
+        return self._thumbnails.writes
+
+    def set_thumbnail_warm(self, active: bool) -> None:
+        """Hold or release the warm-up thread -- off while the player moves."""
+        self._thumbnails.warm_active(active)
+
     def set_thumbnail_cache(self, enabled: bool) -> None:
         """Turn the thumbnail cache on or off for this session.
 

@@ -14,6 +14,7 @@
   "games.empty_missing": "No games without a cover",
   "games.no_cover": "No cover",
   "games.hidden": "Hidden",
+  "games.cached_of": "{total} · {cached} cached",
   "btn.start": "Start",
   "btn.back": "Back",
   "rom_select.title": "Select ROM",

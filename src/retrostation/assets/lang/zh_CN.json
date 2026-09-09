@@ -13,6 +13,7 @@
   "games.empty_missing": "没有缺失封面的游戏",
   "games.no_cover": "无封面",
   "games.hidden": "隐藏",
+  "games.cached_of": "{total} · 缓存 {cached}",
   "btn.start": "开始",
   "btn.back": "返回",
   "rom_select.title": "选择启动文件",

@@ -14,6 +14,7 @@ from __future__ import annotations
 import logging
 import math
 import subprocess
+import threading
 import time
 from pathlib import Path
 
@@ -122,6 +123,21 @@ _STRIP_ART_W = 160
 #: Characters of description the strip will even try to fit.  Real blurbs run
 #: to 400+; measuring them costs more than the whole frame budget.
 _STRIP_DESC_CHARS = 60
+#: How long the list has to stand still before idle pre-warming starts.  A
+#: cold cover costs ~55 ms -- three frames' worth -- so a scroll cannot
+#: afford it, but a stopped list has nothing else to do.  Short enough that a
+#: brief pause on a game pays off, long enough not to fire between two holds
+#: of the d-pad.
+_PREFETCH_IDLE = 0.35
+#: Sources queued per frame.  Each is a full decode once the thread reaches
+#: it, so this only paces how much work is in flight.
+_PREFETCH_BATCH = 3
+#: How often the "N of M cached" figure is recounted while the warm-up is
+#: running.  One pass is a stat per slot per game -- ~200 ms for a 530-game
+#: system -- so it is a background job, and it stops once the number settles.
+_CACHE_COUNT_INTERVAL = 2.0
+#: Recount this soon after the view changes, so the number shows up quickly.
+_CACHE_COUNT_FIRST = 0.4
 #: Characters a scrolling description is allowed to carry.  Longer than the
 #: static cut because the marquee shows all of it eventually, but still capped:
 #: the run is rendered once into a bitmap, and an unbounded one would be a
@@ -138,6 +154,23 @@ _MARQUEE_GAP = 48
 _DESC_SCROLL_SPEED = 16
 #: Seconds a scrolling description rests at each end before turning back.
 _DESC_SCROLL_PAUSE = 1.5
+
+
+def _prefetch_order(index: int, total: int):
+    """The whole list, nearest the cursor first.
+
+    Not a window around the cursor: stopping on one game and reading its
+    blurb should leave the *system* ready, not just the two dozen rows around
+    it.  Nearest first stays worth it -- a pause is most often followed by a
+    small move -- and reaching the far end costs nothing, because the
+    warm-up is held the moment the player moves again.
+    """
+    if 0 <= index < total:
+        yield index
+    for offset in range(1, total):
+        for position in (index + offset, index - offset):
+            if 0 <= position < total:
+                yield position
 
 
 class App:
@@ -197,6 +230,25 @@ class App:
         self._top_backdrop = None
         self._backdrop_pending = False
         self._backdrop_at = 0.0
+        #: Last time anything moved.  Idle pre-warming of the artwork around
+        #: the cursor waits on it (see :meth:`_tick_prefetch`).
+        self._activity_at = 0.0
+        self._prefetch_active = False
+        #: List positions already handed to the warm-up, and the view they
+        #: belong to -- a new system or layout makes every position new again.
+        self._prefetch_done: set[int] = set()
+        self._prefetch_scope: tuple = ()
+        #: How many games of the current list already have every slot cached;
+        #: ``None`` until the (background) count lands.
+        self._cache_count: int | None = None
+        self._cache_count_at = 0.0
+        self._cache_count_running = False
+        #: How many thumbnails had been written when the count was taken.
+        self._cache_count_writes = -1
+        #: Platforms whose artwork and preview strip have been warmed already,
+        #: and whether a warm-up pass is still running.
+        self._home_warm_done: set[str] = set()
+        self._home_warm_running = False
         #: Static (cover + metadata) part of the bottom detail strip, debounced
         #: like the backdrop so fast scrolling does not decode a cover per move.
         self._strip_state_pending = False
@@ -264,6 +316,9 @@ class App:
 
         last_frame = 0.0
         frames = 0
+        # The first frames are the busy ones (resume, scan, first paint); the
+        # warm-up gets the core back as soon as they are out of the way.
+        self._activity_at = time.monotonic()
         try:
             while self._running:
                 now = time.monotonic()
@@ -306,6 +361,7 @@ class App:
                 last_frame = now
                 self._tick_video()
                 self._draw(now)
+                self._tick_prefetch(now)
                 frames += 1
                 if frames == 1:
                     self._fire_ready()
@@ -346,6 +402,9 @@ class App:
 
     def _handle(self, event: InputEvent) -> None:
         self._blip(event)
+        # Anything the player does outranks the warm-up: they are about to
+        # move, and the thread shares this core with the frame loop.
+        self._activity_at = time.monotonic()
         outcome = self.session.handle(event)
         if outcome.quit:
             self._running = False
@@ -590,6 +649,182 @@ class App:
             len(session.system_keys()),
         )
 
+    # -- idle artwork warm-up --------------------------------------------- #
+
+    def _tick_prefetch(self, now: float) -> None:
+        """Warm the artwork around the cursor while nothing is moving.
+
+        A cover that is not on the card costs ~55 ms to decode -- three
+        frames -- which a scroll cannot afford but a stopped list can, so the
+        warm-up runs on the far side of a pause and is held again the instant
+        the player touches a button (``_activity_at``).
+        """
+        session = self.session
+        scope = (session.view, session.layout, session.platform_index,
+                 session.sort, len(session.games()))
+        if scope != self._prefetch_scope:
+            # Another system, layout or result set: every position is new,
+            # and the cached count has to be taken again.
+            self._prefetch_scope = scope
+            self._prefetch_done.clear()
+            self._cache_count = None
+        active = (not self._launching
+                  and session.view == VIEW_GAMES
+                  and now - self._activity_at >= _PREFETCH_IDLE)
+        if active != self._prefetch_active:
+            self._prefetch_active = active
+            self.art.set_prefetch(active)
+        if not active:
+            if self._cache_count is None and session.view == VIEW_GAMES:
+                # Nothing to warm (yet) -- but the number is worth showing.
+                self._tick_cache_count(now)
+            return
+
+        if session.view == VIEW_GAMES:
+            self._enqueue_prefetch()
+            self._tick_cache_count(now)
+        elif session.view == VIEW_PLATFORMS:
+            self._start_home_warm()
+
+    def _start_home_warm(self) -> None:
+        """Warm the home page's two kinds of art, off the frame loop.
+
+        The platform page draws what the game list never asks for: the art
+        that ships with the app (a background and a logo per platform), and
+        the six preview covers under it.  The covers go through the thumbnail
+        cache like any other; the platform art has no on-disk cache at all,
+        so it is decoded again on every start -- and both are decoded while
+        the player is watching, six at a time, whenever they move to a
+        platform that has not been on screen yet.  That is the hitch left
+        once the game list itself is warm.
+        """
+        if self._home_warm_running:
+            return
+        keys = [key for key in self.session.system_keys()
+                if key not in self._home_warm_done]
+        if not keys:
+            return
+        index = self.session.platform_index % max(1, len(keys))
+        order = [keys[position] for position in _prefetch_order(index, len(keys))]
+        self._home_warm_running = True
+        threading.Thread(
+            target=self._warm_home, args=(order,),
+            name="retrostation-home", daemon=True,
+        ).start()
+
+    def _warm_home(self, keys: list[str]) -> None:
+        try:
+            m = self._painters[0].metrics
+            side = m.platform_art
+            logo_h = m.platform_logo_h
+            card_w = side + m.u(8)
+            preview = [("cover", m.u(88), m.u(50), False)]
+            for key in keys:
+                if not self._wait_for_idle():
+                    return
+                self.art.platform_background(key, side, side)
+                self.art.platform_logo(key, card_w - m.u(10), logo_h)
+                # The selected card is wider, so its logo is a second size.
+                self.art.platform_logo(key, card_w + m.u(12) - m.u(10), logo_h)
+                for game in self.session.preview_games_for(key):
+                    self.art.prefetch(game, preview)
+                self._home_warm_done.add(key)
+        except Exception:  # noqa: BLE001 - a missed warm-up only costs time
+            log.debug("home warm-up failed", exc_info=True)
+        finally:
+            self._home_warm_running = False
+
+    def _wait_for_idle(self) -> bool:
+        """Sleep while the player is moving; ``False`` once the app is stopping."""
+        while self._running and time.monotonic() - self._activity_at < _PREFETCH_IDLE:
+            time.sleep(0.12)
+        return self._running
+
+    def _warm_slots(self) -> list:
+        """The whole set of sizes one game needs, whatever view is showing.
+
+        Warming (and counting) by the current layout instead meant the
+        progress figure dropped whenever the player switched views, and that
+        reads as the cache shrinking.  One game's artwork is one set.
+        """
+        painter = self._painters[0]
+        slots = games.all_slots(painter)
+        if painter.single:
+            # The detail strip's cover: only the app knows that box.
+            width, height = self._strip_art_size(painter.metrics)
+            slots = slots + [("cover", width, height, False)]
+        return slots
+
+    def _tick_cache_count(self, now: float) -> None:
+        """Recount how many games are already complete, in the background.
+
+        Walking a system costs a stat per slot per game -- ~200 ms for 530
+        games -- which is several frames, so it runs off the frame loop and
+        only while the number can still change (the warm-up is running, or it
+        has not been taken yet).
+        """
+        if self._cache_count_running or not self.config.thumbnail_cache:
+            return
+        writes = self.library.thumbnail_writes
+        if (self._cache_count is not None and not self._prefetch_active
+                and writes == self._cache_count_writes):
+            # Settled: nothing is being warmed and nothing has been written
+            # since the last count, so the number is still true.
+            return
+        interval = (_CACHE_COUNT_FIRST if self._cache_count is None
+                    else _CACHE_COUNT_INTERVAL)
+        if now - self._cache_count_at < interval:
+            return
+        games_list = self.session.games()
+        if not games_list:
+            return
+
+        slots = self._warm_slots()
+
+        self._cache_count_at = now
+        self._cache_count_writes = writes
+        self._cache_count_running = True
+        counting = list(games_list)
+        threading.Thread(
+            target=self._count_cached, args=(counting, slots),
+            name="retrostation-count", daemon=True,
+        ).start()
+
+    def _count_cached(self, games_list: list, slots) -> None:
+        try:
+            count = self.library.count_cached_games(games_list, slots)
+        except Exception:  # noqa: BLE001 - a missing count must not break a frame
+            log.debug("cached-game count failed", exc_info=True)
+            return
+        finally:
+            self._cache_count_running = False
+        if count != self._cache_count:
+            self._cache_count = count
+            # The header shows the number, and the panel is only repainted
+            # when its state key changes -- which this is not part of.
+            self._top_dirty = True
+
+    def _enqueue_prefetch(self) -> None:
+        """Hand the warm-up thread the games the cursor is most likely to
+        reach next, nearest first."""
+        session = self.session
+        games_list = session.games()
+        if not games_list:
+            return
+        slots = self._warm_slots()
+        queued = 0
+        for position in _prefetch_order(session.game_index, len(games_list)):
+            if position in self._prefetch_done:
+                continue
+            if not self.art.prefetch(games_list[position], slots):
+                # The warm-up queue is full: it is draining on its own thread,
+                # so leave this position open and try again on a later frame.
+                break
+            self._prefetch_done.add(position)
+            queued += 1
+            if queued >= _PREFETCH_BATCH:
+                break
+
     def _bottom_due(self, now: float, key: tuple) -> bool:
         """Video drives the bottom panel in real time; the static part (cover +
         metadata) is debounced so fast scrolling does not decode a cover on every
@@ -794,6 +1029,20 @@ class App:
                 ("DOWN", self.translator("home.preview")),
                 ("START", self.translator("btn.menu"))]
 
+    def _games_subtitle(self, total: int) -> str:
+        """``"531"``, or ``"531 · 已缓存 85"`` once the count has landed.
+
+        Next to the game count, because that is the number the player already
+        reads there -- the warm-up's progress is the same kind of fact about
+        this list.  Counted in games, not files: one game is four or five
+        thumbnails, and only the game count says anything about how much of
+        the list will still stutter.
+        """
+        cached = self._cache_count
+        if not cached or not self.config.thumbnail_cache:
+            return str(total)
+        return self.translator("games.cached_of", cached=cached, total=total)
+
     def _draw_games(self, painter: Painter, *, highlight: bool = True) -> int:
         session = self.session
         all_games = session.games()
@@ -811,7 +1060,7 @@ class App:
             button_bar(painter, hints)
             return 0
 
-        subtitle = str(len(all_games))
+        subtitle = self._games_subtitle(len(all_games))
         right = self.translator('games.layout_' + session.layout)
 
         index = session.game_index

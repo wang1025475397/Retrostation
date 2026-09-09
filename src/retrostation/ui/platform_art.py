@@ -33,8 +33,13 @@ _SUFFIXES: dict[str, tuple[str, ...]] = {
     "logo": (".png", ".webp"),
 }
 
-#: Cards are repainted every frame but only a handful are on screen at once.
-_CACHE_LIMIT = 32
+#: Cards are repainted every frame, and every platform can end up on one: this
+#: art ships with the app and is decoded on demand, so a limit below
+#: "every platform, background plus both logo widths" means a card that
+#: scrolls off and back has to be decoded again -- a visible hitch per card.
+#: Three bitmaps a platform (a ~150px square and two small logos) is a few
+#: hundred kilobytes for a full 60-platform library.
+_CACHE_LIMIT = 256
 
 
 class PlatformArt:

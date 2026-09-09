@@ -330,6 +330,20 @@ class Session:
             self._preview_cache = games[:6]
         return self._preview_cache
 
+    def preview_games_for(self, key: str) -> list[Game]:
+        """The same six, for any platform -- not just the selected one.
+
+        The home page's warm-up needs them all: switching platforms pulls six
+        covers that nothing has decoded yet, and six cold covers is most of a
+        second.  ``preview_games`` cannot serve this -- it is pinned to the
+        selected platform -- so the ordering lives in one place and both call
+        it.
+        """
+        games = self.library.resolve_all(key)
+        if not self.config.show_hidden:
+            games = [game for game in games if not game.hidden]
+        return sorted(games, key=self._preview_order)[:6]
+
     @staticmethod
     def _preview_order(game: Game) -> tuple[int, float, str]:
         if game.last_played:
@@ -661,19 +675,32 @@ class Session:
     _VOLUME_STEP = 5
 
     def _adjust_volume(self, direction: int) -> Outcome:
-        """Move the preview volume and say where it landed.
+        """Move *both* volumes, and say where they landed.
 
-        The number on screen is the point: a rocker that changes nothing
-        audible right now (no clip on the selection) still has to answer, or it
-        reads as broken -- which is exactly how it felt before it was wired up.
+        The rocker is the one control a player reaches for, and "I turned it
+        up" has to mean the whole thing got louder -- a button blip that
+        ignores it while a clip that is not even playing obeys reads as a
+        broken key.  So the preview and the blips step together; both stay
+        where the player left them relative to each other (the blips sit below
+        the previews on purpose, and that gap is theirs to keep).
+
+        The number on screen is still the point: a rocker that changes nothing
+        audible right now (no clip on the selection) has to answer, or it reads
+        as broken -- which is exactly how it felt before it was wired up.
         """
-        current = int(self.config.video_volume)
-        value = max(0, min(100, current + direction * self._VOLUME_STEP))
-        if value != current:
-            self.config.video_volume = value
+        step = direction * self._VOLUME_STEP
+        moved = False
+        for field in ("video_volume", "sfx_volume"):
+            current = int(getattr(self.config, field))
+            value = max(0, min(100, current + step))
+            if value != current:
+                setattr(self.config, field, value)
+                moved = True
+        if moved:
             # Outlives the session, so the app persists it with the rest.
             self.settings_dirty = True
-        self.notify(self.translator("toast.volume", value=value))
+        self.notify(self.translator("toast.volume",
+                                    value=int(self.config.video_volume)))
         return Outcome(redraw=True)
 
     # -- modals ------------------------------------------------------------- #
@@ -784,6 +811,9 @@ class Session:
             for item in fields(type(stashed_config)):
                 setattr(self.config, item.name, getattr(stashed_config, item.name))
             self.sort, self.layout = sort, layout
+            # The volume rows are applied as they are moved, so putting the
+            # number back is not enough -- the app has to be told to reapply.
+            self.settings_dirty = True
         self._menu_stash = None
         self.modal = MODAL_NONE
 
@@ -857,13 +887,17 @@ class Session:
         """
         if key == "brightness":
             self._step_brightness(direction * BRIGHTNESS_STEP)
-        elif key == "video_volume":
-            value = max(0, min(100, int(self.config.video_volume) + direction * self._VOLUME_STEP))
-            self.config.video_volume = value
-            self.notify(self.translator("toast.volume", value=value))
-        elif key == "sfx_volume":
-            value = max(0, min(100, int(self.config.sfx_volume) + direction * self._VOLUME_STEP))
-            self.config.sfx_volume = value
+        elif key in ("video_volume", "sfx_volume"):
+            # The two volumes are the exception to "nothing takes effect until
+            # A": they are the only rows with something to hear, and a slider
+            # you cannot hear while you move it has to be taken on faith.
+            # Staged like the rest (A still commits and saves) but applied as
+            # you go, so B puts them back -- see :meth:`_cancel_menu`.
+            field = "video_volume" if key == "video_volume" else "sfx_volume"
+            value = max(0, min(100, int(getattr(self.config, field))
+                               + direction * self._VOLUME_STEP))
+            setattr(self.config, field, value)
+            self.settings_dirty = True
             self.notify(self.translator("toast.volume", value=value))
         elif key in _CYCLING_ROWS:
             self._toggle_menu_row(key, direction)
