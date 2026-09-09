@@ -288,6 +288,45 @@ class TestThumbnailCache:
         saved = json.loads((Path(platform.config_dir) / "config.json").read_text(encoding="utf-8"))
         assert saved["thumbnail_cache"] is False
 
+    def test_the_rows_are_heard_while_the_dialog_is_still_open(
+        self, rom_root: Path,
+    ) -> None:
+        """Volume is the one thing a player can judge without looking.
+
+        Every other row waits for A -- rebuilding the palette or the windows
+        mid-drag would be worse than waiting -- but a number that makes no
+        sound until you leave the dialog has to be taken on faith.
+        """
+        app, platform, config = settings_app(rom_root)
+        app.run(max_frames=1)
+        heard: list[float] = []
+        app.platform.configure_sfx = (  # type: ignore[method-assign]
+            lambda *, enabled, volume: heard.append(volume)
+        )
+
+        open_menu(app, platform)
+        nudge(app, platform, "sfx_volume")
+        assert heard, "the row changed nothing"
+        assert heard[-1] == pytest.approx(config.sfx_volume / 100)
+
+    def test_b_puts_the_volume_back(self, rom_root: Path) -> None:
+        """Applied as you go means B has to reapply, not just restore the number."""
+        app, platform, config = settings_app(rom_root)
+        app.run(max_frames=1)
+        before = int(config.sfx_volume)
+        heard: list[float] = []
+        app.platform.configure_sfx = (  # type: ignore[method-assign]
+            lambda *, enabled, volume: heard.append(volume)
+        )
+
+        open_menu(app, platform)
+        nudge(app, platform, "sfx_volume")
+        assert config.sfx_volume != before
+        press(app, platform, InputEvent(InputAction.B))
+
+        assert config.sfx_volume == before
+        assert heard[-1] == pytest.approx(before / 100)
+
     def test_clearing_removes_every_entry(self, rom_root: Path) -> None:
         app, _platform, _config = settings_app(rom_root)
         app.run(max_frames=1)
@@ -319,10 +358,18 @@ class TestThumbnailCache:
         cache.flush()
         assert any(self._cache_dir(rom_root).iterdir())
 
-    def test_the_row_does_not_block_the_frame(self, rom_root: Path) -> None:
+    def test_the_row_does_not_block_the_frame(
+        self, rom_root: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
         """Walking a full card is seconds of stat() calls; the input thread
         hands it off and answers with a toast, like the background scan does."""
         app, platform, _config = settings_app(rom_root)
+        # This one counts the files left on the card after the clear, so the
+        # frames in between must not ask for artwork -- and idle pre-warming
+        # would start filling the card again the moment the list stands still.
+        # Both are correct behaviour and both are wrong for that assertion.
+        monkeypatch.setattr(app, "_tick_prefetch", lambda now: None)
+        monkeypatch.setattr(app, "_draw", lambda now: None)
         app.run(max_frames=1)
         cover = self._cover(rom_root)
         cache = app.session.library._thumbnails  # noqa: SLF001

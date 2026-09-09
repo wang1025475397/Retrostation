@@ -285,6 +285,33 @@ class TestVolumeRocker:
         session.handle(InputEvent(action=InputAction.VOLUME_UP))
         assert session.config.video_volume == start + 5
 
+    def test_the_button_blips_move_with_it(self, rom_root: Path) -> None:
+        """One control, everything louder: a blip that ignored the rocker
+        reads as a broken key rather than as a separate setting."""
+        session = session_for(rom_root)
+        video, sfx = session.config.video_volume, session.config.sfx_volume
+
+        session.handle(InputEvent(action=InputAction.VOLUME_UP))
+        assert session.config.video_volume == video + 5
+        assert session.config.sfx_volume == sfx + 5
+
+        session.handle(InputEvent(action=InputAction.VOLUME_DOWN))
+        assert session.config.sfx_volume == sfx
+
+    def test_the_gap_between_them_survives(self, rom_root: Path) -> None:
+        """The blips sit below the previews on purpose; that is the player's
+        to keep, so both step by the same amount rather than meeting."""
+        session = session_for(rom_root)
+        gap = session.config.video_volume - session.config.sfx_volume
+
+        for _ in range(3):
+            session.handle(InputEvent(action=InputAction.VOLUME_UP))
+        assert session.config.video_volume - session.config.sfx_volume == gap
+
+        session.config.sfx_volume = 100
+        session.handle(InputEvent(action=InputAction.VOLUME_UP))
+        assert session.config.sfx_volume == 100   # clamped, no overflow
+
 
 class TestSettingsRows:
     def test_both_rows_are_offered(self, rom_root: Path) -> None:
