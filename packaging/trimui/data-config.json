@@ -1,0 +1,10 @@
+{
+  "screen_mode": "single",
+  "launcher": {
+    "ra_script": "",
+    "ra_config": "/mnt/SDCARD/RetroArch/retroarch.cfg",
+    "cores_dir": "/mnt/SDCARD/RetroArch/.retroarch/cores",
+    "fallback_ra": "/mnt/SDCARD/RetroArch/ra64.trimui",
+    "fallback_cores_dir": "/mnt/SDCARD/RetroArch/.retroarch/cores"
+  }
+}

@@ -78,6 +78,10 @@ class LauncherConfig:
     cores_dir: str = "/mnt/vendor/deep/retro/cores"
     fallback_ra: str = "/oem/retro/retroarch"
     fallback_cores_dir: str = "/oem/retro/cores"
+    #: retroarch.cfg used by the direct-to-RetroArch fallback.  Empty means
+    #: "probe the usual firmware locations"; a handheld that keeps it elsewhere
+    #: (the TrimUI keeps it next to the binary) sets it here.
+    ra_config: str = ""
 
 
 @dataclass

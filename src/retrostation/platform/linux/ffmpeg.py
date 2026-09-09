@@ -116,16 +116,25 @@ def _picked_env(role: str, muxer: str) -> dict[str, str]:
     answer, and caching it used to pin the decoder to the hijacked library
     path for the rest of the session: every clip afterwards failed with
     "not a suitable output format".  Undecided, we hand back the clean
-    environment (the one that behaves like a shell) and try again next time.
+    environment (the one that behaves like a shell) and try again next time --
+    but only after asking once *with* the library path we were started with.
+    A decoder we ship ourselves keeps its codecs in a ``lib/`` of ours and
+    cannot start at all once LD_LIBRARY_PATH is taken away, so for that build
+    the clean environment is simply the wrong answer, not a cautious one.
     """
     cached = _ENV_CACHE.get(role)
     if cached is not None:
         return cached
     clean = {key: value for key, value in os.environ.items() if key != "LD_LIBRARY_PATH"}
-    available = _has_muxer(clean, muxer)
-    if available is None:
+    verdict = _has_muxer(clean, muxer)
+    if verdict is None:
+        # It did not even run without the inherited path.  Ask again with it:
+        # if that works, the decoder genuinely needs those libraries.
+        if _has_muxer(dict(os.environ), muxer):
+            _ENV_CACHE[role] = dict(os.environ)
+            return _ENV_CACHE[role]
         return clean
-    env = clean if available else dict(os.environ)
+    env = clean if verdict else dict(os.environ)
     _ENV_CACHE[role] = env
     return env
 

@@ -239,3 +239,41 @@ class TestLifecycle:
 
     def test_close_is_safe_without_a_device(self, reader: EvdevInput) -> None:
         reader.close()
+
+
+class TestNamedKeymaps:
+    """The TrimUI port picks a map by name (``RETROSTATION_KEYMAP`` env var).
+
+    The default must stay the default -- a device without the env var set has
+    to behave exactly as before the port.
+    """
+
+    def test_default_is_still_the_default(self) -> None:
+        assert input_mod.NAMED_KEYMAPS["default"] is DEFAULT_KEYMAP
+
+    def test_trimui_map_covers_every_button_the_pad_advertises(self) -> None:
+        """Codes read off the device with ``scripts/probe_input.py``."""
+        advertised = {304, 305, 307, 308, 310, 311, 314, 315, 316, 317, 318}
+        assert advertised <= set(input_mod.TRIMUI_KEYMAP)
+
+    def test_unknown_name_falls_back_to_no_override(self) -> None:
+        """An unset or bogus name must not raise in front of the player."""
+        assert input_mod.NAMED_KEYMAPS.get("trimui-smart-pro") is None
+
+    def test_trimui_layout_via_raw_events(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Xbox-style faces (corrected on the device) and real Select/Start."""
+        monkeypatch.setattr(input_mod, "find_key_device", lambda *a, **k: None)
+        pad = EvdevInput(keymap=input_mod.NAMED_KEYMAPS["trimui"])
+
+        feed(pad, raw(EV_KEY, 305, 1))   # BTN_EAST    -> physical A
+        assert presses(pad) == [InputAction.A]
+        feed(pad, raw(EV_KEY, 304, 1))   # BTN_SOUTH   -> physical B
+        assert presses(pad) == [InputAction.B]
+        feed(pad, raw(EV_KEY, 308, 1))   # BTN_WEST    -> physical X
+        assert presses(pad) == [InputAction.X]
+        feed(pad, raw(EV_KEY, 314, 1))   # BTN_SELECT  -> search dialog
+        assert presses(pad) == [InputAction.SEARCH]
+        feed(pad, raw(EV_KEY, 315, 1))   # BTN_START   -> the menu
+        assert presses(pad) == [InputAction.START]
+        feed(pad, raw(EV_KEY, 316, 1))   # BTN_MODE    -> MENU (the FN key)
+        assert presses(pad) == [InputAction.MENU]

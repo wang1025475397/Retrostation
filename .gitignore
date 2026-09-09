@@ -19,3 +19,9 @@ screenshots/en_US/*_bottom.png
 # scripts/build_release.py output: source-free, byte-compiled bundles.
 dist/
 screenshots-preview/
+
+# TrimUI package build materials (scripts/package_trimui.py): the vendored
+# Pillow and the ffmpeg pair pulled from a device.  Deliberately local-only --
+# "make-vendor-archive" is how they travel; the Pillow half is regenerable with
+# the pip command in that script's docstring.
+vendor/

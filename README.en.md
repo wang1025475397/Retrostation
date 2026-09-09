@@ -246,6 +246,34 @@ APPS/
 
 Shipped as **source**, not compiled to `.pyc`: bytecode does not survive a different Python minor version, and these devices span 3.10 and 3.11. The packer strips `__pycache__`, tests, docs and screenshots, and sets the executable bit on the two `.sh` files explicitly (unzip and file copies both drop it).
 
+### Build the TrimUI Smart Pro (CrossMix) package
+
+That handheld has no Pillow and cannot install one (its Python lacks the ssl module, so pip never reaches PyPI), and it ships no ffmpeg. The package is therefore **self-contained** (~29 MB): a vendored Pillow under `vendor/`, and `ffmpeg`/`ffprobe` plus two codec libraries under `bin/` + `lib/`. Installing = unzip and copy the `Apps/` folder onto the card's `/mnt/SDCARD/Apps/`, then launch from the CrossMix **Apps** menu.
+
+```bash
+# Package (needs the vendor/ materials, see below)
+python scripts/package_trimui.py                  # -> dist/Retrostation-<version>-trimui.zip
+python scripts/package_trimui.py --list           # preview the file list
+
+# Zip the vendor/ materials for someone who wants to rebuild (vendor/ is git-ignored)
+python scripts/package_trimui.py --make-vendor-archive
+#   -> dist/Retrostation-trimui-vendor-<version>.zip
+
+# The recipient restores them, then packages as above
+python scripts/package_trimui.py --vendor-archive Retrostation-trimui-vendor-<version>.zip
+```
+
+Where the `vendor/` materials come from (kept local-only via `.gitignore`):
+
+- `vendor/pillow/` — regenerable: download the aarch64 wheel and unpack it
+  ```bash
+  python -m pip download Pillow --no-deps \
+      --platform manylinux_2_28_aarch64 --python-version 311 \
+      --implementation cp --abi cp311 --only-binary=:all: -d vendor/wheels
+  python -c "import zipfile,glob; zipfile.ZipFile(glob.glob('vendor/wheels/pillow-*.whl')[0]).extractall('vendor/pillow')"
+  ```
+- `vendor/ffmpeg/` — **not** regenerable; it must come from a device (the CrossMix ScreencapTK app ships a working build): `bin/ffmpeg` and `bin/ffprobe` from `/mnt/SDCARD/Apps/ScreencapTK/bin/`, `lib/libfdk-aac.so.2` and `lib/libmp3lame.so.0` from `.../ScreencapTK/lib/`. Prefer passing them around via `--make-vendor-archive` / `--vendor-archive`.
+
 ### Push to a device during development
 
 After editing `.py`, use `deploy.py` to push in one click:

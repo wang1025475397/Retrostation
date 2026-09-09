@@ -98,6 +98,37 @@ DEFAULT_KEYMAP: dict[int, InputAction] = {
     115: InputAction.VOLUME_UP,
 }
 
+#: TrimUI Smart Pro mapping, **corrected on the device**: the first guess put
+#: A on BTN_SOUTH and Select/Start on the L2/R2 slots, and the player corrected
+#: every one of those within a minute of play.  What the pad really does, per
+#: ``scripts/probe_input.py --watch`` plus hands on the shell buttons:
+#:
+#: * physical A / B emit BTN_EAST / BTN_SOUTH (Xbox-style), so the semantic
+#:   labels swap; same for X / Y on BTN_WEST / BTN_NORTH;
+#: * Select / Start are BTN_SELECT / BTN_START -- SEARCH is Select's meaning
+#:   here (there is no separate SELECT action);
+#: * the pad advertises no BTN_TL2/BTN_TR2, so physical L2 / R2 land on
+#:   BTN_THUMBL / BTN_THUMBR.
+TRIMUI_KEYMAP: dict[int, InputAction] = {
+    304: InputAction.B,       # BTN_SOUTH   (physical B)
+    305: InputAction.A,       # BTN_EAST    (physical A)
+    307: InputAction.Y,       # BTN_NORTH   (physical Y)
+    308: InputAction.X,       # BTN_WEST    (physical X)
+    310: InputAction.L1,      # BTN_TL
+    311: InputAction.R1,      # BTN_TR
+    314: InputAction.SEARCH,  # BTN_SELECT
+    315: InputAction.START,   # BTN_START
+    316: InputAction.MENU,    # BTN_MODE    (FN)
+    317: InputAction.L2,      # BTN_THUMBL  (physical L2)
+    318: InputAction.R2,      # BTN_THUMBR  (physical R2)
+}
+
+#: Named keymaps the launcher can pick with the ``RETROSTATION_KEYMAP`` env var.
+NAMED_KEYMAPS: dict[str, dict[int, InputAction]] = {
+    "default": DEFAULT_KEYMAP,
+    "trimui": TRIMUI_KEYMAP,
+}
+
 #: Hat axis code -> ``(action when value < 0, action when value > 0)``.
 #:
 #: HAT0X/HAT0Y is what the RG DS reports (codes 16/17); HAT1X/HAT1Y is common

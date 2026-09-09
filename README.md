@@ -240,6 +240,40 @@ APPS/
 
 以**源码**形式分发，不编译 `.pyc`：字节码不能跨 Python 小版本，而这几台设备分别是 3.10 和 3.11。打包时会剔除 `__pycache__`、测试、文档与截图，并为两个 `.sh` 显式设置可执行位（解压和拷贝都会丢掉它）。
 
+### 打 TrimUI Smart Pro（CrossMix）包
+
+TrimUI 那台机器既没有 Pillow 也装不了（它的 Python 缺 ssl 模块，pip 连不上 PyPI），也没有
+ffmpeg，所以这个包是**自包含**的（约 29 MB）：自带的 Pillow 在 `vendor/`，自带的
+ffmpeg/ffprobe 和两个编解码库在 `bin/` + `lib/`。安装 = 解压后把 `Apps/` 整个拷到卡的
+`/mnt/SDCARD/Apps/`，在 CrossMix 的 **Apps** 菜单启动，无需任何安装步骤。
+
+```bash
+# 打包（需要 vendor/ 素材，见下）
+python scripts/package_trimui.py                  # 产出 dist/Retrostation-<版本>-trimui.zip
+python scripts/package_trimui.py --list           # 只看会打进哪些文件
+
+# 把 vendor/ 素材打成一个压缩包，发给要重新打包的人（vendor/ 不进 git）
+python scripts/package_trimui.py --make-vendor-archive
+#   -> dist/Retrostation-trimui-vendor-<版本>.zip
+
+# 拿到素材包的人：解包后即可打包
+python scripts/package_trimui.py --vendor-archive Retrostation-trimui-vendor-<版本>.zip
+```
+
+`vendor/` 素材的来源（已在 `.gitignore` 里，只留本地）：
+
+- `vendor/pillow/` —— 可再生：下载 aarch64 轮子并解压
+  ```bash
+  python -m pip download Pillow --no-deps \
+      --platform manylinux_2_28_aarch64 --python-version 311 \
+      --implementation cp --abi cp311 --only-binary=:all: -d vendor/wheels
+  python -c "import zipfile,glob; zipfile.ZipFile(glob.glob('vendor/wheels/pillow-*.whl')[0]).extractall('vendor/pillow')"
+  ```
+- `vendor/ffmpeg/` —— **不可再生**，须从设备取（CrossMix 的 ScreencapTK 应用自带一套可用构建）：
+  `bin/ffmpeg`、`bin/ffprobe` 取自 `/mnt/SDCARD/Apps/ScreencapTK/bin/`，
+  `lib/libfdk-aac.so.2`、`lib/libmp3lame.so.0` 取自 `.../ScreencapTK/lib/`。
+  所以优先用 `--make-vendor-archive` / `--vendor-archive` 传递。
+
 ### 开发时推送到设备
 
 改完 `.py` 后，用 `deploy.py` 一键推送：

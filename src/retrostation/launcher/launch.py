@@ -69,17 +69,20 @@ def _retroarch_plan(definition: SystemDef, rom: str, config: Config) -> LaunchPl
     if not binary.is_file():
         raise LaunchError(f"neither {script} nor {binary} exists")
     return LaunchPlan(
-        argv=(str(binary), "-c", _ra_config(), "-L", str(cores_dir / core), rom),
+        argv=(str(binary), "-c", _ra_config(config.launcher.ra_config),
+              "-L", str(cores_dir / core), rom),
         core_label=core,
     )
 
 
-def _ra_config() -> str:
+def _ra_config(explicit: str = "") -> str:
     """The stock frontend keeps its config next to the binary."""
+    if explicit and Path(explicit).is_file():
+        return explicit
     for candidate in ("/.config/retroarch/retroarch.cfg", "/oem/retro/retroarch.cfg"):
         if Path(candidate).is_file():
             return candidate
-    return "/.config/retroarch/retroarch.cfg"
+    return explicit or "/.config/retroarch/retroarch.cfg"
 
 
 # --------------------------------------------------------------------------- #

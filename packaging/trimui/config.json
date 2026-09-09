@@ -1,0 +1,7 @@
+{
+  "label": "Retrostation",
+  "icon": "Retrostation.png",
+  "iconsel": "Retrostation.png",
+  "launch": "launch.sh",
+  "description": "Game frontend with cover art, video previews and search"
+}

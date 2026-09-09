@@ -14,6 +14,7 @@ from ...core.model import ASSET_KEYS, Game, game_key
 from .base import MetadataSource, RawEntry, UnsupportedWrite, merge_games
 from .esde import ESDESource
 from .pegasus import PegasusSource
+from .trimui import TrimuiSource
 
 __all__ = [
     "MetadataSource",
@@ -34,7 +35,10 @@ def SOURCES(esde_root: str | Path | None = None) -> list[MetadataSource]:  # noq
     and ignored by the rest.  ``None`` means "no ES-DE installed", in which
     case everything is read from inside the ROM directories.
     """
-    return sorted((ESDESource(esde_root), PegasusSource()), key=lambda s: s.priority)
+    return sorted(
+        (ESDESource(esde_root), PegasusSource(), TrimuiSource()),
+        key=lambda s: s.priority,
+    )
 
 
 def source_by_name(name: str, esde_root: str | Path | None = None) -> MetadataSource | None:
@@ -69,7 +73,9 @@ def load_system(
     """
     bundles: list[_SourceBundle] = []
     for source in SOURCES(esde_root):
-        if names and source.name not in names:
+        if names and source.name not in names and not source.media_only:
+            # Media-only sources (the TrimUI image tree) are not a metadata
+            # *opinion*, so the opt-in list does not silence them.
             continue
         if not source.detect(system_dir):
             continue

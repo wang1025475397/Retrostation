@@ -178,3 +178,57 @@ class TestLinuxHandOff:
         platform.launch_game(["/bin/true", "a b"])
 
         assert shlex.split(target.read_text(encoding="utf-8"))[2:] == ["/bin/true", "a b"]
+
+
+class TestDirectRetroArchFallback:
+    """No ``ra_script``: the plan talks to RetroArch itself (the TrimUI port).
+
+    That handheld keeps ``retroarch.cfg`` next to the binary, which neither of
+    the probed firmware locations covers, hence the configurable ``ra_config``.
+    """
+
+    @pytest.fixture
+    def direct(self, tmp_path: Path) -> Config:
+        config = Config()
+        config.launcher.ra_script = ""
+        binary = tmp_path / "ra64.trimui"
+        binary.write_text("#!/bin/sh\n", encoding="utf-8")
+        cores = tmp_path / "cores"
+        cores.mkdir()
+        (cores / "fceumm_libretro.so").write_text("", encoding="utf-8")
+        config.launcher.fallback_ra = str(binary)
+        config.launcher.fallback_cores_dir = str(cores)
+        return config
+
+    @staticmethod
+    def _fc_game():
+        from retrostation.core.model import Game
+
+        rom = Path("/mnt/SDCARD/Roms/FC/恶魔城 (Castlevania).nes")
+        return Game(key="FC/恶魔城 (Castlevania).nes", path=rom, name="恶魔城")
+
+    def test_explicit_ra_config_is_passed_to_the_binary(self, direct: Config, tmp_path: Path) -> None:
+        cfg_file = tmp_path / "retroarch.cfg"
+        cfg_file.write_text("[foo]\n", encoding="utf-8")
+        direct.launcher.ra_config = str(cfg_file)
+
+        plan = build_plan(self._fc_game(), direct)
+
+        assert plan.argv[0] == direct.launcher.fallback_ra
+        assert list(plan.argv[1:3]) == ["-c", str(cfg_file)]
+
+    def test_ra_config_missing_on_disk_still_wins(self, direct: Config) -> None:
+        """Explicit beats probing even when the file vanished -- no surprises."""
+        direct.launcher.ra_config = "/gone/retroarch.cfg"
+
+        plan = build_plan(self._fc_game(), direct)
+
+        assert plan.argv[2] == "/gone/retroarch.cfg"
+
+    def test_empty_ra_config_probes_the_firmware_locations(self, direct: Config) -> None:
+        """The pre-port behaviour, unchanged: probe, then take the last resort."""
+        assert direct.launcher.ra_config == ""
+
+        plan = build_plan(self._fc_game(), direct)
+
+        assert plan.argv[2] in ("/.config/retroarch/retroarch.cfg", "/oem/retro/retroarch.cfg")

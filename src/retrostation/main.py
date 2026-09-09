@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 import threading
 
@@ -46,7 +47,16 @@ def build_platform(args: argparse.Namespace, config: Config) -> Platform:
         # (which has no tkinter), even when ``--desktop`` is never used.
         from .platform.desktop.platform import DesktopPlatform
         return DesktopPlatform(rom_root=explicit)
-    return LinuxPlatform(rom_root=explicit, headless=args.headless)
+    input_device = os.environ.get("RETROSTATION_INPUT_DEVICE")
+    keymap_name = os.environ.get("RETROSTATION_KEYMAP", "default")
+    from retrostation.platform.linux.input import NAMED_KEYMAPS
+    keymap = NAMED_KEYMAPS.get(keymap_name)
+    return LinuxPlatform(
+        rom_root=explicit,
+        headless=args.headless,
+        input_device=input_device,
+        keymap=keymap,
+    )
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:

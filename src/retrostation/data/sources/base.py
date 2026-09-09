@@ -77,6 +77,10 @@ class MetadataSource(abc.ABC):
     writable: bool = False
     #: Lower number = higher priority when merging.
     priority: int = 100
+    #: Media-only sources provide artwork but no metadata fields, so they are
+    #: always probed regardless of the ``metadata.sources`` opt-in list -- the
+    #: player tunes which *descriptions* merge, not whether covers get found.
+    media_only: bool = False
 
     # -- discovery -------------------------------------------------------- #
 

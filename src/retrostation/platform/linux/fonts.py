@@ -20,6 +20,8 @@ _CANDIDATE_DIRS: tuple[str, ...] = (
     "/usr/share/fonts/truetype/noto",
     "/roms/ports/PortMaster/resources",         # bundled CJK fonts on the device
     "/roms/ports/PortMaster/pylibs/resources",  # alternate PortMaster layout
+    "/usr/trimui/res",                          # TrimUI firmware faces
+    "/usr/trimui/apps/moonlight",               # TrimUI: wqy-microhei (CJK)
     "C:/Windows/Fonts",                          # Windows development
     "/System/Library/Fonts",                     # macOS development
 )
@@ -34,6 +36,7 @@ _CANDIDATE_NAMES: tuple[str, ...] = (
     "NotoSansSC-Regular.ttf",
     "NotoSansTC-Regular.ttf",
     "NotoSansHK-Regular.ttf",
+    "wqy-microhei.ttf",                          # TrimUI firmware (measured)
     "msyh.ttc",
     "simhei.ttf",
     "DejaVuSans.ttf",
