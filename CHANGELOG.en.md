@@ -1,5 +1,52 @@
 # Changelog
 
+## 0.5.0 — 2026-09-09
+
+### Added
+
+- **TrimUI Smart Pro port** (`packaging/trimui/`, `scripts/package_trimui.py`):
+  - a TrimUI media source that finds the cover art TrimUI ships itself;
+  - a TrimUI key map, selectable through an environment variable;
+  - extra font candidate directories, so Chinese stops rendering as boxes;
+  - the launcher can now be given a RetroArch config path.
+- **Button sounds**: move / confirm / back, synthesised through ALSA (no audio
+  files in the bundle).  The settings menu gains a "button sound" switch and a
+  "button volume" row; both volume rows are **applied as you move them**
+  instead of waiting for A.  The volume rocker now moves **both** the preview
+  volume and the button volume, keeping the gap between them.
+- **Scrolling descriptions**: a blurb that does not fit the bottom panel (or
+  the single-screen strip) scrolls sideways instead of being cut off
+  mid-sentence.  Only a blurb that actually overflows scrolls.
+
+### Improved
+
+- **Idle cover warm-up**: once a list has stood still for 0.35 s, the whole
+  platform is warmed in the background as **one complete set** per game (the
+  four carousel sizes, the grid, the list, the detail strip and two logos —
+  eight files).  Any input puts the warm-up aside and it resumes where it left
+  off.  One source is decoded once for every size: 103 ms for four sizes
+  against ~300 ms the old way.
+- **Home page warm-up**: the platform picker warms its own artwork too — each
+  platform's background and logo (its cache held 32 items, so a 63-platform
+  library evicted a card before you scrolled back to it) plus the six preview
+  covers.
+- **Progress readout**: the game count now reads "531 · 85 cached", counted in
+  *games* — a game counts once its whole set is on the card.  All three views
+  share one set, so switching views no longer makes the number drop.
+- Variant system directories (`FBNEO ACT` and friends) show a variant badge on
+  their card.
+
+### Fixed
+
+- **Preview dead after a game**: coming back from a game, clips no longer
+  played at all and the UI could crash.  Fixed the ffmpeg environment probe
+  (it must cope with the codecs the firmware ships) and the order in which the
+  sound card is released and taken back.
+- The platform art cache holds 256 entries instead of 32, so scrolling away and
+  back no longer re-decodes a card.
+
+---
+
 ## 0.4.0 — 2026-09-06
 
 ### Added
