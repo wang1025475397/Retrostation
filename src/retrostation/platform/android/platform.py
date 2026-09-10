@@ -1,0 +1,153 @@
+"""The Android platform adapter (DESIGN.ANDROID §6).
+
+``AndroidPlatform`` is the Python half of the port.  It implements the abstract
+:class:`~retrostation.platform.base.Platform` contract and delegates every
+device-touching operation to a *bridge* object injected at construction.  On the
+device that bridge is the Kotlin ``PyRuntime`` (wired through Chaquopy's
+``chaquopy_java``); on the desktop test suite it is a fake that records calls.
+
+The split matters: this file contains **no** Android imports, so it is unit-
+testable without a device, and the surface it exposes to ``ui/`` and ``data/`` is
+byte-for-byte the same interface the Linux and desktop platforms implement.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any
+
+from pathlib import Path
+
+from ...core.theme import Form
+from ..base import (
+    Canvas,
+    FileEntry,
+    Form,
+    InputEvent,
+    Platform,
+    UnsupportedTarget,
+)
+from ..fonts import FontBook
+from ..targets import ArgvTarget, InlineTarget, IntentTarget, LaunchTarget
+from .bridge import AndroidBridge
+from .canvas import PilCanvas, rgba_bytes
+from .display import form_for
+
+
+class AndroidPlatform(Platform):
+    """Front-end host on Android.  Resident by default (DESIGN.ANDROID §8.11)."""
+
+    name = "android"
+
+    def __init__(self, bridge: Any, *, font_dir: str | None = None) -> None:
+        #: Injected by ``PyRuntime`` on device; a fake in tests.
+        self._bridge = bridge
+        self._font_dir = Path(font_dir) if font_dir else None
+        self._fonts: FontBook | None = None
+        self._canvases: list[Canvas] = []
+
+    # -- display ---------------------------------------------------------- #
+
+    def init_display(self, mode: str) -> list[Canvas]:
+        # Probe returns ``[(w, h), ...]`` -- one entry per physical display.
+        # §4.1 computes the logical size per screen independently, so two
+        # heterogeneous panels (Thor: 1920x1080 + 1240x1080) are both honoured.
+        sizes = self._bridge.probe_displays(mode)
+        self._canvases = [PilCanvas(w, h) for (w, h) in sizes]
+        return self._canvases
+
+    def present(self, index: int) -> None:
+        canvas = self._canvases[index]
+        self._bridge.push_frame(index, rgba_bytes(canvas))  # type: ignore[arg-type]
+
+    def screen_form(self) -> Form:
+        # Only consulted in the single-screen case; two canvases always mean DUAL
+        # at the call site.
+        if len(self._canvases) >= 2:
+            return Form.DUAL
+        w, h = self._canvases[0].size
+        return form_for(w, h)
+
+    # -- input ------------------------------------------------------------ #
+
+    def poll_events(self, timeout: float = 0.0) -> list[InputEvent]:
+        return self._bridge.drain_events(timeout)
+
+    # -- hardware --------------------------------------------------------- #
+
+    def battery(self) -> int | None:
+        return self._bridge.battery()
+
+    def temperature(self) -> float | None:
+        return self._bridge.temperature()
+
+    def set_brightness(self, value: int, index: int = 0) -> None:
+        self._bridge.set_brightness(value, index)
+
+    # -- filesystem ------------------------------------------------------- #
+
+    @property
+    def rom_root(self) -> Path:
+        return self._bridge.rom_root()
+
+    @property
+    def config_dir(self) -> Path:
+        return self._bridge.config_dir()
+
+    def list_dir(self, path: Path) -> list:
+        return self._bridge.list_dir(path)
+
+    # -- launching -------------------------------------------------------- #
+
+    def launch_game(self, target: LaunchTarget) -> None:
+        # Android never runs an argv; the Linux-only kind is refused loudly.
+        if isinstance(target, ArgvTarget):
+            raise UnsupportedTarget(self.name, target)
+        if isinstance(target, IntentTarget):
+            self._bridge.start_activity(target)  # returns; resident path
+            return
+        if isinstance(target, InlineTarget):
+            self._bridge.host_core(target)  # B series; raises until implemented
+            return
+        raise UnsupportedTarget(self.name, target)
+
+    def can_stay_resident(self) -> bool:
+        # The app keeps its windows and memory; the game runs in another activity
+        # or a hosted core and returns via onActivityResult (§8.11).
+        return True
+
+    def on_resume(self) -> None:
+        self._bridge.on_game_exited()
+
+    # -- fonts / media ---------------------------------------------------- #
+
+    def font(self, size: int) -> object:
+        # R1: fonts are bundled as a CJK subset (DESIGN.ANDROID §12.2) and resolved
+        # in Python via FontBook -- no Kotlin involvement.  The directory is supplied
+        # by PyRuntime from the extracted assets path.
+        if self._fonts is None:
+            if self._font_dir:
+                dirs: tuple[str, ...] = (str(self._font_dir),)
+            else:
+                # No bundled font dir: fall back to Android's built-ins.  Without
+                # this the app renders with PIL's tiny bitmap font, which is the
+                # single ugliest thing on the phone screen.
+                dirs = ("/system/fonts", "/product/fonts")
+            self._fonts = FontBook(dirs)
+        return self._fonts.get(size)
+
+    def load_image(self, path: Path) -> object:
+        # R1: Pillow is present (Chaquopy install).  R2 swaps this for a Skia
+        # decode but keeps the same return contract (a bitmap the Canvas accepts).
+        from PIL import Image
+
+        return Image.open(path)
+
+    def shutdown(self) -> None:
+        self._bridge.shutdown()
+
+    def suspend_display(self) -> None:
+        self._bridge.suspend_display()
+
+    def resume_display(self) -> None:
+        self._bridge.resume_display()

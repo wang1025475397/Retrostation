@@ -75,6 +75,9 @@ class Painter:
     def hgradient(self, box: Sequence[float], *, start, end, radius: int = 0) -> None:
         self.canvas.hgradient(box, start=start, end=end, radius=radius)
 
+    def vgradient(self, box: Sequence[float], *, start, end) -> None:
+        self.canvas.vgradient(box, start=start, end=end)
+
     def ellipse(self, box: Sequence[float], *, fill=None, outline=None, width: int = 1) -> None:
         self.canvas.ellipse(box, fill=fill, outline=outline, width=width)
 

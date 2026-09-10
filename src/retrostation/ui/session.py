@@ -469,6 +469,10 @@ class Session:
                 return self._open_exit_dialog()
             return Outcome()
 
+        # 触摸（DESIGN.ANDROID §10.3）：点卡片选中，再点已选中的卡片进入。
+        if action is InputAction.TAP and event.x is not None:
+            return self._tap_platform(event)
+
         # 平台行：上/左右切换平台，下键进入预览选择。
         if action is InputAction.DOWN:
             if self.preview_games():
@@ -552,6 +556,9 @@ class Session:
         if action in (InputAction.L2, InputAction.R2):
             self.game_index = 0 if action is InputAction.L2 else count - 1
             return Outcome(redraw=True)
+        # 触摸（DESIGN.ANDROID §10.3）：点行选中，再点已选中的行启动。
+        if action is InputAction.TAP and event.x is not None:
+            return self._tap_game(event)
         if action is InputAction.A:
             return self._pick_or_launch(self.current_game())
         if action is InputAction.B:
@@ -567,6 +574,44 @@ class Session:
         if action is InputAction.MENU:
             return self._open_exit_dialog()
         return Outcome()
+
+    # -- touch (DESIGN.ANDROID §10.3) -------------------------------------- #
+
+    def _tap_platform(self, event: InputEvent) -> Outcome:
+        """Tap on the home carousel: select the card; tap it again to enter."""
+        from .screens.home import carousel_hit
+
+        if self._metrics is None:
+            return Outcome()
+        hit = carousel_hit(self._metrics, self.system_count(),
+                           self.platform_index, event.x, event.y)
+        if hit is None:
+            return Outcome()
+        if hit == self.platform_index:
+            return self._enter_games()
+        self.platform_index = hit
+        self.game_index = 0
+        return Outcome(redraw=True)
+
+    def _tap_game(self, event: InputEvent) -> Outcome:
+        """Tap on the game list: select the row; tap it again to launch."""
+        if self.layout != "list":
+            return Outcome()  # grid / carousel hit-testing arrives with A6
+        from .screens.games import list_hit
+
+        if self._metrics is None:
+            return Outcome()
+        games = self.games()
+        if not games:
+            return Outcome()
+        hit = list_hit(self._metrics, len(games), self.game_index,
+                       self._page_size(), event.x, event.y)
+        if hit is None:
+            return Outcome()
+        if hit == self.game_index:
+            return self._pick_or_launch(games[hit])
+        self.game_index = hit
+        return Outcome(redraw=True)
 
     def _vertical_step(self) -> int:
         if self.layout == "grid":

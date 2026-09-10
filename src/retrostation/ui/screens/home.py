@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from ..art import ArtProvider
 from ..painter import Painter
 from ..widgets import button_bar, page_header
-from ...core.theme import COLORS
+from ...core.theme import COLORS, is_android_skin
 from .games import cover_art
 
 @dataclass(frozen=True)
@@ -100,7 +100,9 @@ def _carousel(painter: Painter, art: ArtProvider, tiles: list[Tile], index: int)
         else:
             box = (x, m.platform_top, card_w, card_h)
             outline = COLORS.border
-        painter.rounded_rect(box, radius=m.u(10), fill=COLORS.panel, outline=outline)
+        painter.rounded_rect(box, radius=m.card_radius, fill=COLORS.panel,
+                             outline=outline,
+                             width=2 if is_android_skin() else 1)
 
         _card_art(painter, art, tile, (box[0] + 1, box[1] + 1, box[2] - 2, box[3] - 2))
 
@@ -216,3 +218,29 @@ def _preview(painter: Painter, art: ArtProvider, previews: list[object],
                 radius=m.u(5), outline=COLORS.accent,
             )
         x += m.u(92)
+
+
+def carousel_hit(m, count: int, index: int, x: int, y: int) -> int | None:
+    """The carousel card a tap landed on, or ``None`` (DESIGN.ANDROID §10.3).
+
+    Mirrors the geometry ``_carousel`` draws -- the selected card centred at
+    ``m.width // 2``, neighbours stepping by ``card_w + gap`` -- so the two
+    cannot drift apart without someone noticing.  A tap inside the gap between
+    two cards hits nothing: that dead zone is the point.
+    """
+    card_w = m.platform_art + m.u(8)
+    gap = m.platform_gap
+    left0 = m.width // 2 - card_w // 2
+    top = m.platform_top - m.u(6)          # the selected card's outline pad
+    bottom = m.platform_top + m.platform_card_h + m.u(6)
+    if not (top <= y <= bottom):
+        return None
+    rel = x - left0
+    step_w = card_w + gap
+    k = rel // step_w                      # floor; Python floors negatives too
+    if rel - k * step_w > card_w:
+        return None                        # landed in the gap between cards
+    position = index + k
+    if not (0 <= position < count):
+        return None
+    return position

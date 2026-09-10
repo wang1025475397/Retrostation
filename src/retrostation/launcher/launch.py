@@ -19,6 +19,7 @@ from typing import Sequence
 from ..core.config import Config
 from ..core.model import Game
 from ..data.systems import SystemDef, lookup
+from ..platform.targets import ArgvTarget, LaunchTarget
 
 
 class LaunchError(RuntimeError):
@@ -27,10 +28,26 @@ class LaunchError(RuntimeError):
 
 @dataclass(frozen=True)
 class LaunchPlan:
-    """Everything needed to start a game, already resolved."""
+    """Everything needed to start a game, already resolved.
 
-    argv: tuple[str, ...]
+    The *how* lives in :attr:`target` (see :mod:`.target`): a command line here,
+    an activity or a hosted libretro core on Android.
+    """
+
+    target: LaunchTarget
     core_label: str
+
+    @property
+    def argv(self) -> tuple[str, ...]:
+        """The command line, for callers that run one.
+
+        Raises :class:`TypeError` for the other target kinds rather than
+        returning something empty: a caller that assumes a command line is
+        making an assumption that has to fail where it is wrong.
+        """
+        if not isinstance(self.target, ArgvTarget):
+            raise TypeError(f"{type(self.target).__name__} has no command line")
+        return self.target.argv
 
 
 def build_plan(game: Game, config: Config) -> LaunchPlan:
@@ -39,9 +56,10 @@ def build_plan(game: Game, config: Config) -> LaunchPlan:
     rom = str(game.path)
 
     if definition.standalone:
-        return LaunchPlan(argv=_expand(definition.standalone, rom), core_label=definition.core_label)
+        return LaunchPlan(target=ArgvTarget(_expand(definition.standalone, rom)),
+                          core_label=definition.core_label)
     if definition.key.upper() == "PORTS":
-        return LaunchPlan(argv=("bash", rom), core_label="PortMaster")
+        return LaunchPlan(target=ArgvTarget(("bash", rom)), core_label="PortMaster")
     return _retroarch_plan(definition, rom, config)
 
 
@@ -62,15 +80,15 @@ def _retroarch_plan(definition: SystemDef, rom: str, config: Config) -> LaunchPl
 
     script = Path(config.launcher.ra_script)
     if script.is_file():
-        return LaunchPlan(argv=(str(script), core, rom), core_label=core)
+        return LaunchPlan(target=ArgvTarget((str(script), core, rom)), core_label=core)
 
     binary = Path(config.launcher.fallback_ra)
     cores_dir = Path(config.launcher.fallback_cores_dir)
     if not binary.is_file():
         raise LaunchError(f"neither {script} nor {binary} exists")
     return LaunchPlan(
-        argv=(str(binary), "-c", _ra_config(config.launcher.ra_config),
-              "-L", str(cores_dir / core), rom),
+        target=ArgvTarget((str(binary), "-c", _ra_config(config.launcher.ra_config),
+                           "-L", str(cores_dir / core), rom)),
         core_label=core,
     )
 

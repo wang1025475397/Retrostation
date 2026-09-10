@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import logging
 import os
+import subprocess
 import threading
 import time
 from collections import deque
@@ -50,8 +51,9 @@ from ..base import (
     Platform,
     VideoPipe,
 )
+from ..targets import ArgvTarget, LaunchTarget, UnsupportedTarget
 from ..linux.canvas import PilCanvas
-from ..linux.fonts import FontBook
+from ..fonts import FontBook
 from ..linux.video import FFmpegPipe, available
 
 log = logging.getLogger(__name__)
@@ -478,11 +480,22 @@ class DesktopPlatform(Platform):
     # Launching
     # ------------------------------------------------------------------ #
 
-    def launch_game(self, argv: Sequence[str]) -> None:
+    def launch_game(self, target: LaunchTarget) -> None:
         # The real launcher is a Linux shell script; on the desktop the app
-        # stays resident (can_stay_resident -> True) and the subprocess simply
+        # stays resident (can_stay_resident -> True) and run_foreground simply
         # fails, which surfaces as an error toast instead of exiting.
+        argv = target.argv if isinstance(target, ArgvTarget) else ()
         log.info("desktop: would launch %s", " ".join(str(a) for a in argv))
+
+    def run_foreground(self, target: LaunchTarget) -> int | None:
+        """Run it for real: a PC can have the emulator on PATH.
+
+        Failing to start is normal here (the firmware scripts a plan names do
+        not exist on a laptop), so the caller turns ``OSError`` into a toast.
+        """
+        if not isinstance(target, ArgvTarget):
+            raise UnsupportedTarget(self.name, target)
+        return subprocess.run(list(target.argv)).returncode
 
     # ------------------------------------------------------------------ #
     # Fonts / media

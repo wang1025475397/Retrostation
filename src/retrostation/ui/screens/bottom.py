@@ -8,7 +8,7 @@ from ..art import ArtProvider
 from ..painter import Painter
 from ..widgets import logo_banner
 from ...core.model import Game
-from ...core.theme import COLORS
+from ...core.theme import COLORS, is_android_skin
 from .games import cover_art
 
 _STAR = "★"
@@ -72,7 +72,11 @@ def draw(painter: Painter, art: ArtProvider, game: Game | None, meta: Meta | Non
          game_count: int | None = None,
          desc_scroll: DescScroll | None = None) -> None:
     m = painter.metrics
-    painter.clear()
+    if is_android_skin():
+        painter.vgradient((0, 0, m.width, m.height),
+                          start=COLORS.bg_top, end=COLORS.bg_bottom)
+    else:
+        painter.clear()
     _title_bar(painter, meta, key_label, game_count)
 
     if game is None or meta is None:

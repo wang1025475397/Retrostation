@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!-- All-files access is the primary storage path (DESIGN.ANDROID §7.1).
+         Side-loaded distros are exempt from Play's restrictive review; we still
+         declare the narrower read permission as a fallback so the app at least
+         installs where MANAGE_EXTERNAL_STORAGE is unavailable. -->
+    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE"
+        tools:ignore="ScopedStorage" />
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <!-- A foreground game keeps the screen on; the frontend itself is fine
+         without it but the inline emulator (B series) benefits. -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+
+    <application
+        android:allowBackup="true"
+        android:label="Retrostation"
+        android:supportsRtl="true"
+        android:theme="@android:style/Theme.Material.NoActionBar"
+        tools:targetApi="35">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:screenOrientation="fullSensor"
+            android:configChanges="orientation|screenSize|keyboardHidden|smallestScreenSize|screenLayout"
+            android:launchMode="singleTask">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- Inline emulator runs in its own activity so a core crash cannot
+             take down the frontend (DESIGN.ANDROID §8.6.4).  Enabled at B0. -->
+        <!-- <activity android:name=".GameActivity" android:exported="false" ... /> -->
+    </application>
+</manifest>

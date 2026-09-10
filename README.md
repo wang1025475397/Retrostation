@@ -352,9 +352,22 @@ retrostation/
 | 阶段 | 内容 | 状态 |
 |---|---|---|
 | E1 | Pegasus 数据源（只读） | ✅ 完成 |
-| E2 | 尺寸 token 化 + 布局比例化（Android 前置条件） | 待开始 |
-| E3 | `platform/android/`（Chaquopy 宿主） | 待开始 |
-| E4 | Android 视频（硬解）+ 启动 Intent | 待开始 |
+| E2 | 尺寸 token 化 + 布局比例化（Android 前置条件） | ✅ 完成（`core/theme.py` 的 `Metrics`） |
+| E3 | **Android 版**：内核复用重构 + Chaquopy 宿主 + **双屏支持** + 存储权限 | 设计完成，见 [docs/DESIGN.ANDROID.md](docs/DESIGN.ANDROID.md)（A0~A6） |
+| E4 | Android 启动 Intent + 硬解预览 + 触摸交互（含副屏触摸） | 同上（A4~A6 阶段） |
+| E5 | **内联模拟器**：App 内直接跑 libretro 核心 + 核心管理 + 游戏内菜单 + **内联双屏** | 同上（B0~B4 阶段） |
+
+**Android 版有两个重点。**
+
+**① 双屏安卓掌机**（AYN Thor、Anbernic RG DS 的 Android 系统，且品类在扩张）。
+Retrostation 本就是双屏原生前端，而 Android 上目前没有原生双屏前端；由于 `ui/` 的双屏分支
+已在 RG DS 上每天运行，这条路径的 UI 改动量为零，工作量只在平台层。
+
+**② 外部 + 内联双轨，核心定义只有一份。**
+外部走 Intent 拉起 RetroArch / 独立模拟器；内联在 App 内自己加载 libretro 核心。
+两者**共用 `SystemDef.core`**（同一个核心名的两种执行位置），靠 `launch_mode` 三级覆盖选择。
+内联带来"开箱即用"，更关键的是**只有内联能把 NDS/3DS 的下屏真正送到副屏**——
+这是 RetroArch Android 做不到的事。
 | — | 更多数据源格式（如 Skraper、手动清单） | 规划中 |
 | — | 列表内搜索 / 高级筛选 / 收藏夹视图 | 规划中 |
 | — | 语言包扩展（日文 `label_ja` 等，框架已就绪） | 规划中 |
@@ -368,6 +381,7 @@ retrostation/
 | 文档 | 内容 |
 |---|---|
 | [docs/DESIGN.md](docs/DESIGN.md) | 详细设计：真机环境实测、架构、双屏方案、渲染管线、输入系统、数据层与**数据源插件架构**、启动器、视觉规范、**跨平台/Android 预留**、风险与里程碑 |
+| [docs/DESIGN.ANDROID.md](docs/DESIGN.ANDROID.md) | **Android 版详细设计**：现状核查（预留兑现了多少）、技术选型（Chaquopy）、渲染方案（逻辑分辨率 + GPU 上采样）、**前置重构 R-A~R-E**、Kotlin 宿主与线程模型、**Android 双屏（Presentation / 输入焦点 / 异构分辨率 / 副屏让位）**、存储权限（All-files / SAF）、**外部 + 内联双轨启动**（Intent 表 / `auto` 决策链 / libretro 宿主 / 核心与 BIOS 管理 / 存档 / 游戏内菜单 / **内联双屏** / 许可影响）、Surface 叠层视频、触摸交互、四种布局形态、打包分发、A0~A8 与 B0~B4 里程碑与风险 |
 | [docs/PROTOTYPE.md](docs/PROTOTYPE.md) | UI 原型说明：页面状态机、键位、布局数值、原型→真机映射 |
 | [docs/USAGE.md](docs/USAGE.md) | 玩家向使用与配置：界面一览、配置文件、换核心、**媒体目录结构（ES-DE / Pegasus）**、**预览声音与音量**、平台艺术自定义、默认核心对照、多卡切换 |
 | [docs/USAGE.en.md](docs/USAGE.en.md) | 上文的英文版 |

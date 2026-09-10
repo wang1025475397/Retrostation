@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import logging
 import math
-import subprocess
 import threading
 import time
 from pathlib import Path
@@ -24,7 +23,7 @@ from ..core.model import Game
 from ..core.state import read_state, update_state, update_state
 from typing import Callable
 
-from ..core.theme import COLORS, metrics_for
+from ..core.theme import COLORS, Form, is_android_skin, metrics_for
 from ..data.library import Library
 from ..data.systems import display_name, lookup, variant_suffix
 from ..data.video import VideoPlayer, VideoSettings
@@ -291,14 +290,21 @@ class App:
         """Run until quit.  ``max_frames`` bounds it (tests, screenshots)."""
         canvases = self.platform.init_display(self.config.screen_mode)
         dual = len(canvases) > 1
-        metrics = metrics_for(*canvases[0].size)
+        # The form drives every layout number that differs between "there is a
+        # second screen for the detail view" and "it has to fold into this one"
+        # (core.theme.Form).  The bottom panel of a dual setup is itself DUAL:
+        # it *is* the detail view, so nothing folds there either.
+        form = Form.DUAL if dual else self.platform.screen_form()
+        metrics = metrics_for(*canvases[0].size, form)
         self.session.attach_metrics(metrics, single=not dual)
 
         self._canvases = canvases
         self._dual = dual
         self._painters = [
-            Painter(canvas, metrics_for(*canvas.size), self.platform, self.translator)
-            for canvas in canvases
+            Painter(canvas,
+                    metrics_for(*canvas.size, form if index == 0 else Form.DUAL),
+                    self.platform, self.translator)
+            for index, canvas in enumerate(canvases)
         ]
         self._painters[0].single = not dual
         # Backlight is saved per panel; only the platform knows how to set it.
@@ -579,11 +585,11 @@ class App:
                 self.platform.present(0)
             else:
                 if not top_painted:
-                    # A guard rather than decoration: paste() treats a non-image
-                    # as a colour and demands a box, so a missing cache has to
+                    # A guard rather than decoration: restoring a snapshot that
+                    # was never taken is meaningless, so a missing cache has to
                     # be caught here and not just in the scheduling above.
                     if self._top_cache is not None:
-                        painter.canvas.pil_image.paste(self._top_cache)
+                        painter.canvas.restore(self._top_cache)
                         self._draw_selection(painter, only=self._top_sel)
                 self._draw_detail_strip(painter)
                 self._cache_strip(painter)
@@ -624,7 +630,11 @@ class App:
         angle = (time.monotonic() * 7.0) % (2 * math.pi)
         for i, painter in enumerate(self._painters):
             w, h = painter.canvas.size
-            painter.clear((16, 16, 20))
+            if is_android_skin():
+                painter.vgradient((0, 0, w, h),
+                                  start=COLORS.bg_top, end=COLORS.bg_bottom)
+            else:
+                painter.clear((16, 16, 20))
             size = 22
             tw = painter.text_width(title, size=size)
             painter.text(((w - tw) / 2, h * 0.40), title, size=size,
@@ -860,7 +870,13 @@ class App:
         painted result can be cached and the cursor moved cheaply.  Overlays
         (menu, toast) are drawn by :meth:`_draw_overlays` on top.
         """
-        painter.clear()
+        if is_android_skin():
+            painter.vgradient(
+                (0, 0, painter.width, painter.height),
+                start=COLORS.bg_top, end=COLORS.bg_bottom,
+            )
+        else:
+            painter.clear()
         if self.session.view == VIEW_GAMES:
             self._last_first = self._draw_games(painter, highlight=highlight)
         else:
@@ -940,19 +956,19 @@ class App:
         # to repaint it, and a strip costs more than a whole frame budget.
         if painter.single:
             self._draw_detail_strip(painter)
-        self._top_cache = painter.canvas.pil_image.copy()
+        self._top_cache = painter.canvas.snapshot()
         self._draw_selection(painter, only=self._top_index())
         self._top_struct = self._struct_key()
         self._top_sel = self._top_index()
         self._top_first = self._last_first
 
     def _paint_incremental(self, painter: Painter) -> None:
-        painter.canvas.pil_image.paste(self._top_cache)
+        painter.canvas.restore(self._top_cache)
         self._draw_selection(painter, only=self._top_index())
         self._top_sel = self._top_index()
 
     def _reuse(self, painter: Painter) -> None:
-        painter.canvas.pil_image.paste(self._top_cache)
+        painter.canvas.restore(self._top_cache)
         self._draw_selection(painter, only=self._top_sel)
 
     def _draw_selection(self, painter: Painter, *, only: int) -> None:
@@ -1088,12 +1104,14 @@ class App:
         """The detail strip's artwork slot, in absolute pixels.
 
         Cover and clip share it, and the decoder is sized from it, so all three
-        have to agree on one number.
+        have to agree on one number.  The strip's own box comes from
+        ``Metrics.detail_box()``, so a form that arranges it differently moves
+        the artwork with it.
         """
-        return (m.u(8) + m.u(10),
-                m.content_top + m.content_h(single=True) + m.u(10),
-                m.u(_STRIP_ART_W),
-                m.strip_h - 2 * m.u(10))
+        strip_x, strip_y, _strip_w, strip_h = m.detail_box()
+        inset = m.u(10)
+        return (strip_x + inset, strip_y + inset,
+                m.u(_STRIP_ART_W), strip_h - 2 * inset)
 
     def _strip_art_size(self, m) -> tuple[int, int]:
         """Decode size for the strip's slot (no per-frame resize)."""
@@ -1109,10 +1127,7 @@ class App:
         """
         m = painter.metrics
         session = self.session
-        x = m.u(8)
-        w = m.width - 2 * m.u(8)
-        y = m.content_top + m.content_h(single=True)
-        h = m.strip_h
+        x, y, w, h = m.detail_box()
 
         painter.rounded_rect((x, y, w, h), radius=m.u(8),
                              fill=COLORS.panel, outline=COLORS.border)
@@ -1247,11 +1262,11 @@ class App:
         if cache is None:
             return
         m = painter.metrics
-        top = m.content_top + m.content_h(single=True)
-        cache.paste(
-            painter.canvas.pil_image.crop((0, top, m.width, top + m.strip_h)),
-            (0, top),
-        )
+        # Full width, not the strip's own box: the rounded panel is inset, and
+        # re-capturing only the inset area would leave the background either
+        # side of it stale.
+        _x, top, _w, height = m.detail_box()
+        painter.canvas.update_snapshot(cache, (0, top, m.width, height))
 
     def _draw_bottom(self, painter: Painter) -> None:
         session = self.session
@@ -1511,7 +1526,7 @@ class App:
         self._launch_game_name = game.name
         self._launch_at = time.monotonic()
         self._launch_plan = plan
-        self.platform.launch_game(plan.argv)
+        self.platform.launch_game(plan.target)
 
     def _launch_resident(self, plan: LaunchPlan) -> None:
         """Run the game while this process stays alive (DESIGN §8.2 fast path).
@@ -1529,10 +1544,12 @@ class App:
         log.info("staying resident: hiding windows for %s", plan.core_label)
         self.platform.suspend_display()
         try:
-            result = subprocess.run(list(plan.argv))
-            log.info("game exited with %s", result.returncode)
+            # The platform owns the child process: on Android the same call
+            # starts an activity (or a hosted core) and waits for it, which is
+            # why this is not a subprocess call any more.
+            log.info("game exited with %s", self.platform.run_foreground(plan.target))
         except OSError as exc:
-            log.error("could not start %s: %s", plan.argv, exc)
+            log.error("could not start %s: %s", plan.target, exc)
             self.session.notify(str(exc))
         finally:
             self.platform.resume_display()

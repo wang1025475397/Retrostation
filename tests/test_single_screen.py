@@ -15,7 +15,7 @@ from PIL import Image
 
 from retrostation.core.config import Config
 from retrostation.core.i18n import Translator
-from retrostation.core.theme import metrics_for
+from retrostation.core.theme import Form, metrics_for
 from retrostation.data.library import Library
 from retrostation.platform.base import InputAction, InputEvent, InputKind
 from retrostation.ui.app import EXIT_OK, EXIT_RESTART, App
@@ -56,7 +56,7 @@ class TestSingleScreen:
         app, platform = pair
         app.run(max_frames=2)
         assert app._video.enabled is True
-        box = app._strip_art_box(metrics_for(640, 480))
+        box = app._strip_art_box(metrics_for(640, 480, Form.COMPACT))
         assert (app._video._settings.width, app._video._settings.height) == (box[2], box[3])
 
     def test_all_three_views_render(self, pair) -> None:
@@ -102,7 +102,7 @@ class TestSingleScreen:
         platform.send(InputEvent(InputAction.A))     # into a system
         app.run(max_frames=1)
 
-        metrics = metrics_for(640, 480)
+        metrics = metrics_for(640, 480, Form.COMPACT)
         top = metrics.content_top + metrics.content_h(single=True)
         strip = platform.canvases[0].pil_image.crop((0, top, 640, top + metrics.strip_h))
         assert len(set(strip.getdata())) > 3, "the detail strip is blank"
@@ -119,7 +119,7 @@ class TestSingleScreen:
         platform.send(InputEvent(InputAction.A))     # into a system
         app.run(max_frames=1)
 
-        metrics = metrics_for(640, 480)
+        metrics = metrics_for(640, 480, Form.COMPACT)
         top = metrics.content_top + metrics.content_h(single=True)
         app.run(max_frames=4)                        # idle: nothing changes
         strip = platform.canvases[0].pil_image.crop((0, top, 640, top + metrics.strip_h))
@@ -137,7 +137,7 @@ class TestSingleScreen:
         platform.send(InputEvent(InputAction.A))     # into a system
         app.run(max_frames=1)
 
-        metrics = metrics_for(640, 480)
+        metrics = metrics_for(640, 480, Form.COMPACT)
         top = metrics.content_top + metrics.content_h(single=True)
         box = (0, top, 640, top + metrics.strip_h)
         # Blank the canvas: only a cache restore may bring the strip back.
@@ -160,7 +160,7 @@ class TestSingleScreen:
         platform.send(InputEvent(InputAction.A))     # into a system
         app.run(max_frames=1)
 
-        metrics = metrics_for(640, 480)
+        metrics = metrics_for(640, 480, Form.COMPACT)
         top = metrics.content_top + metrics.content_h(single=True)
         box = (0, top, 640, top + metrics.strip_h)
 

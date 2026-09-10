@@ -6,12 +6,14 @@ cursor, so switching views with X never loses your place (DESIGN §7.1).
 
 from __future__ import annotations
 
-from PIL import Image, ImageChops, ImageDraw
+from typing import Callable
 
-from ..art import ArtProvider
+from ...core.model import Game
+from ...core.theme import COLORS
 from ...data.media import cover_bitmap
+from ..art import ArtProvider
 from ..painter import Painter
-
+from ..widgets import page_header, scrollbar
 
 #: One artwork slot the views ask the cache for: ``(kind, width, height, cover)``.
 #: Exactly the key the cache is built on, so warming a slot produces the file
@@ -67,29 +69,6 @@ def all_slots(painter: Painter) -> list[Slot]:
     return list(merged)
 
 
-def _round_corners(bitmap: object, radius: int) -> object:
-    """Return ``bitmap`` with its corners clipped to a rounded rectangle.
-
-    The mask is multiplied with the bitmap's existing alpha, so a dimmed
-    (semi-transparent) cover keeps its fade instead of snapping back to opaque.
-    """
-    if radius <= 0:
-        return bitmap
-    image: Image.Image = bitmap  # type: ignore[assignment]
-    if image.mode != "RGBA":
-        image = image.convert("RGBA")
-    w, h = image.size
-    r = min(radius, w // 2, h // 2)
-    mask = Image.new("L", (w, h), 0)
-    ImageDraw.Draw(mask).rounded_rectangle([0, 0, w, h], radius=r, fill=255)
-    alpha = ImageChops.multiply(image.split()[-1], mask)
-    rounded = image.copy()
-    rounded.putalpha(alpha)
-    return rounded
-from ..widgets import page_header, scrollbar
-from ...core.model import Game
-from ...core.theme import COLORS
-
 _STAR = "★"
 
 
@@ -120,7 +99,7 @@ def _dimmed(painter: Painter, bitmap: object, opacity: int) -> object:
     to black instead of fading it.  The cache matters because the carousel
     re-dims the same neighbour covers on every frame.
     """
-    key = (id(bitmap), bitmap.width, bitmap.height, opacity)
+    key = (id(bitmap), *painter.canvas.bitmap_size(bitmap), opacity)
     faded = _DIM_CACHE.get(key)
     if faded is None:
         faded = painter.canvas.dim(bitmap, opacity)
@@ -173,7 +152,7 @@ def cover_art(
         # only that one is rounded.  A letterboxed one sits in the middle of
         # the plate with the card's colour around it, and rounding it just
         # bites a notch out of each of its own corners.
-        drawn = _round_corners(drawn, radius)
+        drawn = painter.canvas.round_corners(drawn, radius)
     painter.image_fit(drawn, box)
 
 
@@ -212,14 +191,9 @@ def draw_backdrop(painter: Painter, art: ArtProvider, game: Game) -> None:
         if len(_BACKDROP_DIM) >= _BACKDROP_LIMIT:
             _BACKDROP_DIM.clear()
         _BACKDROP_DIM[key] = faded
-    # The canvas must stay fully opaque.  On the device the RGBA framebuffer is
-    # composited by Weston using its alpha channel, so any alpha<255 pixel shows
-    # through to black instead of to the dimmed art (DESIGN §4.4).  Composite the
-    # dimmed backdrop onto the opaque background colour and flatten its alpha.
-    base = Image.new("RGBA", (width, height), COLORS.bg)
-    base.alpha_composite(faded)
-    base.putalpha(255)
-    painter.image(base, (0, 0, width, height))
+    # The canvas must stay fully opaque -- see ``Canvas.flatten``: an alpha<255
+    # pixel would show through to black rather than to the dimmed art.
+    painter.image(painter.canvas.flatten(faded, COLORS.bg), (0, 0, width, height))
 
 
 def panel_fill(painter: Painter):
@@ -311,7 +285,7 @@ def _row(
         meta_color = (90, 66, 16, 255)
         index_color = (110, 82, 22, 255)
     else:
-        painter.rounded_rect(box, radius=m.u(6), fill=panel_fill(painter))
+        painter.rounded_rect(box, radius=m.radius, fill=panel_fill(painter))
         name_color = COLORS.text
         meta_color = COLORS.text_dim
         index_color = (92, 92, 99, 255)
@@ -423,7 +397,7 @@ def _card(
         # of boxes, and once the art is letterboxed there were two rectangles
         # per game competing -- the card's and the picture's.
         halo = (x - m.u(3), y - m.u(3), w + m.u(6), h + m.u(6))
-        painter.rounded_rect(halo, radius=m.u(9), outline=COLORS.accent, width=2)
+        painter.rounded_rect(halo, radius=m.radius, outline=COLORS.accent, width=2)
 
     art_h = h - name_h
     # Letterboxed, not cropped.  The cell is a fixed slot, but cover art is
@@ -570,3 +544,23 @@ def draw_scrollbar(
 ) -> None:
     """Repaint only the scrollbar -- the rows/cells around it are unchanged."""
     scrollbar(painter, index=index, total=total, visible=visible, content_h=content_h)
+
+
+def list_hit(m, count: int, index: int, rows_per_page: int, x: int, y: int) -> int | None:
+    """The game position a tap landed on in the list view (DESIGN.ANDROID §10.3).
+
+    Mirrors ``draw_list``: page-aligned rows starting at ``content_top``,
+    stepping ``row_step``.  The horizontal check is deliberately loose -- a
+    full-width row is the tap target, so any x inside the content area counts.
+    """
+    first = (index // rows_per_page) * rows_per_page
+    top = m.content_top + m.u(8)
+    if y < top:
+        return None
+    row = (y - top) // m.row_step
+    if row >= rows_per_page:
+        return None
+    position = first + row
+    if position >= count:
+        return None
+    return position
