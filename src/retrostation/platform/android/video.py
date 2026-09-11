@@ -34,6 +34,9 @@ class SurfaceVideoPipe(VideoPipe):
     def read_frame(self) -> None:
         return None
 
+    def set_volume(self, value: float) -> None:
+        self._bridge.set_video_volume(value)  # type: ignore[attr-defined]
+
     def close(self) -> None:
         if not self._closed:
             self._closed = True

@@ -52,6 +52,9 @@ class FakeVideoPipe:
         self._left -= 1
         return object()
 
+    def set_volume(self, value: float) -> None:
+        self.volume = value
+
     def close(self) -> None:
         self.closed = True
 

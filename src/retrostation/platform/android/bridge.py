@@ -84,6 +84,12 @@ class AndroidBridge:
         x, y, w, h = rect
         self._kt.openVideo(str(path), index, x, y, w, h)
 
+    def play_sfx(self, kind: str) -> None:
+        self._kt.playSfx(kind)
+
+    def configure_sfx(self, *, enabled: bool, volume: float) -> None:
+        self._kt.configureSfx(enabled, float(volume))
+
     def stop_video(self) -> None:
         self._kt.stopVideo()
 

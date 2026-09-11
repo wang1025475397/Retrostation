@@ -404,6 +404,14 @@ class VideoPipe(abc.ABC):
     #: Platform composites the frames itself; read_frame() stays None.
     external: bool = False
 
+    def set_volume(self, value: float) -> None:
+        """Set the clip's soundtrack level, 0.0-1.0.
+
+        Only meaningful for external pipes, where the platform owns both the
+        pictures and the sound; the handheld mixes through its audio pipe.
+        """
+        return None
+
     @abc.abstractmethod
     def read_frame(self) -> object | None:
         """Block until the next frame is decoded.

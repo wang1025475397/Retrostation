@@ -95,6 +95,27 @@ _SPIN_FRAME = 0.05
 #: Which blip each button makes.  Only the buttons that move or commit
 #: something answer: the volume rocker already changes something audible, and
 #: typing a query is confirmed by the results appearing.
+#: Button-bar labels -> the action each one stands for.  A tap on the bar
+#: presses that button, which is how a phone with no physical keys reaches
+#: Start / Back / Grid / Search / Menu (DESIGN.ANDROID §10.4).
+_BAR_LABEL_ACTIONS = {
+    "A": InputAction.A,
+    "B": InputAction.B,
+    "X": InputAction.X,
+    "Y": InputAction.Y,
+    "UP": InputAction.UP,
+    "DOWN": InputAction.DOWN,
+    "LEFT": InputAction.LEFT,
+    "RIGHT": InputAction.RIGHT,
+    "L1": InputAction.L1,
+    "R1": InputAction.R1,
+    "L2": InputAction.L2,
+    "R2": InputAction.R2,
+    "START": InputAction.START,
+    "SELECT": InputAction.SEARCH,
+    "MENU": InputAction.MENU,
+}
+
 _SFX_FOR_ACTION = {
     InputAction.UP: "move",
     InputAction.DOWN: "move",
@@ -413,6 +434,11 @@ class App:
     # ------------------------------------------------------------------ #
 
     def _handle(self, event: InputEvent) -> None:
+        # A tap on the button bar presses that button before anything else reads
+        # the coordinates (DESIGN.ANDROID §10.4).
+        if (event.action is InputAction.TAP and event.x is not None
+                and self._tap_button(event)):
+            return
         self._blip(event)
         # Anything the player does outranks the warm-up: they are about to
         # move, and the thread shares this core with the frame loop.
@@ -450,6 +476,21 @@ class App:
         kind = _SFX_FOR_ACTION.get(event.action)
         if kind is not None:
             self.platform.play_sfx(kind)
+
+    def _tap_button(self, event: InputEvent) -> bool:
+        """Press the bar button under a tap; ``False`` when the tap missed it."""
+        index = event.screen if 0 <= event.screen < len(self._painters) else 0
+        hits = getattr(self._painters[index], "button_hits", ())
+        for (x, y, w, h), label in hits:
+            if x <= event.x <= x + w and y <= event.y <= y + h:
+                action = _BAR_LABEL_ACTIONS.get(label)
+                if action is None:
+                    return False
+                # Re-enter as a normal press: every screen already handles it.
+                self._handle(InputEvent(action=action, kind=InputKind.PRESS,
+                                        screen=event.screen))
+                return True
+        return False
 
     def _apply_sfx(self) -> None:
         """Push the button-sound settings down to the platform."""

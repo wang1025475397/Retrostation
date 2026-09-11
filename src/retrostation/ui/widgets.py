@@ -80,12 +80,18 @@ def button_bar(painter: Painter, hints: list[tuple[str, str]]) -> None:
     center = top + m.bar_h // 2
     radius = m.u(9)
     x = m.u(10)
+    hits: list[tuple[tuple[int, int, int, int], str]] = []
     for key_label, action_label in hints:
+        left = x
         painter.ellipse((x, center - radius, radius * 2, radius * 2), fill=COLORS.accent_d1)
         painter.text((x + radius, center), key_label, size=10, fill=(26, 18, 6, 255), anchor="mm")
         x += radius * 2 + m.u(5)
         painter.text((x, center), action_label, size=12, fill=COLORS.text_dim, anchor="lm")
         x += painter.text_width(action_label, size=12) + m.u(12)
+        hits.append(((left, top, x - left, m.bar_h), key_label))
+    # The bar is tappable: a phone has no physical buttons, so each span presses
+    # the button it advertises (DESIGN.ANDROID §10.4).  The app hit-tests these.
+    painter.button_hits = hits
 
 
 def scrollbar(painter: Painter, *, index: int, total: int, visible: int, content_h: int) -> None:

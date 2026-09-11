@@ -191,6 +191,9 @@ class VideoPlayer:
                 self._settings = replace(self._settings, volume=volume)
                 if self._audio is not None:
                     self._audio.set_volume(volume)
+                elif self._pipe is not None:
+                    # External pipe (Android): the platform owns the soundtrack.
+                    self._pipe.set_volume(volume)
 
         if enabled is None or self._closed or enabled == self._enabled:
             return
@@ -422,6 +425,7 @@ class VideoPlayer:
         generation = self._generation
         self._current = target
         self._pipe = pipe
+        pipe.set_volume(self._settings.volume)
         self._audio = None
         self._frames_decoded = 0
         self._duration = 0.0

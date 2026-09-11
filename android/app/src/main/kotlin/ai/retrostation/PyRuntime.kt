@@ -149,14 +149,28 @@ class PyRuntime(private val context: Context) {
             return arr.toString()
         }
 
-        // A5: wire BatteryManager here; null means "no reading", which the
-        // status bar already renders as "level unknown" (same as a handheld
-        // with no sysfs node).  Returning null at boot avoids a crash.
-        fun battery(): Int? = null
+        /** Battery percentage, or null when the host cannot tell (§A5). */
+        fun battery(): Int? {
+            val manager = context.getSystemService(android.content.Context.BATTERY_SERVICE)
+                as? android.os.BatteryManager ?: return null
+            val level = manager.getIntProperty(android.os.BatteryManager.BATTERY_PROPERTY_CAPACITY)
+            return if (level in 0..100) level else null
+        }
         fun temperature(): Float? = null
-        // A5: wire Settings.System here.  No-op until then so the brightness
-        // setting screen does not throw on every apply.
-        fun setBrightness(value: Int, index: Int): Unit = Unit
+        /**
+         * Per-window brightness, 0-255 from the settings row.
+         *
+         * Written on the window rather than Settings.System: no permission
+         * needed, and it only dims this app (the system value is the player's).
+         */
+        fun setBrightness(value: Int, index: Int) {
+            val activity = context as? android.app.Activity ?: return
+            activity.runOnUiThread {
+                val attrs = activity.window.attributes
+                attrs.screenBrightness = (value / 255f).coerceIn(0.01f, 1f)
+                activity.window.attributes = attrs
+            }
+        }
 
         fun romRoot(): String = "/storage/emulated/0/Roms" // refined by StorageBridge (A3)
 
@@ -207,6 +221,36 @@ class PyRuntime(private val context: Context) {
                 }
             }
             return arr.toString()
+        }
+
+        // -- button blips (DESIGN.ANDROID §9.4) ------------------------------ //
+
+        private var tone: android.media.ToneGenerator? = null
+        @Volatile private var sfxEnabled = false
+        @Volatile private var sfxVolume = 0.5f
+
+        fun configureSfx(enabled: Boolean, volume: Double) {
+            sfxEnabled = enabled
+            sfxVolume = volume.toFloat().coerceIn(0f, 1f)
+            if (!enabled) {
+                tone?.release()
+                tone = null
+            }
+        }
+
+        /** ToneGenerator needs no assets and no ALSA-style mixing code. */
+        fun playSfx(kind: String) {
+            if (!sfxEnabled) return
+            val level = (sfxVolume * 100).toInt().coerceIn(1, 100)
+            val player = tone ?: android.media.ToneGenerator(
+                android.media.AudioManager.STREAM_MUSIC, level
+            ).also { tone = it }
+            val tune = when (kind) {
+                "confirm" -> android.media.ToneGenerator.TONE_PROP_ACK
+                "back" -> android.media.ToneGenerator.TONE_PROP_NACK
+                else -> android.media.ToneGenerator.TONE_PROP_BEEP
+            }
+            player.startTone(tune, 40)
         }
 
         /**

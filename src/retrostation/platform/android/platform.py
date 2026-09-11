@@ -116,6 +116,19 @@ class AndroidPlatform(Platform):
             return
         raise UnsupportedTarget(self.name, target)
 
+    # -- sound ------------------------------------------------------------ #
+
+    def play_sfx(self, kind: str) -> None:
+        """Button blips through the host's tone generator (§9.4)."""
+        self._bridge.play_sfx(kind)
+
+    def configure_sfx(self, *, enabled: bool, volume: float) -> None:
+        self._bridge.configure_sfx(enabled=enabled, volume=volume)
+
+    def release_sfx(self) -> None:
+        # ExoPlayer owns the output while a clip plays; nothing else to give up.
+        return None
+
     def run_foreground(self, target: LaunchTarget) -> int | None:
         """Start the game and return at once: this app stays resident (§8.11).
 
