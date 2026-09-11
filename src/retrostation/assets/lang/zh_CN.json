@@ -73,6 +73,8 @@
   "menu.theme": "主题",
   "menu.variant": "明暗",
   "menu.status_bar": "状态栏",
+  "menu.virtual_pad": "虚拟按键",
+  "menu.virtual_pad_opacity": "按键不透明度",
   "menu.brightness": "背光",
   "menu.scrape": "跳转刮削",
   "menu.about": "关于",

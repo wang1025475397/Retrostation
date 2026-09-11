@@ -108,6 +108,9 @@ def draw(painter: Painter, art: ArtProvider, game: Game | None, meta: Meta | Non
 
     _meta(painter, meta, (m.u(12) + m.media_w + m.body_gap, top, m.meta_w, m.bottom_body_h()),
           desc_scroll)
+    # The on-screen pad is NOT drawn here: it is an overlay owned by the app
+    # (``_draw_bottom`` / ``_draw_overlays``), so it stays put -- and stays
+    # live -- across every page of this panel instead of only the game view.
     _hints(painter, hints)
 
 

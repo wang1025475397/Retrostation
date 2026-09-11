@@ -46,7 +46,9 @@ def art_slots(painter: Painter, layout: str) -> list[Slot]:
     if layout == "grid":
         cols = m.grid_cols
         padding, gap = m.grid_padding, m.grid_gap
-        cell_w = (m.width - 2 * padding - gap * (cols - 1)) // cols
+        # ``content_w``: with the detail panel beside the grid the cells share
+        # the narrower column, and it equals ``width`` on every other form.
+        cell_w = (m.content_w - 2 * padding - gap * (cols - 1)) // cols
         # The cell carries a name bar; only what is left is artwork.
         art_h = m.grid_cell_h(single=single) - m.u(24)
         return [("cover", cell_w, art_h, False)]
@@ -259,7 +261,7 @@ def draw_list(
         game = games[position]
         y = m.content_top + m.u(8) + row * row_step
         selected = highlight and position == index
-        _row(painter, art, game, (m.u(8), y, m.width - m.u(24), m.row_h), selected=selected,
+        _row(painter, art, game, (m.u(8), y, m.content_w - m.u(24), m.row_h), selected=selected,
              position=position, total=len(games),
              sublabel=sublabel_for(game) if sublabel_for else None)
 
@@ -362,7 +364,7 @@ def draw_grid(
     first = page * per_page
     cell_h = m.grid_cell_h(single=_single(painter))
     padding, gap = m.grid_padding, m.grid_gap
-    cell_w = (m.width - 2 * padding - gap * (cols - 1)) // cols
+    cell_w = (m.content_w - 2 * padding - gap * (cols - 1)) // cols
 
     for slot in range(per_page):
         position = first + slot

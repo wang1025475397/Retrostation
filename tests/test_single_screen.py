@@ -27,6 +27,10 @@ def single_app(rom_root: Path) -> tuple[App, FakePlatform]:
     platform = FakePlatform(rom_root)
     config = Config()
     config.screen_mode = "single"
+    # The carousel keeps the folded panel underneath the content; list and grid
+    # move it beside the rows (DESIGN §11.3).  These tests are about the folded
+    # strip, so they pin the arrangement that has one.
+    config.layout = "carousel"
     script = rom_root / "RA_launch.sh"
     script.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     config.launcher.ra_script = str(script)

@@ -196,7 +196,10 @@ class AndroidPlatform(Platform):
             self._video_rect = None
             return
         x, y, w, h = (int(v) for v in rect)
+        moved = self._video_rect is not None and self._video_rect[:4] != (x, y, w, h)
         self._video_rect = (x, y, w, h, int(index))
+        if moved:
+            self._bridge.move_video(int(index), (x, y, w, h))
 
     def open_video_pipe(self, path, *, width: int, height: int, fps: int):
         """ExoPlayer renders the clip into the media box (DESIGN.ANDROID §9.2)."""

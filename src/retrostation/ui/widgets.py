@@ -90,18 +90,153 @@ def button_bar(painter: Painter, hints: list[tuple[str, str]]) -> None:
         x += painter.text_width(action_label, size=12) + m.u(12)
         hits.append(((left, top, x - left, m.bar_h), key_label))
     # The bar is tappable: a phone has no physical buttons, so each span presses
-    # the button it advertises (DESIGN.ANDROID §10.4).  The app hit-tests these.
-    painter.button_hits = hits
+    # the button it advertises (DESIGN.ANDROID §10.4).  The app hit-tests these;
+    # it clears the list each frame before anything draws.
+    if getattr(painter, "button_hits", None) is None:
+        painter.button_hits = []
+    painter.button_hits.extend(hits)
 
 
-def scrollbar(painter: Painter, *, index: int, total: int, visible: int, content_h: int) -> None:
+#: Arrow glyphs for the virtual d-pad arms.
+_PAD_GLYPHS = {"UP": "\u25b2", "DOWN": "\u25bc", "LEFT": "\u25c0", "RIGHT": "\u25b6"}
+
+
+def _scaled(alpha: int, opacity: int) -> int:
+    """``alpha`` at ``opacity`` percent (0-100), clamped to a byte."""
+    return max(0, min(255, round(alpha * max(0, min(100, opacity)) / 100)))
+
+
+def dpad(painter: Painter, box: tuple[int, int, int, int], *,
+         opacity: int = 100) -> None:
+    """A translucent d-pad whose arms join ``painter.button_hits``.
+
+    Directions only -- confirm / back / view live on the button bar and on the
+    face buttons (see :func:`game_pad`).  Call it *after* :func:`button_bar`:
+    that one resets the hit list each frame, this one appends to it.
+    """
+    x, y, w, h = box
+    side = min(w, h)
+    cx, cy = x + w // 2, y + h // 2
+    half = side // 2
+    painter.ellipse((cx - half, cy - half, side, side),
+                    fill=(255, 255, 255, _scaled(90, opacity)))
+
+    arm = int(side * 0.35)
+    btn = int(side * 0.30)          # arm + btn/2 = 0.50: flush with the disc
+    radius = max(2, int(side * 0.11))
+    hits: list[tuple[tuple[int, int, int, int], str]] = []
+    for dx, dy, label in ((-1, 0, "LEFT"), (1, 0, "RIGHT"), (0, -1, "UP"), (0, 1, "DOWN")):
+        bx = cx + dx * arm - btn // 2
+        by = cy + dy * arm - btn // 2
+        area = (bx, by, btn, btn)
+        painter.rounded_rect(area, radius=radius,
+                             fill=(255, 255, 255, _scaled(150, opacity)))
+        painter.text((bx + btn // 2, by + btn // 2), _PAD_GLYPHS[label],
+                     size=max(9, side // 7), fill=(240, 240, 244), anchor="mm")
+        hits.append((area, label))
+    painter.button_hits.extend(hits)
+
+
+#: Face-button colours, Switch-ish so each letter reads at a glance.
+_FACE_COLOURS = {
+    "A": (86, 196, 120),
+    "B": (214, 92, 92),
+    "X": (92, 148, 220),
+    "Y": (214, 178, 84),
+}
+
+
+def game_pad(painter: Painter, box: tuple[int, int, int, int], *,
+             opacity: int = 100,
+             avoid: tuple[int, int, int, int] | None = None) -> None:
+    """The full on-screen pad: d-pad, A/B/X/Y and select/start (§10.4).
+
+    A phone has no keys at all, so every action the session understands has to
+    be reachable by touch -- the button bar only carries context actions.  All
+    arms, buttons and pills join ``painter.button_hits``, so the app's existing
+    tap-to-button path presses them with no extra wiring.
+    """
+    x, y, w, h = box
+    side = min(h, w // 3)
+    cy = y + (h - side) // 2
+    left = x
+    if avoid is not None:
+        ax, ay, aw, ah = avoid
+        # The clip is a native surface painted above this canvas, so it cannot
+        # be covered: the d-pad steps aside instead -- it is the cluster that
+        # shares a corner with the media box.
+        if ax < left + side and left < ax + aw and ay < cy + side and cy < ay + ah:
+            left = ax + aw + painter.metrics.u(8)
+    dpad(painter, (left, cy, side, side), opacity=opacity)
+
+    r = max(9, int(side * 0.205))
+    # Clamp the spread to the box: the diamond reaches ``off + r`` out from the
+    # centre, and letting that exceed half the box height clipped the bottom
+    # button against the panel edge.
+    off = min(int(side * 0.355), max(4, h // 2 - r - 2))
+    cx = x + w - side // 2 - r
+    mid = y + h // 2
+    hits: list[tuple[tuple[int, int, int, int], str]] = []
+    # Diamond, Switch layout: A right, B down, X up, Y left.
+    for dx, dy, label in ((0, -off, "X"), (off, 0, "A"), (0, off, "B"), (-off, 0, "Y")):
+        bx, by = cx + dx - r, mid + dy - r
+        painter.ellipse((bx, by, r * 2, r * 2),
+                        fill=(*_FACE_COLOURS[label], _scaled(255, opacity)))
+        painter.text((bx + r, by + r), label, size=max(10, int(r * 1.1)),
+                     fill=(24, 24, 28), anchor="mm")
+        hits.append(((bx, by, r * 2, r * 2), label))
+
+    pill_w, pill_h = max(56, int(side * 0.42)), max(16, int(side * 0.20))
+    px = x + side + max(2, (w - 2 * side - pill_w) // 2)
+    gap = max(8, side // 8)          # airy: the two pills read as a pair, not a blob
+    for i, label in enumerate(("SELECT", "START")):
+        py = mid - pill_h - gap // 2 + i * (pill_h + gap)
+        painter.rounded_rect((px, py, pill_w, pill_h), radius=pill_h // 2,
+                             fill=(236, 238, 244, _scaled(230, opacity)))
+        painter.text((px + pill_w // 2, py + pill_h // 2), label,
+                     size=max(9, int(pill_h * 0.56)), fill=(22, 22, 26),
+                     anchor="mm")
+        hits.append(((px, py, pill_w, pill_h), label))
+
+    painter.button_hits.extend(hits)
+
+
+def pad_box(m, *, single: bool, height: int | None = None) -> tuple[int, int, int, int]:
+    """Where the floating pad sits, per form (DESIGN.ANDROID §10.4).
+
+    The pad is an overlay, so its box comes from the surface it floats on, not
+    from whatever page is showing: both forms anchor it to the bottom with one
+    cluster in each lower corner.  ``height`` is that surface's height.
+    """
+    panel_h = m.height if height is None else height
+    h = m.u(112) if single else m.u(150)
+    if single:
+        # Landscape: on the strip's band, clear of the button bar.
+        y = m.height - m.bar_h - h - m.u(4)
+    else:
+        # Portrait: the same rule -- hard against the bottom of the surface the
+        # pad is painted on.  ``height`` is that surface's height; ``m.height``
+        # is the panel the layout was *planned* for and is taller than the
+        # canvas handed to the painter, so anchoring to it pushed the pad past
+        # the visible bottom and clipped it (which is why this used to sit at a
+        # made-up 65% instead of at the bottom).
+        y = panel_h - h - m.u(16)
+    # Full width, even when the detail panel sits beside the rows: the thumb
+    # reaches the screen edge, not the width of the list.  Sparing the panel
+    # put A/B/X/Y a hand's width away from the right edge, which is the corner
+    # the right thumb actually rests on.
+    return (m.u(12), y, m.width - 2 * m.u(12), h)
+
+
+def scrollbar(
+    painter: Painter, *, index: int, total: int, visible: int, content_h: int) -> None:
     """Thin indicator on the right edge; a no-op when everything fits."""
     m = painter.metrics
     if total <= visible:
         return
     thumb_h = max(m.u(24), content_h * visible / total)
     y = (content_h - thumb_h) * index / max(1, total - 1)
-    x = m.width - m.scrollbar_w - m.u(3)
+    x = m.content_w - m.scrollbar_w - m.u(3)
 
     painter.rect((x, m.u(4), m.scrollbar_w, content_h - m.u(8)), fill=(255, 255, 255, 15))
     painter.rect((x, m.u(4) + int(y), m.scrollbar_w, int(thumb_h)), fill=COLORS.accent)

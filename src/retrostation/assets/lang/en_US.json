@@ -74,6 +74,8 @@
   "menu.theme": "Theme",
   "menu.variant": "Light / dark",
   "menu.status_bar": "Status bar",
+  "menu.virtual_pad": "Virtual pad",
+  "menu.virtual_pad_opacity": "Pad opacity",
   "menu.brightness": "Brightness",
   "menu.scrape": "Open scraper",
   "menu.about": "About",

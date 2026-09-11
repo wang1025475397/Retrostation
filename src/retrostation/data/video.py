@@ -547,6 +547,12 @@ class VideoPlayer:
         """A pipe that produced nothing is broken: blacklist it (DESIGN §14)."""
         if self._frames_decoded or self._current is None:
             return
+        # An external pipe (Android ExoPlayer) never hands us frames by design:
+        # the host composites the clip into the media box.  Judging it by the
+        # frame count tore the player down a few seconds into every clip, which
+        # looked like "the single-screen strip does not play video".
+        if getattr(self._pipe, "external", False):
+            return
         if now - self._started_at < self._settings.stale:
             return
         log.info("video produced no frames within %.1fs: %s", self._settings.stale, self._current[1])
@@ -570,6 +576,16 @@ class VideoPlayer:
         code = proc.poll()
         state = f"exited with {code}" if code is not None else "still running"
         log.info("  decoder: ffmpeg %s, %d frame(s) read", state, self._frames_decoded)
+
+    def _pump_external(self, pipe: VideoPipe, generation: int, stop: threading.Event) -> None:
+        """External pipes are driven by the host; Python just waits.
+
+        Android's ExoPlayer composites the clip into the media box itself, so
+        there is no frame to read and nothing to pace: this thread only has to
+        stay alive -- and interruptible -- until the selection changes or the
+        player is torn down.
+        """
+        stop.wait()
 
     def _pump(self, pipe: VideoPipe, generation: int, stop: threading.Event) -> None:
         """Read frames at a steady pace and publish only the newest one.

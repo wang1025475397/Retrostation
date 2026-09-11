@@ -122,7 +122,7 @@ SORTS = ("name", "play", "recent")
 _CYCLING_ROWS = frozenset(
     {"screen", "card", "layout", "bvideo", "video_sound", "sfx", "sort",
      "show_hidden", "search_by", "theme", "variant", "language", "status_bar",
-     "tcache", "autostart"}
+     "vpad", "vpad_op", "tcache", "autostart"}
 )
 
 
@@ -972,6 +972,14 @@ class Session:
             self._step_brightness(BRIGHTNESS_STEP)
         elif key == "status_bar":
             self.config.show_status_bar = not self.config.show_status_bar
+        elif key == "vpad":
+            self.config.virtual_pad = not self.config.virtual_pad
+        elif key == "vpad_op":
+            # Snap onto the 10% grid first: a value from a hand-edited
+            # config.json can sit between steps, and ``_cycle`` needs a member.
+            steps = tuple(range(20, 101, 10))
+            current = min(steps, key=lambda v: abs(v - self.config.virtual_pad_opacity))
+            self.config.virtual_pad_opacity = _cycle(steps, current, direction)
         elif key == "tcache":
             # Staged like the rest: the cache only actually switches off when A
             # commits, so flicking the switch back and forth costs nothing.
@@ -1099,6 +1107,13 @@ class Session:
              f"{int(config.brightness.get('top', 140))}"),
             ("status_bar", self.translator("menu.status_bar"),
              self.translator("value.on" if config.show_status_bar else "value.off")),
+            # The on-screen pad: shown or hidden, and how solid it is while
+            # shown.  Android-only in effect; on the handheld both rows are
+            # inert, which is why they are not offered as keys there.
+            ("vpad", self.translator("menu.virtual_pad"),
+             self.translator("value.on" if config.virtual_pad else "value.off")),
+            ("vpad_op", self.translator("menu.virtual_pad_opacity"),
+             f"{int(config.virtual_pad_opacity)}%"),
             # The cache pair sits together and last but one: the switch is a
             # set-and-forget preference, and emptying the card is a rare,
             # deliberate act -- not something to land on while arrowing down.

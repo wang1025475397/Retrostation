@@ -126,6 +126,9 @@ class PyRuntime(private val context: Context) {
 
         fun stopVideo() = media.stop()
 
+        fun moveVideo(index: Int, x: Int, y: Int, w: Int, h: Int) =
+            media.move(index, x, y, w, h)
+
         /** 0.0-1.0; the preview is muted unless the player turned sound on. */
         fun setVideoVolume(value: Double) = media.setVolume(value.toFloat())
 

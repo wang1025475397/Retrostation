@@ -83,6 +83,39 @@ class PilCanvas(Canvas):
 
     # -- shapes ----------------------------------------------------------- #
 
+    def _translucent(self, fill, outline) -> bool:
+        """True when a fill or outline asks for partial coverage.
+
+        ``ImageDraw`` does not blend: it *writes* the colour, alpha and all, so
+        a translucent fill lands opaque -- a 40% black scrim comes out solid
+        black.  Every such shape has to be drawn on its own layer and
+        composited instead, which is what :meth:`_composited` does.
+        """
+        for colour in (fill, outline):
+            if colour is not None and len(colour) == 4 and colour[3] < 255:
+                return True
+        return False
+
+    def _composited(self, area: tuple[int, int, int, int], paint) -> None:
+        """Draw ``paint(layer, w, h)`` onto the surface with real blending.
+
+        ``area`` is the destination box; the layer is drawn at its origin, so
+        ``paint`` works in layer-local coordinates.  The shape is still drawn
+        at full size and merely cropped to the surface afterwards: clipping the
+        box first would round the corners of a partially off-screen rectangle
+        against the wrong edges.
+        """
+        x0, y0, x1, y1 = area
+        w, h = max(1, x1 - x0), max(1, y1 - y0)
+        left, top = max(0, x0), max(0, y0)
+        right, bottom = min(self._image.width, x1), min(self._image.height, y1)
+        if right <= left or bottom <= top:
+            return  # entirely off-screen: nothing to blend
+        layer = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+        paint(layer, w, h)
+        self._image.alpha_composite(
+            layer.crop((left - x0, top - y0, right - x0, bottom - y0)), (left, top))
+
     def rect(
         self,
         box: Sequence[float],
@@ -91,8 +124,20 @@ class PilCanvas(Canvas):
         outline: Sequence[int] | None = None,
         width: int = 1,
     ) -> None:
+        area = _box(box)
+        if self._translucent(fill, outline):
+            def paint(layer, w, h):
+                ImageDraw.Draw(layer).rectangle(
+                    (0, 0, w - 1, h - 1),
+                    fill=tuple(fill) if fill else None,
+                    outline=tuple(outline) if outline else None,
+                    width=width if outline else 0,
+                )
+
+            self._composited(area, paint)
+            return
         self._draw.rectangle(
-            _box(box),
+            area,
             fill=tuple(fill) if fill else None,
             outline=tuple(outline) if outline else None,
             width=width if outline else 0,
@@ -107,8 +152,21 @@ class PilCanvas(Canvas):
         outline: Sequence[int] | None = None,
         width: int = 1,
     ) -> None:
+        area = _box(box)
+        if self._translucent(fill, outline):
+            def paint(layer, w, h):
+                ImageDraw.Draw(layer).rounded_rectangle(
+                    (0, 0, w - 1, h - 1),
+                    radius=max(0, radius),
+                    fill=tuple(fill) if fill else None,
+                    outline=tuple(outline) if outline else None,
+                    width=width if outline else 0,
+                )
+
+            self._composited(area, paint)
+            return
         self._draw.rounded_rectangle(
-            _box(box),
+            area,
             radius=max(0, radius),
             fill=tuple(fill) if fill else None,
             outline=tuple(outline) if outline else None,
@@ -171,8 +229,20 @@ class PilCanvas(Canvas):
         outline: Sequence[int] | None = None,
         width: int = 1,
     ) -> None:
+        area = _box(box)
+        if self._translucent(fill, outline):
+            def paint(layer, w, h):
+                ImageDraw.Draw(layer).ellipse(
+                    (0, 0, w - 1, h - 1),
+                    fill=tuple(fill) if fill else None,
+                    outline=tuple(outline) if outline else None,
+                    width=width if outline else 0,
+                )
+
+            self._composited(area, paint)
+            return
         self._draw.ellipse(
-            _box(box),
+            area,
             fill=tuple(fill) if fill else None,
             outline=tuple(outline) if outline else None,
             width=width if outline else 0,

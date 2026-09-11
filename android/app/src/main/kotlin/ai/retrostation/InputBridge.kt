@@ -43,8 +43,9 @@ class InputBridge(
     private var tracker: VelocityTracker? = null
 
     private companion object {
-        /** Finger jitter below this stays a tap (physical px). */
-        const val TAP_SLOP_PX = 24f
+        /** Finger jitter below this stays a tap (physical px).  Raised from 24
+         *  so a tap on the on-screen d-pad does not turn into a scroll. */
+        const val TAP_SLOP_PX = 36f
         /** A press held longer than this is not a tap (long-press menu arrives later). */
         const val TAP_MAX_MS = 600L
         /** Vertical speed above which releasing becomes a fling (px/s). */

@@ -47,7 +47,8 @@ from .session import (
     VIEW_PLATFORMS,
 )
 from .screens import bottom, games, home, menu, search
-from .widgets import button_bar, dialog, status_bar, toast, version_tag
+from .widgets import (
+    button_bar, dialog, game_pad, pad_box, status_bar, toast, version_tag)
 
 log = logging.getLogger(__name__)
 
@@ -522,6 +523,14 @@ class App:
             previews = self.session.preview_games()
             if previews:
                 game = previews[min(self.session.preview_index, len(previews) - 1)]
+        if not self._dual:
+            # Publish the strip's artwork box *before* selecting.  The Android
+            # clip is composited into that box by the host, and opening the pipe
+            # is a no-op while the box is unknown.  It used to be published only
+            # during a strip repaint -- and selection usually won that race, so
+            # the single-screen strip stayed silent on a clip it had loaded.
+            self.platform.set_video_rect(
+                self._strip_art_box(self._painters[0].metrics), index=0)
         self._video.select(game)
 
     def _fire_ready(self) -> None:
@@ -614,6 +623,7 @@ class App:
             # exactly like the backdrop: decoding a cover on every cursor move
             # is what made fast scrolling stutter, so it catches up only after
             # the selection rests (DESIGN §9.2).
+            self._sync_side_detail()
             state_due = key != self._bottom_key
             if state_due:
                 if not self._strip_state_pending:
@@ -917,6 +927,7 @@ class App:
         painted result can be cached and the cursor moved cheaply.  Overlays
         (menu, toast) are drawn by :meth:`_draw_overlays` on top.
         """
+        painter.button_hits = []  # this frame's tap targets (§10.4)
         if is_android_skin():
             painter.vgradient(
                 (0, 0, painter.width, painter.height),
@@ -1044,6 +1055,20 @@ class App:
             games.draw_scrollbar(painter, index, len(all_games), rpp,
                                  m.content_h(single=painter.single))
 
+    def _media_box(self, m) -> tuple[int, int, int, int]:
+        """Where the clip is painted -- the box the pad's d-pad must keep off.
+
+        The clip is a native surface above this canvas (Android), so nothing we
+        draw can cover it; the pad moves instead.
+        """
+        if m.form is Form.DUAL:
+            return (m.u(12), m.bottom_title_h + m.body_padding, m.media_w, m.media_h)
+        return self._strip_art_box(m)
+
+    def _pad_visible(self) -> bool:
+        """Android's on-screen pad: only there, and only while enabled."""
+        return is_android_skin() and self.session.config.virtual_pad
+
     def _draw_overlays(self, painter: Painter) -> None:
         session = self.session
         if session.modal == MODAL_MENU:
@@ -1057,6 +1082,12 @@ class App:
         message = session.active_toast()
         if message:
             toast(painter, message)
+        if painter.single and self._pad_visible():
+            # The pad is an overlay, so it survives every view change instead of
+            # disappearing with the page that owned it (DESIGN.ANDROID §10.4).
+            game_pad(painter, pad_box(painter.metrics, single=True),
+                     opacity=session.config.virtual_pad_opacity,
+                     avoid=self._media_box(painter.metrics))
 
     def _draw_home(self, painter: Painter) -> None:
         session = self.session
@@ -1147,6 +1178,28 @@ class App:
         button_bar(painter, hints)
         return first
 
+    def _sync_side_detail(self) -> None:
+        """List and grid move the folded panel beside the rows.
+
+        Both views are row/cell shaped and read better with the full height;
+        the carousel is *about* its width, so it keeps the panel underneath
+        (DESIGN §11.3).  A no-op while the arrangement already matches, which is
+        every frame but the ones that follow a view change.
+        """
+        want = self.session.layout in ("list", "grid")
+        if self._painters[0].metrics.side_detail == want:
+            return
+        for painter in self._painters:
+            painter.metrics = painter.metrics.with_side_detail(want)
+        # The previous arrangement's pixels are still in the caches: drop them,
+        # or the side panel stays on screen as a ghost beside the rows after
+        # switching to the carousel.
+        self._top_cache = None
+        self._bottom_key = None
+        self._strip_state_pending = True
+        # The session hit-tests and paginates against the same numbers.
+        self.session.attach_metrics(self._painters[0].metrics, single=True)
+
     def _strip_art_box(self, m) -> tuple[int, int, int, int]:
         """The detail strip's artwork slot, in absolute pixels.
 
@@ -1155,8 +1208,13 @@ class App:
         ``Metrics.detail_box()``, so a form that arranges it differently moves
         the artwork with it.
         """
-        strip_x, strip_y, _strip_w, strip_h = m.detail_box()
+        strip_x, strip_y, strip_w, strip_h = m.detail_box()
         inset = m.u(10)
+        if m.side_detail:
+            # A wide column rather than a tall strip: the artwork leads at its
+            # own aspect and the text runs underneath it (DESIGN §11.3).
+            art_w = strip_w - 2 * inset
+            return (strip_x + inset, strip_y + inset, art_w, round(art_w * 0.72))
         return (strip_x + inset, strip_y + inset,
                 m.u(_STRIP_ART_W), strip_h - 2 * inset)
 
@@ -1235,25 +1293,34 @@ class App:
         elif not self._video.is_pending(game.key):
             games.cover_art(painter, self.art, game, art)
 
-        text_x = art[0] + art[2] + m.u(10)
-        text_w = max(m.u(20), x + w - m.u(10) - text_x - (m.u(18) if game.favorite else 0))
         lines = (
             (game.display_name, 14, COLORS.text),
             (f"{meta.system_label} · {meta.publisher}", 11, COLORS.text_dim),
             (f"{meta.genre} · {meta.players} · {meta.release}", 11, COLORS.text_dim),
         )
+        if m.side_detail:
+            # Under the artwork, in the column's own width.
+            text_x = art[0]
+            text_w = max(m.u(20), art[2] - (m.u(18) if game.favorite else 0))
+            text_top = art[1] + art[3] + m.u(10)
+        else:
+            # Beside the artwork, in the strip's remaining width.
+            text_x = art[0] + art[2] + m.u(10)
+            text_w = max(m.u(20),
+                         x + w - m.u(10) - text_x - (m.u(18) if game.favorite else 0))
+            text_top = y + m.u(12)
         for index, (text, size, colour) in enumerate(lines):
             painter.text(
-                (text_x, y + m.u(24) + index * m.u(25)),
+                (text_x, text_top + m.u(12) + index * m.u(25)),
                 painter.ellipsize(text, size=size, max_width=text_w),
                 size=size, fill=colour, anchor="lm",
             )
         # The blurb gets the last line and scrolls when it does not fit, instead
         # of being cut off mid-sentence (see :meth:`_draw_marquee`).
         self._draw_marquee(painter, (meta.description or "")[:_MARQUEE_DESC_CHARS],
-                           text_x, y + m.u(24) + 3 * m.u(25), text_w)
+                           text_x, text_top + m.u(12) + 3 * m.u(25), text_w)
         if game.favorite:
-            painter.text((x + w - m.u(12), y + m.u(24)), "★", size=13,
+            painter.text((x + w - m.u(12), text_top + m.u(12)), "★", size=13,
                          fill=COLORS.accent, anchor="rm")
 
     def _draw_marquee(self, painter: Painter, text: str, x: int, y: int,
@@ -1354,6 +1421,7 @@ class App:
             if game is None and key not in ("ALL", "FAV", "RECENT") else None
         )
 
+        painter.button_hits = []  # this frame's tap targets (§10.4)
         bottom.draw(
             painter,
             self.art,
@@ -1369,6 +1437,14 @@ class App:
             game_count=game_count,
             desc_scroll=self._desc_scroll,
         )
+        if self._pad_visible():
+            # Portrait: the pad is an overlay on the lower panel, drawn after
+            # the page so it stays put -- and stays live -- on every view
+            # (DESIGN.ANDROID §10.4).
+            game_pad(painter, pad_box(painter.metrics, single=False,
+                                      height=painter.canvas.size[1]),
+                     opacity=session.config.virtual_pad_opacity,
+                     avoid=self._media_box(painter.metrics))
 
     def _advance_desc_scroll(self, now: float) -> None:
         """Scroll a description taller than its window, down and then back up.

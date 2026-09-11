@@ -12,6 +12,7 @@ Two rules keep this module honest:
 
 from __future__ import annotations
 
+import dataclasses
 import enum
 from dataclasses import dataclass
 
@@ -218,6 +219,11 @@ class Metrics:
     height: int
     #: Defaults to the handhelds' arrangement, so existing callers are unchanged.
     form: Form = Form.DUAL
+    #: Single screen only: fold the detail panel onto the right-hand side
+    #: instead of under the content.  Rows and cells read better with the full
+    #: height to themselves, while the carousel needs the width.  Off by default
+    #: so every existing arrangement stays exactly as it was.
+    side_detail: bool = False
 
     # -- form ------------------------------------------------------------- #
 
@@ -225,6 +231,16 @@ class Metrics:
     def is_single(self) -> bool:
         """Whether the detail view shares this screen with the content."""
         return self.form is not Form.DUAL
+
+    def with_side_detail(self, enabled: bool) -> "Metrics":
+        """The same screen with the folded panel moved to the side (or back).
+
+        Returns ``self`` when nothing changes, so the caller can assign the
+        result unconditionally without rebuilding the layout every frame.
+        """
+        if enabled == self.side_detail:
+            return self
+        return dataclasses.replace(self, side_detail=enabled)
 
     # -- scaling ---------------------------------------------------------- #
 
@@ -253,6 +269,9 @@ class Metrics:
 
     @property
     def bar_h(self) -> int:
+        # Taller bar on touch devices: it is a row of tap targets there (§11.2).
+        if is_android_skin():
+            return round(self.u(30) * 1.45)
         return self.u(30)
 
     @property
@@ -268,6 +287,21 @@ class Metrics:
             return round(self.height * 0.40)
         return self.u(118)
 
+    @property
+    def strip_w(self) -> int:
+        """Width of the folded panel when it sits beside the content.
+
+        A third of the screen is enough for the artwork plus a few metadata
+        lines, and still leaves the rows most of the width they were designed
+        for (DESIGN §11.3).
+        """
+        return max(self.u(220), round(self.width * 0.34))
+
+    @property
+    def content_w(self) -> int:
+        """Width left for the list / grid / carousel."""
+        return self.width - self.strip_w if self.side_detail else self.width
+
     def content_h(self, *, single: bool | None = None) -> int:
         """Height left for the list / grid / carousel.
 
@@ -277,7 +311,9 @@ class Metrics:
         """
         single = self.is_single if single is None else single
         used = self.status_h + self.head_h + self.bar_h
-        if single:
+        # Beside the content, the panel costs width, not height: the rows keep
+        # the whole column and only their width shrinks (see :attr:`content_w`).
+        if single and not self.side_detail:
             used += self.strip_h
         return max(self.u(120), self.height - used)
 
@@ -299,6 +335,11 @@ class Metrics:
         """
         if self.form is Form.DUAL:
             return (0, 0, self.width, self.height)
+        if self.side_detail:
+            # Flush against the right edge and the button bar: the column runs
+            # the full height the rows do, which is the point of moving it.
+            return (self.width - self.strip_w, self.content_top,
+                    self.strip_w, self.content_h(single=True))
         pad = self.u(8)
         return (pad, self.content_top + self.content_h(single=True),
                 self.width - 2 * pad, self.strip_h)
@@ -307,6 +348,10 @@ class Metrics:
 
     @property
     def row_h(self) -> int:
+        # A finger needs more than the d-pad's 34 reference px: the android skin
+        # scales rows up so the list is comfortably tappable (DESIGN §11.2).
+        if is_android_skin():
+            return round(self.u(34) * 1.6)
         return self.u(34)
 
     @property
@@ -324,6 +369,9 @@ class Metrics:
 
     @property
     def thumb_h(self) -> int:
+        # Grows with the row so the artwork still fills it (§11.2).
+        if is_android_skin():
+            return round(self.u(30) * 1.45)
         return self.u(30)
 
     def rows_per_page(self, *, single: bool | None = None) -> int:
@@ -342,7 +390,7 @@ class Metrics:
     @property
     def grid_cols(self) -> int:
         """Column count adapts to width so tall phone screens look sane."""
-        spare = self.width / (BASE_W * self.scale) if self.scale else 1.0
+        spare = self.content_w / (BASE_W * self.scale) if self.scale else 1.0
         return _clamp(round(4 * spare), 3, 6)
 
     def grid_rows(self, *, single: bool | None = None) -> int:

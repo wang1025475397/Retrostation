@@ -42,6 +42,11 @@ class MediaBridge(
             val sy = host.height.toFloat().coerceAtLeast(1f) / lh
 
             val surface = SurfaceView(context)
+            // The frontend paints opaque bitmaps over the whole window, and a
+            // SurfaceView's surface normally sits *behind* the window content,
+            // so the clip was decoded but never seen.  On top is safe here: the
+            // media box is reserved for the clip.
+            surface.setZOrderOnTop(true)
             root.addView(
                 surface,
                 ViewGroup.LayoutParams((w * sx).toInt(), (h * sy).toInt()),
@@ -59,6 +64,29 @@ class MediaBridge(
             player = exo
             view = surface
         }
+    }
+
+    fun move(index: Int, x: Int, y: Int, w: Int, h: Int) {
+        root.post { place(surfaces.getOrNull(index) ?: return@post, index, x, y, w, h) }
+    }
+
+    private fun place(host: RetroSurfaceView, index: Int, x: Int, y: Int, w: Int, h: Int) {
+        val surface = view ?: return
+        val (lw, _) = logical[index]
+        val sc = host.width.toFloat().coerceAtLeast(1f) / lw
+        // Mutate the existing params rather than replacing them: the parent is
+        // a FrameLayout, and handing it a plain LayoutParams makes its next
+        // measure pass cast it to MarginLayoutParams and crash.
+        // Mutate the existing params in place: the parent is a FrameLayout, and
+        // handing it a plain LayoutParams makes its next measure pass cast it to
+        // MarginLayoutParams and crash.  Positioning by x/y (rather than by
+        // calling layout() here) is what survives the parent's own layout pass.
+        val lp = surface.layoutParams
+        lp.width = (w * sc).toInt()
+        lp.height = (h * sc).toInt()
+        surface.layoutParams = lp
+        surface.x = host.left + x * sc
+        surface.y = host.top + y * sc
     }
 
     fun setVolume(value: Float) {

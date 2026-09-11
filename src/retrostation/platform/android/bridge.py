@@ -93,6 +93,11 @@ class AndroidBridge:
     def stop_video(self) -> None:
         self._kt.stopVideo()
 
+    def move_video(self, index: int, rect: tuple[int, int, int, int]) -> None:
+        """Reposition the running clip after the layout moved its media box."""
+        x, y, w, h = rect
+        self._kt.moveVideo(index, x, y, w, h)
+
     def set_video_volume(self, value: float) -> None:
         self._kt.setVideoVolume(float(value))
 
