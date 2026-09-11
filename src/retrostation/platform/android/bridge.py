@@ -123,8 +123,9 @@ class AndroidBridge:
 
     # -- launching -------------------------------------------------------- #
 
-    def start_activity(self, target: IntentTarget) -> None:
-        self._kt.startActivity(_intent_dict(target))
+    def start_activity(self, target: IntentTarget) -> bool:
+        """Fire the intent; ``False`` when nothing on the device handles it."""
+        return bool(self._kt.startActivity(json.dumps(_intent_dict(target))))
 
     def host_core(self, target: object) -> None:
         # Inline libretro host -- implemented at B0/B1.  Until then the platform

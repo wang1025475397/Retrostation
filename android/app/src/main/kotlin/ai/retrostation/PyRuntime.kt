@@ -209,7 +209,38 @@ class PyRuntime(private val context: Context) {
             return arr.toString()
         }
 
-        fun startActivity(intent: Map<String, Any>): Unit = TODO("LaunchBridge (A4)")
+        /**
+         * Fire a launcher intent (DESIGN.ANDROID §8.1).  Returns false when no app
+         * can handle it, so the caller can say "install RetroArch" instead of
+         * dropping the player out of the frontend.
+         */
+        fun startActivity(intent: String): Boolean {
+            val spec = org.json.JSONObject(intent)
+            val target = android.content.Intent(
+                spec.optString("action", android.content.Intent.ACTION_MAIN)
+            )
+            spec.optString("data_uri").takeIf { it.isNotEmpty() }?.let {
+                target.data = android.net.Uri.parse(it)
+            }
+            val pkg = spec.optString("package")
+            spec.optString("activity").takeIf { it.isNotEmpty() }?.let {
+                target.setClassName(pkg, it)
+            } ?: pkg.takeIf { it.isNotEmpty() }?.let { target.setPackage(it) }
+            spec.optString("mime").takeIf { it.isNotEmpty() }?.let { target.type = it }
+            spec.optJSONArray("extras")?.let { extras ->
+                for (i in 0 until extras.length()) {
+                    val pair = extras.getJSONArray(i)
+                    target.putExtra(pair.getString(0), pair.getString(1))
+                }
+            }
+            return try {
+                context.startActivity(target)
+                true
+            } catch (e: android.content.ActivityNotFoundException) {
+                android.util.Log.w("RSK", "no activity for $target")
+                false
+            }
+        }
         fun onGameExited() = Unit
         fun shutdown() {
             frame.close()

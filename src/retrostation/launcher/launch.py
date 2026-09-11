@@ -63,6 +63,40 @@ def build_plan(game: Game, config: Config) -> LaunchPlan:
     return _retroarch_plan(definition, rom, config)
 
 
+#: RetroArch for Android: the ROM and core travel as intent extras (§8.3).
+RETROARCH_PACKAGE = "com.retroarch"
+RETROARCH_ACTIVITY = "com.retroarch.browser.retroactivity.RetroActivityFuture"
+
+
+def build_android_plan(game: Game, config: Config) -> LaunchPlan:
+    """The Android equivalent of :func:`build_plan`: an activity to start.
+
+    Only the external-emulator path is expressible here; hosting a core inside
+    the app is the B series (``InlineTarget``).
+    """
+    from ..platform.android.images import core_basename, core_filename
+    from ..platform.targets import IntentTarget
+
+    definition = lookup(_system_of(game))
+    if not definition.core:
+        raise LaunchError(f"{definition.key} has no emulator on Android")
+    rom = str(game.path)
+    # Android cores carry an extra suffix (fceumm_libretro_android.so) -- §8.1.
+    core = core_filename(core_basename(definition.core), suffix="_android")
+    extras = (("ROM", rom), ("LIBRETRO", core))
+    return LaunchPlan(
+        target=IntentTarget(
+            package=RETROARCH_PACKAGE,
+            activity=RETROARCH_ACTIVITY,
+            extras=extras,
+            # Older RetroArch builds want the bare activity name; try both
+            # before telling the player nothing can run the game (§8.3).
+            fallbacks=(IntentTarget(package=RETROARCH_PACKAGE, extras=extras),),
+        ),
+        core_label=definition.core_label,
+    )
+
+
 def _system_of(game: Game) -> str:
     return game.key.split("/", 1)[0]
 

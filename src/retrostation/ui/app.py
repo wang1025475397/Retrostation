@@ -27,7 +27,12 @@ from ..core.theme import COLORS, Form, is_android_skin, metrics_for
 from ..data.library import Library
 from ..data.systems import display_name, lookup, variant_suffix
 from ..data.video import VideoPlayer, VideoSettings
-from ..launcher.launch import LaunchError, LaunchPlan, build_plan
+from ..launcher.launch import (
+    LaunchError,
+    LaunchPlan,
+    build_android_plan,
+    build_plan,
+)
 from ..platform.base import InputAction, InputEvent, InputKind, Platform
 from ..platform.targets import UnsupportedTarget
 from .art import ArtProvider
@@ -1483,7 +1488,11 @@ class App:
             return  # already handing off; ignore further input
         system_key = self.session.current_system_key()
         try:
-            plan = build_plan(game, self.config)
+            # Android starts another app (an activity); Linux writes a command
+            # line for its bootstrap to run (DESIGN.ANDROID §8.1).
+            plan = (build_android_plan(game, self.config)
+                    if self.platform.name == "android"
+                    else build_plan(game, self.config))
         except LaunchError as exc:
             log.error("launch failed: %s", exc)
             # On Android the failure is "no Linux launcher script on this card",

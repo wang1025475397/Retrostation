@@ -106,12 +106,34 @@ class AndroidPlatform(Platform):
         if isinstance(target, ArgvTarget):
             raise UnsupportedTarget(self.name, target)
         if isinstance(target, IntentTarget):
-            self._bridge.start_activity(target)  # returns; resident path
-            return
+            # Try the intent and RetroArch's shakier variants (§8.3) before
+            # giving up: "no app handled it" must not silently do nothing.
+            if self._fires(target):
+                return
+            raise UnsupportedTarget(self.name, target)
         if isinstance(target, InlineTarget):
             self._bridge.host_core(target)  # B series; raises until implemented
             return
         raise UnsupportedTarget(self.name, target)
+
+    def run_foreground(self, target: LaunchTarget) -> int | None:
+        """Start the game and return at once: this app stays resident (§8.11).
+
+        The host tells us when the game comes back (``on_resume`` ->
+        ``on_game_exited``), so there is nothing to wait for on this thread --
+        the frontend keeps its windows and memory.
+        """
+        self.launch_game(target)
+        return None
+
+    def _fires(self, target: IntentTarget) -> bool:
+        """Try the intent and its fallbacks; ``True`` once one of them lands."""
+        if self._bridge.start_activity(target):
+            return True
+        for fallback in target.fallbacks:
+            if self._bridge.start_activity(fallback):
+                return True
+        return False
 
     def can_stay_resident(self) -> bool:
         # The app keeps its windows and memory; the game runs in another activity

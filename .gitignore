@@ -1,6 +1,9 @@
 # IDE
 .idea/
 
+# Throwaway probes from a debugging session (screens, tars, commit messages)
+.tmp-*
+
 # generated artifacts
 __pycache__/
 *.pyc

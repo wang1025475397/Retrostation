@@ -110,7 +110,7 @@
   "dialog.exit_option_poweroff": "关机",
   "launch.starting": "正在启动《{name}》",
   "launch.hint": "已停视频解码 · 让出双屏 · 交还 SDL",
-  "launch.unsupported": "此版本暂不支持启动游戏（Android 启动器尚未接入）",
+  "launch.unsupported": "未检测到可用模拟器，请先安装 RetroArch",
   "status.dual": "双屏",
   "status.single": "单屏",
   "status.scraping": "扫描中",

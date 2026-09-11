@@ -3,7 +3,11 @@ package ai.retrostation
 import android.app.Activity
 import android.content.res.Configuration
 import android.graphics.Color
+import android.net.Uri
+import android.os.Build
 import android.os.Bundle
+import android.os.Environment
+import android.provider.Settings
 import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.View
@@ -31,6 +35,8 @@ class MainActivity : Activity() {
     private lateinit var py: PyRuntime
     /** Orientation this instance was built for; see [onConfigurationChanged]. */
     private var orientation = Configuration.ORIENTATION_UNDEFINED
+    /** Storage access as of the last resume; see [onResume]. */
+    private var hadStorage = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -47,6 +53,12 @@ class MainActivity : Activity() {
         val root = buildLayout(sizes.size)
         py.rootView = root
         setContentView(root)
+
+        // All-files access is the app's primary storage mode (§7.2).  Without it
+        // the ROM scan sees an empty card, so ask for it once, after the first
+        // frame (jumping to Settings during launch looks like a crash).
+        hadStorage = storageGranted()
+        if (!hadStorage) root.post { askStorageAccess() }
 
         // Bootstrap Python *after* the first frame.  The Chaquopy runtime start
         // blocks the main thread for seconds, and an onCreate that heavy stalls
@@ -156,6 +168,35 @@ class MainActivity : Activity() {
     override fun onResume() {
         super.onResume()
         py.resume()
+        // Back from Settings with access just granted: restart so the core
+        // rescans the card (a fresh boot scans from scratch).
+        if (!hadStorage && storageGranted()) {
+            hadStorage = true
+            recreate()
+        }
+    }
+
+    /** All-files access on API 30+, plain read access below it. */
+    private fun storageGranted(): Boolean =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            Environment.isExternalStorageManager()
+        } else {
+            checkSelfPermission(android.Manifest.permission.READ_EXTERNAL_STORAGE) ==
+                android.content.pm.PackageManager.PERMISSION_GRANTED
+        }
+
+    /** Ask for storage access, on whichever page this API level uses (§7.2). */
+    private fun askStorageAccess() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            startActivity(
+                android.content.Intent(
+                    Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+                    Uri.parse("package:$packageName"),
+                )
+            )
+        } else {
+            requestPermissions(arrayOf(android.Manifest.permission.READ_EXTERNAL_STORAGE), 1)
+        }
     }
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: android.content.Intent?) {

@@ -60,6 +60,7 @@ class FakeKt:
 
     def startActivity(self, intent):
         self.started = intent
+        return True
 
     def hostCore(self, target):
         raise NotImplementedError("inline at B0")
@@ -118,8 +119,8 @@ def test_launch_intent_routes_to_bridge() -> None:
     plat.init_display("auto")
     target = IntentTarget(package="com.retroarch.aarch64", activity=".RetroActivityFuture")
     plat.launch_game(target)
-    assert plat._bridge._kt.started is not None  # type: ignore[attr-defined]
-    assert plat._bridge._kt.started["package"] == "com.retroarch.aarch64"  # type: ignore[attr-defined]
+    started = json.loads(plat._bridge._kt.started)  # type: ignore[attr-defined]
+    assert started["package"] == "com.retroarch.aarch64"
 
 
 def test_launch_argv_refused() -> None:
