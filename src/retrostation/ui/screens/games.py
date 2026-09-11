@@ -566,3 +566,59 @@ def list_hit(m, count: int, index: int, rows_per_page: int, x: int, y: int) -> i
     if position >= count:
         return None
     return position
+
+
+def grid_hit(m, count: int, index: int, cols: int, rows: int, *, single: bool,
+             x: int, y: int) -> int | None:
+    """The game position a tap landed on in the grid view (DESIGN.ANDROID §10.3).
+
+    Mirrors ``draw_grid``: page-aligned slots from ``content_top``, ``cell_w``
+    wide and ``cell_h`` tall, separated by ``grid_gap``.  A tap in the gap
+    between two cells hits nothing -- the padding is not a cell.
+    """
+    per_page = cols * rows
+    first = (index // per_page) * per_page
+    padding, gap = m.grid_padding, m.grid_gap
+    cell_w = (m.content_w - 2 * padding - gap * (cols - 1)) // cols
+    cell_h = m.grid_cell_h(single=single)
+    left = x - padding
+    top = y - (m.content_top + padding)
+    if left < 0 or top < 0:
+        return None
+    col = left // (cell_w + gap)
+    row = top // (cell_h + gap)
+    if col >= cols or row >= rows or left - col * (cell_w + gap) > cell_w:
+        return None
+    position = first + row * cols + col
+    return position if position < count else None
+
+
+def carousel_hit(m, count: int, index: int, *, single: bool,
+                 x: int, y: int) -> int | None:
+    """The game position a tap landed on in the carousel view (§10.3).
+
+    Mirrors ``draw_carousel``: the centred card at ``width // 2`` and its
+    neighbours stepping out by the same offsets the draw uses, so the picture
+    and the target can only drift apart together.
+    """
+    card_h = m.carousel_card_h(single=single)
+    card_w = m.carousel_card_w(single=single)
+    gap = m.carousel_gap
+    top = m.content_top + m.u(6)
+    widths = [round(card_w * scale) for scale in _SCALE]
+    heights = [round(card_h * scale) for scale in _SCALE]
+    offsets = [0]
+    for k in range(1, len(_SCALE)):
+        offsets.append(offsets[-1] + (widths[k - 1] + widths[k]) // 2 + gap)
+    centre = m.width // 2
+    for k in range(len(_SCALE)):
+        for side in ((0,) if k == 0 else (1, -1)):
+            position = index + side * k
+            if not 0 <= position < count:
+                continue
+            w, h, off = widths[k], heights[k], offsets[k]
+            box_left = centre + side * off - w // 2
+            box_top = top + (card_h - h) // 2
+            if box_left <= x < box_left + w and box_top <= y < box_top + h:
+                return position
+    return None

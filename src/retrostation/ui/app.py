@@ -48,7 +48,7 @@ from .session import (
 )
 from .screens import bottom, games, home, menu, search
 from .widgets import (
-    button_bar, dialog, game_pad, pad_box, status_bar, toast, version_tag)
+    button_bar, dialog, pad_bitmap, pad_box, status_bar, toast, version_tag)
 
 log = logging.getLogger(__name__)
 
@@ -227,6 +227,10 @@ class App:
         self._canvases: list = []
         self._painters: list[Painter] = []
         self._running = True
+        #: Composited pad picture and its cache key (see :meth:`_draw_pad`).
+        self._pad_key: tuple | None = None
+        self._pad_image = None
+        self._pad_hits: list = []
         #: Called once, just after the first frame is on screen.  Startup work
         #: that is not needed for that frame (re-listing the ROM tree) goes
         #: here: running it alongside the first paint doubled its cost.
@@ -1055,6 +1059,28 @@ class App:
             games.draw_scrollbar(painter, index, len(all_games), rpp,
                                  m.content_h(single=painter.single))
 
+    def _draw_pad(self, painter: Painter, *, single: bool) -> None:
+        """Draw the on-screen pad, pasting a cached picture when nothing moved.
+
+        The pad is a dozen translucent shapes and each one needs its own layer
+        to blend, so it is composited into a scratch surface once and pasted as
+        a single image afterwards.  The cache key covers everything the picture
+        depends on: position, opacity and where the clip box forces the d-pad
+        to step aside.
+        """
+        m = painter.metrics
+        box = pad_box(m, single=single, height=painter.canvas.size[1])
+        avoid = self._media_box(m)
+        opacity = self.config.virtual_pad_opacity
+        key = (box, opacity, avoid)
+        if key != self._pad_key:
+            self._pad_image, self._pad_hits = pad_bitmap(
+                m, box, opacity=opacity, avoid=avoid,
+                platform=self.platform, translator=self.translator)
+            self._pad_key = key
+        painter.image(self._pad_image, box)
+        painter.button_hits.extend(self._pad_hits)
+
     def _media_box(self, m) -> tuple[int, int, int, int]:
         """Where the clip is painted -- the box the pad's d-pad must keep off.
 
@@ -1085,9 +1111,7 @@ class App:
         if painter.single and self._pad_visible():
             # The pad is an overlay, so it survives every view change instead of
             # disappearing with the page that owned it (DESIGN.ANDROID §10.4).
-            game_pad(painter, pad_box(painter.metrics, single=True),
-                     opacity=session.config.virtual_pad_opacity,
-                     avoid=self._media_box(painter.metrics))
+            self._draw_pad(painter, single=True)
 
     def _draw_home(self, painter: Painter) -> None:
         session = self.session
@@ -1441,10 +1465,7 @@ class App:
             # Portrait: the pad is an overlay on the lower panel, drawn after
             # the page so it stays put -- and stays live -- on every view
             # (DESIGN.ANDROID §10.4).
-            game_pad(painter, pad_box(painter.metrics, single=False,
-                                      height=painter.canvas.size[1]),
-                     opacity=session.config.virtual_pad_opacity,
-                     avoid=self._media_box(painter.metrics))
+            self._draw_pad(painter, single=False)
 
     def _advance_desc_scroll(self, now: float) -> None:
         """Scroll a description taller than its window, down and then back up.

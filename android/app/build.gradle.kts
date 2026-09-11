@@ -69,7 +69,14 @@ android {
 
     buildTypes {
         release {
-            isMinifyEnabled = false
+            isMinifyEnabled = true
+            isShrinkResources = true
+            // The bridge is called by name from Python, so R8 needs telling what
+            // not to rename (see proguard-rules.pro).
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro",
+            )
             signingConfig = if (keystorePropsFile.exists())
                 signingConfigs.getByName("release")
             else

@@ -228,6 +228,26 @@ def pad_box(m, *, single: bool, height: int | None = None) -> tuple[int, int, in
     return (m.u(12), y, m.width - 2 * m.u(12), h)
 
 
+def pad_bitmap(m, box, *, opacity: int, avoid=None, platform=None, translator=None):
+    """The pad composited into its own surface: ``(image, hits)``.
+
+    True alpha costs a layer per shape, and the pad is a dozen of them, so the
+    whole cluster is drawn once into a scratch surface and pasted as a single
+    picture.  Hit boxes come back in canvas coordinates, ready to append.
+    """
+    from ..platform.canvas import PilCanvas
+
+    x, y, w, h = box
+    surface = PilCanvas(max(1, w), max(1, h))
+    scratch = Painter(surface, m, platform, translator)
+    scratch.button_hits = []
+    local = None if avoid is None else (avoid[0] - x, avoid[1] - y, avoid[2], avoid[3])
+    game_pad(scratch, (0, 0, w, h), opacity=opacity, avoid=local)
+    hits = [((bx + x, by + y, bw, bh), label)
+            for (bx, by, bw, bh), label in scratch.button_hits]
+    return surface.snapshot(), hits
+
+
 def scrollbar(
     painter: Painter, *, index: int, total: int, visible: int, content_h: int) -> None:
     """Thin indicator on the right edge; a no-op when everything fits."""

@@ -612,24 +612,33 @@ class Session:
         return Outcome(redraw=True)
 
     def _tap_game(self, event: InputEvent) -> Outcome:
-        """Tap on the game list: select the row; tap it again to launch."""
-        if self.layout != "list":
-            return Outcome()  # grid / carousel hit-testing arrives with A6
-        from .screens.games import list_hit
-
+        """Tap on a game: select it; tap it again to launch (§10.3)."""
         if self._metrics is None:
             return Outcome()
         games = self.games()
         if not games:
             return Outcome()
-        hit = list_hit(self._metrics, len(games), self.game_index,
-                       self._page_size(), event.x, event.y)
+        hit = self._game_hit(len(games), event.x, event.y)
         if hit is None:
             return Outcome()
         if hit == self.game_index:
             return self._pick_or_launch(games[hit])
         self.game_index = hit
         return Outcome(redraw=True)
+
+    def _game_hit(self, count: int, x: int, y: int) -> int | None:
+        """The position a tap landed on, in whichever view is showing."""
+        from .screens import games as view
+
+        m = self._metrics
+        if self.layout == "grid":
+            return view.grid_hit(m, count, self.game_index,
+                                 self._grid_cols(), self._grid_rows(),
+                                 single=self._single, x=x, y=y)
+        if self.layout == "carousel":
+            return view.carousel_hit(m, count, self.game_index,
+                                     single=self._single, x=x, y=y)
+        return view.list_hit(m, count, self.game_index, self._page_size(), x, y)
 
     def _tap_detail(self) -> Outcome:
         """Tap on the detail canvas (portrait's lower screen): start the game.
