@@ -136,6 +136,10 @@ TOAST_SECONDS = 2.0
 LIST_PAGE = 10
 CAROUSEL_PAGE = 10
 
+#: 一次甩动最多滚过的行数（触摸，DESIGN.ANDROID §10.3）：不设上限时一次快速
+#: 滑动会把列表甩掉大半页，感觉像"跳"而不是"滚"。
+_FLING_MAX_ROWS = 6
+
 #: Backlight range in the device's own units (0-255 per panel).  The floor
 #: matters: a screen driven to 0 looks like a crash and the player cannot find
 #: the setting again to undo it.
@@ -182,6 +186,9 @@ class Session:
     preview_index: int = 0
     #: preview_games() 的每帧缓存；任何输入都会走 invalidate() 清掉。
     _preview_cache: list | None = None
+    #: 触摸拖动累计的逻辑像素。小于一行的拖动记在这里，攒够一行才走一格，
+    #: 否则慢速拖动（每帧不足一行）会毫无反应（DESIGN.ANDROID §10.3）。
+    _touch_px: float = field(default=0.0, init=False, repr=False)
 
     modal: str = MODAL_NONE
     menu_index: int = 0
@@ -437,6 +444,11 @@ class Session:
         if event.is_press and event.action is InputAction.SEARCH:
             return self._open_search()
 
+        # 竖屏双画布：点下半屏（详情屏）= 启动当前游戏（DESIGN.ANDROID §10.3）。
+        # 这条在掌机上从未落地（没有下屏触摸），Android 免费拿到。
+        if event.is_press and event.action is InputAction.TAP and event.screen == 1:
+            return self._tap_detail()
+
         handlers = {
             VIEW_PLATFORMS: self._handle_platforms,
             VIEW_GAMES: self._handle_games,
@@ -558,7 +570,13 @@ class Session:
             return Outcome(redraw=True)
         # 触摸（DESIGN.ANDROID §10.3）：点行选中，再点已选中的行启动。
         if action is InputAction.TAP and event.x is not None:
+            self._touch_px = 0.0
             return self._tap_game(event)
+        if action is InputAction.DRAG:
+            return self._scroll_games(event.dy)
+        if action is InputAction.FLING:
+            self._touch_px = 0.0
+            return self._fling_games(event.dy)
         if action is InputAction.A:
             return self._pick_or_launch(self.current_game())
         if action is InputAction.B:
@@ -612,6 +630,47 @@ class Session:
             return self._pick_or_launch(games[hit])
         self.game_index = hit
         return Outcome(redraw=True)
+
+    def _tap_detail(self) -> Outcome:
+        """Tap on the detail canvas (portrait's lower screen): start the game.
+
+        On the home page it means "open the selected platform" instead -- there
+        is no game under the cursor yet.
+        """
+        if self.view == VIEW_GAMES:
+            return self._pick_or_launch(self.current_game())
+        return self._enter_games()
+
+    def _scroll_games(self, dy: int) -> Outcome:
+        """Drag scrolls the list by whole rows (DESIGN.ANDROID §10.3).
+
+        Sub-row movement is accumulated: a slow drag delivers a couple of
+        logical pixels per frame, and discarding those would make it feel dead.
+        """
+        row_step = self._metrics.row_step if self._metrics else 0
+        if row_step <= 0:
+            return Outcome()
+        self._touch_px += dy
+        rows = int(-self._touch_px / row_step)  # drag up (dy<0) walks down the list
+        if rows == 0:
+            return Outcome()
+        self._touch_px += rows * row_step
+        return self._move_game(rows * self._vertical_step())
+
+    def _fling_games(self, dy: int) -> Outcome:
+        """A quick swipe jumps by the inertia distance the bridge measured.
+
+        Clamped hard: an unclamped flick launched the list most of a page at
+        once, which read as "the list jumped" rather than "I scrolled".
+        """
+        row_step = self._metrics.row_step if self._metrics else 0
+        if row_step <= 0:
+            return Outcome()
+        rows = int(-dy / row_step)
+        rows = max(-_FLING_MAX_ROWS, min(_FLING_MAX_ROWS, rows))
+        if rows == 0:
+            rows = 1 if dy < 0 else -1
+        return self._move_game(rows * self._vertical_step())
 
     def _vertical_step(self) -> int:
         if self.layout == "grid":

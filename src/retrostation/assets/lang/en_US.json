@@ -111,6 +111,7 @@
   "dialog.exit_option_poweroff": "Power off",
   "launch.starting": "Starting {name}",
   "launch.hint": "Video stopped, handing over SDL",
+  "launch.unsupported": "Launching games is not supported on this build yet",
   "status.dual": "Dual",
   "status.single": "Single",
   "status.scraping": "Scanning",

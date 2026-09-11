@@ -117,4 +117,6 @@ chaquopy {
 dependencies {
     implementation("androidx.appcompat:appcompat:1.7.0")
     implementation("androidx.core:core-ktx:1.13.1")
+    // Video preview: ExoPlayer renders into its own surface under the UI frame.
+    implementation("androidx.media3:media3-exoplayer:1.4.1")
 }

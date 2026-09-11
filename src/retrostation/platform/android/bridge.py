@@ -67,6 +67,29 @@ class AndroidBridge:
             text=item.get("text", ""),
         )
 
+    # -- media ------------------------------------------------------------ #
+
+    def decode_image(self, path: Path) -> bytes | None:
+        """Android-decoded PNG bytes for ``path``, or ``None`` when unreadable.
+
+        The bundled Pillow is built without the webp plugin, so the host decodes
+        instead (BitmapFactory reads webp/gif/png/jpeg) and hands back PNG --
+        something PIL can always open, at whatever size it needs.
+        """
+        data = self._kt.decodeImage(str(path))
+        return bytes(data) if data is not None else None
+
+    def open_video(self, path: Path, index: int, rect: tuple[int, int, int, int]) -> None:
+        """Start the clip in the media box (canvas units) on canvas ``index``."""
+        x, y, w, h = rect
+        self._kt.openVideo(str(path), index, x, y, w, h)
+
+    def stop_video(self) -> None:
+        self._kt.stopVideo()
+
+    def set_video_volume(self, value: float) -> None:
+        self._kt.setVideoVolume(float(value))
+
     # -- hardware --------------------------------------------------------- #
 
     def battery(self) -> int | None:

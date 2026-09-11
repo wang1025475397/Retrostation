@@ -176,7 +176,15 @@ def run_android(bridge) -> int:
     set_skin("android")
     translator = Translator(config.language)
     apply_user_systems(platform.config_dir / USER_SYSTEMS_FILE)
-    return run_ui(platform, config, translator)
+    try:
+        return run_ui(platform, config, translator)
+    except Exception:  # noqa: BLE001 - the host asked us to stop
+        # A rotation rebuild closes the bridges, and the next drain/present
+        # throws to unwind this thread.  That is a normal hand-off to the new
+        # activity instance, so log it instead of letting Chaquopy turn it
+        # into a FATAL EXCEPTION.
+        log.exception("android frontend handed off to a new host instance")
+        return 0
 
 
 

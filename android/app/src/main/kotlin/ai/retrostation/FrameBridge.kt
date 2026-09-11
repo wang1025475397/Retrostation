@@ -15,8 +15,15 @@ class FrameBridge(
     private val surfaces: List<RetroSurfaceView>,
     private val logical: List<Pair<Int, Int>>,
 ) {
+    /** Set when the host is tearing the frontend down; pushes are dropped. */
+    @Volatile private var closed = false
+
+    fun close() {
+        closed = true
+    }
+
     fun push(index: Int, rgba: ByteArray) {
-        if (index !in surfaces.indices) return
+        if (closed || index !in surfaces.indices) return
         val (lw, lh) = logical[index]
         if (rgba.size != lw * lh * 4) return // size mismatch: ignore rather than crash
         val bmp = Bitmap.createBitmap(lw, lh, Bitmap.Config.ARGB_8888)

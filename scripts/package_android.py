@@ -98,6 +98,20 @@ def ensure_keystore() -> None:
     print("[pkg]   gitignored -- back it up before losing it, ever")
 
 
+def build_env() -> dict[str, str]:
+    """Environment for Gradle, with Python path injection removed.
+
+    Chaquopy runs ``buildPython`` as a subprocess.  A host-set ``PYTHONPATH``
+    (some IDEs/agents inject a ``sitecustomize`` shim) makes that interpreter
+    exit non-zero on shutdown, which Gradle reports as a failed build.  The
+    build must not depend on the shell it was started from.
+    """
+    env = dict(os.environ)
+    for name in ("PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP"):
+        env.pop(name, None)
+    return env
+
+
 def sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as f:
@@ -138,7 +152,7 @@ def main() -> int:
     task = "assembleDebug" if args.debug else "assembleRelease"
     cmd = [str(gradle_launcher()), *gradle_props, task]
     print("[pkg] " + " ".join(cmd))
-    subprocess.run(cmd, cwd=ANDROID, check=True)
+    subprocess.run(cmd, cwd=ANDROID, env=build_env(), check=True)
 
     if not apk_src.exists():
         raise SystemExit(f"build finished but {apk_src} is missing")

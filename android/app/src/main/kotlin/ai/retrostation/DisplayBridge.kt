@@ -20,28 +20,57 @@ import android.view.Display
  */
 class DisplayBridge(private val context: Context) {
 
-    /** @return one (w,h) pair per usable display, in probe order (main first).
-     *  Sizes are *logical* -- the Python side paints to a logical canvas and the GPU
-     *  upscales (DESIGN.ANDROID §4.1).  This must stay in sync with
+    /** @return one (w,h) pair per *logical canvas*, in paint order.
+     *
+     *  A real dual-panel handheld still gets one canvas per physical display.
+     *  A single-panel device (a phone) instead splits by orientation so the
+     *  shared frontend keeps the layout it was designed around:
+     *
+     *  - **portrait** -> two stacked canvases: content on top, detail below.
+     *    That is the handheld's dual-screen interaction model, reused verbatim
+     *    (no picture-in-picture strip, real 40% for artwork and metadata).
+     *  - **landscape** -> one full-screen canvas; the detail folds into the
+     *    strip exactly like the handheld's single-screen mode.
+     *
+     *  Sizes are *logical* -- the Python side paints to a logical canvas and
+     *  the GPU upscales (DESIGN.ANDROID §4.1).  Keep in sync with
      *  `retrostation.platform.android.display.logical_size`. */
     fun probe(mode: String): List<Pair<Int, Int>> {
         val dm = context.getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
-        val main = dm.getDisplay(Display.DEFAULT_DISPLAY)
-        val sizes = mutableListOf(logicalSize(sizeOf(main)))
 
-        if (mode == "single") return sizes.take(1)
+        // Sizes come from the *activity's* display metrics, which follow the
+        // window's rotation.  Display.getRealMetrics reports the panel's native
+        // orientation instead, which produced canvases rotated against the
+        // window (a landscape window got portrait-shaped canvases).
+        val metrics = context.resources.displayMetrics
+        val primary = metrics.widthPixels to metrics.heightPixels
 
         // Do not trust DISPLAY_CATEGORY_PRESENTATION: some vendors omit the marker
         // on a real second panel (§6.4.2).  Take every valid, non-default display.
         val secondary = dm.displays.filter {
             it.isValid && it.displayId != Display.DEFAULT_DISPLAY
         }
-        if (mode == "dual" && secondary.isEmpty()) {
-            // Fail soft: the frontend still runs single-screen (§6.4.2 rule).
+        if (secondary.isNotEmpty()) {
+            val sizes = mutableListOf(logicalSize(primary))
+            if (mode == "single") return sizes
+            for (d in secondary) sizes += logicalSize(sizeOf(d))
             return sizes
         }
-        for (d in secondary) sizes += logicalSize(sizeOf(d))
-        return sizes
+
+        // Single physical panel: split by orientation.
+        val (pw, ph) = primary
+        if (mode != "single" && ph > pw) {
+            val topH = (ph * PORTRAIT_TOP_SHARE).toInt()
+            return listOf(logicalSize(pw to topH), logicalSize(pw to (ph - topH)))
+        }
+        return listOf(logicalSize(pw to ph))
+    }
+
+    companion object {
+        /** Share of the panel the content canvas takes in portrait; the rest is
+         *  the detail canvas ("bottom screen").  MainActivity uses it for the
+         *  view weights, so both sides agree without a round trip. */
+        const val PORTRAIT_TOP_SHARE = 0.56
     }
 
     /** Mirror of `display.logical_size` (DESIGN.ANDROID §4.1).  0.7 MP budget,

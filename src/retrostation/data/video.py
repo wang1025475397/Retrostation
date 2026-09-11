@@ -270,7 +270,11 @@ class VideoPlayer:
 
     def is_playing(self, key: str | None = None) -> bool:
         with self._lock:
-            if self._current is None or self._frame is None:
+            if self._current is None:
+                return False
+            if self._frame is None and not (self._pipe and self._pipe.external):
+                # External pipes (Android ExoPlayer) never hand us a frame -- the
+                # host draws the clip itself, and "playing" is still true.
                 return False
             return key is None or self._current[0] == key
 
@@ -571,6 +575,8 @@ class VideoPlayer:
         """
         interval = 1.0 / max(1, self._settings.fps)
         pending_duration = True
+        if pipe.external:
+            return self._pump_external(pipe, generation, stop)
         next_at = self._clock()
         try:
             while not stop.is_set():

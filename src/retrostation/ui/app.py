@@ -29,6 +29,7 @@ from ..data.systems import display_name, lookup, variant_suffix
 from ..data.video import VideoPlayer, VideoSettings
 from ..launcher.launch import LaunchError, LaunchPlan, build_plan
 from ..platform.base import InputAction, InputEvent, InputKind, Platform
+from ..platform.targets import UnsupportedTarget
 from .art import ArtProvider
 from .painter import Painter
 from .session import (
@@ -1171,13 +1172,20 @@ class App:
         # plus a frame before there is anything to draw, though -- showing the
         # cover for that moment flashed one on every game that has a clip.
         art = self._strip_art_box(m)
+        self.platform.set_video_rect(art, index=0)
         frame = self._video.frame()
+        # External clip (Android ExoPlayer): the host fills this box, so leave
+        # it empty rather than painting a cover over the moving picture (§9.2).
+        external = frame is None and self._video.is_playing()
         painter.rounded_rect(art, radius=m.u(8), fill=(14, 14, 16, 255),
-                             outline=(232, 163, 61, 90) if frame is not None else COLORS.border)
+                             outline=(232, 163, 61, 90)
+                             if (frame is not None or external) else COLORS.border)
         if frame is not None:
             painter.image_fit(frame, art)
             bottom.progress_bar(painter, art[0], art[1] + art[3] - m.u(3),
                                 art[2], m.u(3), self._video.progress())
+        elif external:
+            pass  # the host is drawing the clip here
         elif not self._video.is_pending(game.key):
             games.cover_art(painter, self.art, game, art)
 
@@ -1290,6 +1298,10 @@ class App:
         meta = self._meta(game) if game is not None else None
         # 搜索切换选中不驱动视频（上一个游戏的片段会与结果错位），详情走封面兜底。
         frame = None if searching else (self._video.frame() if game is not None else None)
+        # External clip (Android ExoPlayer): the host fills the media box, so we
+        # must not paint a cover over it (§9.2).
+        video_external = (not searching and game is not None
+                          and frame is None and self._video.is_playing())
         # 平台总览的工具栏标题带上该平台的游戏数量；聚合视图没有单一数量。
         game_count = (
             self.library.rom_count(key)
@@ -1304,6 +1316,7 @@ class App:
             key_label=display_name(key, self.translator.language),
             hints=self._platform_hints() if previewing else self._bottom_hints(),
             video_frame=frame,
+            video_external=video_external,
             video_progress=self._video.progress() if frame is not None else None,
             clip_pending=(game is not None and not searching and self._video.is_pending(game.key)),
             system_desc=self._system_desc(key),
@@ -1473,7 +1486,12 @@ class App:
             plan = build_plan(game, self.config)
         except LaunchError as exc:
             log.error("launch failed: %s", exc)
-            self.session.notify(str(exc))
+            # On Android the failure is "no Linux launcher script on this card",
+            # which means nothing to a phone user -- the launcher (A4) has not
+            # been built yet, so say that instead.
+            self.session.notify(
+                self.translator.t("launch.unsupported") if is_android_skin() else str(exc)
+            )
             return
 
         # The emulator wants the sound card next: a blip player still holding
@@ -1548,6 +1566,11 @@ class App:
             # starts an activity (or a hosted core) and waits for it, which is
             # why this is not a subprocess call any more.
             log.info("game exited with %s", self.platform.run_foreground(plan.target))
+        except UnsupportedTarget as exc:
+            # A resident platform whose launcher is not built yet (Android before
+            # A4).  Tell the player rather than unwinding the whole frontend.
+            log.warning("launch unsupported on this platform: %s", exc)
+            self.session.notify(self.translator.t("launch.unsupported"))
         except OSError as exc:
             log.error("could not start %s: %s", plan.target, exc)
             self.session.notify(str(exc))

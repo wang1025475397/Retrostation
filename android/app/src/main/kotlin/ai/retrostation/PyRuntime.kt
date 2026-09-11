@@ -1,9 +1,13 @@
 package ai.retrostation
 
 import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import com.chaquo.python.Python
 import com.chaquo.python.android.AndroidPlatform
+import java.io.ByteArrayOutputStream
 import java.io.File
+import kotlin.math.max
 
 /**
  * Boots the Chaquopy Python runtime, wires the Kotlin bridges into a Python
@@ -18,6 +22,9 @@ import java.io.File
  */
 class PyRuntime(private val context: Context) {
 
+    @Volatile private var booted = false
+    @Volatile private var stopped = false
+
     lateinit var inputBridge: InputBridge
         private set
 
@@ -29,34 +36,55 @@ class PyRuntime(private val context: Context) {
 
     /** True once the core thread and bridges are up; input handlers guard on it. */
     val ready: Boolean
-        get() = ::inputBridge.isInitialized
+        get() = booted
+
+    /** Set by MainActivity before start(): the view group holding the surfaces. */
+    lateinit var rootView: android.view.ViewGroup
 
     private lateinit var frame: FrameBridge
+    private lateinit var media: MediaBridge
     private lateinit var display: DisplayBridge
     private lateinit var host: HostBridge
     private var thread: Thread? = null
 
+    /**
+     * Boot the runtime and the frontend.
+     *
+     * Everything runs on a worker thread: ``Python.start`` unpacks the runtime
+     * and blocks for seconds (measured >10 s cold on a loaded emulator), and on
+     * the UI thread that is an ANR.  ``booted`` is volatile, so the UI sees
+     * either "no bridge yet" or a fully built bridge pair -- never a half-made
+     * one; the input handlers already guard on it.
+     */
     fun start() {
-        if (!Python.isStarted()) {
-            Python.start(AndroidPlatform(context))
-        }
-        val py = Python.getInstance()
+        Thread({
+            if (!Python.isStarted()) {
+                Python.start(AndroidPlatform(context))
+            }
+            if (stopped) return@Thread
+            val py = Python.getInstance()
 
-        // 1. Probe displays and build the bridges up front.  ``surfaces`` is the
-        //    shared property (MainActivity adds index 0 before start()), so both
-        //    bridges see the primary view from the first frame.
-        display = DisplayBridge(context)
-        val sizes = display.probe("auto")
-        frame = FrameBridge(surfaces, sizes)
-        inputBridge = InputBridge(surfaces, sizes)
-        host = HostBridge(context, frame, inputBridge, display, sizes)
+            // Probe canvases and build the bridges.  ``surfaces`` was filled by
+            // MainActivity before start() (Thread.start gives us the happens-before).
+            display = DisplayBridge(context)
+            val sizes = display.probe("auto")
+            frame = FrameBridge(surfaces, sizes)
+            media = MediaBridge(context, rootView, surfaces, sizes)
+            inputBridge = InputBridge(surfaces, sizes)
+            host = HostBridge(context, frame, inputBridge, display, sizes, media)
+            booted = true
+            if (stopped) {
+                host.shutdown()
+                return@Thread
+            }
 
-        // 2. Launch the frontend on a dedicated thread (DESIGN.ANDROID §6.2).  The
-        // Python side wraps the Kotlin HostBridge in the Python AndroidBridge and runs
-        // the shared boot order: platform -> config -> translator -> library -> UI.
-        thread = Thread({
-            py.getModule("retrostation.main")!!.callAttr("run_android", host)
-        }, "retrostation-core").also { it.start() }
+            // Launch the frontend on its own thread (DESIGN.ANDROID §6.2).  The
+            // Python side wraps HostBridge in the Python AndroidBridge and runs the
+            // shared boot order: platform -> config -> translator -> library -> UI.
+            thread = Thread({
+                py.getModule("retrostation.main")!!.callAttr("run_android", host)
+            }, "retrostation-core").also { it.start() }
+        }, "retrostation-boot").start()
     }
 
     // Lifecycle calls can arrive before the deferred core boot finishes (e.g.
@@ -65,7 +93,16 @@ class PyRuntime(private val context: Context) {
     fun resume() { if (ready) host.resumeDisplay() }
     fun onGameExited() { if (ready) host.onGameExited() }
     fun stop() {
-        if (ready) host.shutdown()
+        // Closing the bridges makes the core's blocked drain throw, so the Python
+        // thread unwinds instead of spinning a frame loop against a torn-down
+        // activity (a rotation rebuild tears this instance down).  ``stopped``
+        // also covers the window where the boot thread is still unpacking the
+        // runtime -- it will tear itself down instead of starting a core.
+        stopped = true
+        if (booted) {
+            inputBridge.close()
+            host.shutdown()
+        }
         thread?.interrupt()
         thread = null
     }
@@ -79,7 +116,19 @@ class PyRuntime(private val context: Context) {
         private val input: InputBridge,
         private val display: DisplayBridge,
         private val sizes: List<Pair<Int, Int>>,
+        private val media: MediaBridge,
     ) {
+        // -- video preview (DESIGN.ANDROID §9.2) ---------------------------- //
+
+        /** Start the clip in the media box (canvas units) on canvas [index]. */
+        fun openVideo(path: String, index: Int, x: Int, y: Int, w: Int, h: Int) =
+            media.play(path, index, x, y, w, h)
+
+        fun stopVideo() = media.stop()
+
+        /** 0.0-1.0; the preview is muted unless the player turned sound on. */
+        fun setVideoVolume(value: Double) = media.setVolume(value.toFloat())
+
         // Chaquopy does not auto-convert Java/Kotlin containers into Python
         // containers (iterating an ArrayList from Python raises TypeError), so
         // every structured result crosses the boundary as a JSON string and is
@@ -110,6 +159,35 @@ class PyRuntime(private val context: Context) {
         fun setBrightness(value: Int, index: Int): Unit = Unit
 
         fun romRoot(): String = "/storage/emulated/0/Roms" // refined by StorageBridge (A3)
+
+        /**
+         * Decode an image with Android's own decoder and hand it back as PNG
+         * bytes.
+         *
+         * The bundled Pillow has no webp plugin (the Chaquopy wheel is built
+         * without it), so every shipped platform background/logo and any webp
+         * cover would fail to load.  BitmapFactory reads webp/gif/png/jpeg, and
+         * PNG bytes are something PIL can always open -- at whatever size, so
+         * the Python side keeps its own scaling/caching.
+         */
+        fun decodeImage(path: String): ByteArray? {
+            if (!File(path).isFile) return null
+            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeFile(path, bounds)
+            if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
+
+            // Cap the long edge: the UI never draws above ~2x its logical size,
+            // and a full-size phone photo would cost tens of MB of bitmap.
+            var sample = 1
+            while (max(bounds.outWidth, bounds.outHeight) / sample > MAX_DECODE_EDGE) sample *= 2
+            val bitmap = BitmapFactory.decodeFile(
+                path, BitmapFactory.Options().apply { inSampleSize = sample }
+            ) ?: return null
+            return ByteArrayOutputStream().use { out ->
+                bitmap.compress(Bitmap.CompressFormat.PNG, 100, out)
+                out.toByteArray()
+            }
+        }
         fun configDir(): String =
             context.getExternalFilesDir(null)?.absolutePath ?: context.filesDir.absolutePath
 
@@ -133,8 +211,16 @@ class PyRuntime(private val context: Context) {
 
         fun startActivity(intent: Map<String, Any>): Unit = TODO("LaunchBridge (A4)")
         fun onGameExited() = Unit
-        fun shutdown() = Unit
+        fun shutdown() {
+            frame.close()
+            input.close()
+        }
         fun suspendDisplay() = Unit
         fun resumeDisplay() = Unit
+
+        private companion object {
+            /** Longest edge [decodeImage] will hand to Python. */
+            const val MAX_DECODE_EDGE = 2048
+        }
     }
 }

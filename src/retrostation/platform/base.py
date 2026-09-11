@@ -401,6 +401,9 @@ class VideoPipe(abc.ABC):
     #: Decoded frame size in pixels.
     size: tuple[int, int]
 
+    #: Platform composites the frames itself; read_frame() stays None.
+    external: bool = False
+
     @abc.abstractmethod
     def read_frame(self) -> object | None:
         """Block until the next frame is decoded.
@@ -647,6 +650,17 @@ class Platform(abc.ABC):
     def save_screenshot(self, canvas: Canvas, path: Path) -> None:
         """Write ``canvas`` to ``path`` (development / diagnostics only)."""
         raise NotImplementedError
+
+    def set_video_rect(
+        self, rect: tuple[int, int, int, int] | None, *, index: int = 0
+    ) -> None:
+        """Where the preview box sits, in canvas units (x, y, w, h).
+
+        Only platforms that composite video themselves need it (Android's
+        ExoPlayer surface): the UI leaves that box empty and the platform puts
+        the moving picture behind it.  Default: nothing to do.
+        """
+        return None
 
     def open_video_pipe(
         self,

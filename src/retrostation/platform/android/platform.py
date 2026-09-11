@@ -45,6 +45,8 @@ class AndroidPlatform(Platform):
         self._font_dir = Path(font_dir) if font_dir else None
         self._fonts: FontBook | None = None
         self._canvases: list[Canvas] = []
+        #: Media box the UI last drew (x, y, w, h, canvas index), canvas units.
+        self._video_rect: tuple[int, int, int, int, int] | None = None
 
     # -- display ---------------------------------------------------------- #
 
@@ -137,11 +139,38 @@ class AndroidPlatform(Platform):
         return self._fonts.get(size)
 
     def load_image(self, path: Path) -> object:
-        # R1: Pillow is present (Chaquopy install).  R2 swaps this for a Skia
-        # decode but keeps the same return contract (a bitmap the Canvas accepts).
+        """Open ``path`` as a PIL image.
+
+        The host decodes first: the Chaquopy Pillow wheel ships without the webp
+        plugin, and the platform art (plus many covers) is webp.  Android returns
+        PNG bytes, which PIL opens and scales as usual; if the host cannot read
+        the file we fall back to a straight PIL open.
+        """
+        from io import BytesIO
+
         from PIL import Image
 
+        data = self._bridge.decode_image(path)
+        if data:
+            return Image.open(BytesIO(data))
         return Image.open(path)
+
+    def set_video_rect(self, rect, *, index: int = 0) -> None:
+        """Remember where the preview box is, so the clip can be placed there."""
+        if rect is None:
+            self._video_rect = None
+            return
+        x, y, w, h = (int(v) for v in rect)
+        self._video_rect = (x, y, w, h, int(index))
+
+    def open_video_pipe(self, path, *, width: int, height: int, fps: int):
+        """ExoPlayer renders the clip into the media box (DESIGN.ANDROID §9.2)."""
+        if self._video_rect is None:
+            return None
+        from .video import SurfaceVideoPipe
+
+        x, y, w, h, index = self._video_rect
+        return SurfaceVideoPipe(self._bridge, path, (x, y, w, h), index)
 
     def shutdown(self) -> None:
         self._bridge.shutdown()
