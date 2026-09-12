@@ -41,6 +41,7 @@ from .painter import Painter
 from .session import (
     MODAL_EXIT,
     MODAL_MENU,
+    MODAL_NONE,
     MODAL_ROM_SELECT,
     MODAL_SEARCH,
     Session,
@@ -510,6 +511,13 @@ class App:
         # The pad's own touch events are consumed here: neither is a command the
         # session knows about, and both only exist so a held button can repeat.
         if event.action is InputAction.TOUCH_DOWN:
+            if self._dialog_owns(event):
+                # A finger landing on the dialog starts no pad button: the pad is
+                # drawn across it, and a press here would also arm the window that
+                # swallows the tap that follows -- which is how a control the
+                # dialog drew ends up looking dead under a finger.
+                self._held_action = None
+                return
             self._touch_down(event)
             return
         if event.action is InputAction.TOUCH_UP:
@@ -577,8 +585,32 @@ class App:
         if kind is not None:
             self.platform.play_sfx(kind)
 
+    def _dialog_owns(self, event: InputEvent) -> bool:
+        """Whether the open dialog's own boxes cover the tap point.
+
+        The pad is an overlay drawn *after* the dialog, so its SELECT/START
+        buttons land exactly on the dialog's 取消/确认 row: a tap there pressed a
+        pad button instead, and the dialog -- which never saw the touch -- stayed
+        up with a button that could not be pressed.  Only the area the dialog
+        actually painted is taken from the pad; the d-pad and the face buttons
+        still answer the way they always did.
+        """
+        session = self.session
+        if session.modal == MODAL_NONE:
+            return False
+        if event.x is None or event.y is None:
+            return False
+        boxes = [box for box, _index in getattr(session, "dialog_hits", ()) or ()]
+        boxes += [box for box, _index in getattr(session, "dialog_buttons", ()) or ()]
+        boxes += [box for box, _index, _step in getattr(session, "dialog_steppers", ()) or ()]
+        return any(bx <= event.x <= bx + bw and by <= event.y <= by + bh
+                   for bx, by, bw, bh in boxes)
+
     def _tap_button(self, event: InputEvent) -> bool:
         """Press the bar button under a tap; ``False`` when the tap missed it."""
+        if self._dialog_owns(event):
+            # Leave it to the dialog: the session hit-tests the same boxes.
+            return False
         index = event.screen if 0 <= event.screen < len(self._painters) else 0
         hits = getattr(self._painters[index], "button_hits", ())
         for (x, y, w, h), label in hits:

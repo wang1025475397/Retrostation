@@ -78,6 +78,8 @@
   "menu.brightness": "背光",
   "menu.scrape": "跳转刮削",
   "menu.about": "关于",
+  "menu.cancel": "取消",
+  "menu.confirm": "确认",
   "menu.rom_dir": "ROM 目录",
   "toast.rom_dir": "请在系统窗口中选择 ROM 目录",
   "menu.video_sound": "预览声音",

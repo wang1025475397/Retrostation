@@ -79,6 +79,8 @@
   "menu.brightness": "Brightness",
   "menu.scrape": "Open scraper",
   "menu.about": "About",
+  "menu.cancel": "Cancel",
+  "menu.confirm": "OK",
   "menu.rom_dir": "ROM folder",
   "toast.rom_dir": "Pick the ROM folder in the system window",
   "menu.video_sound": "Preview sound",

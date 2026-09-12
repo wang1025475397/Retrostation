@@ -122,8 +122,35 @@ SORTS = ("name", "play", "recent")
 _CYCLING_ROWS = frozenset(
     {"screen", "card", "layout", "bvideo", "video_sound", "sfx", "sort",
      "show_hidden", "search_by", "theme", "variant", "language", "status_bar",
-     "vpad", "vpad_op", "tcache", "autostart"}
+     "vpad", "vpad_op", "tcache", "autostart",
+     # The stepped rows belong here too: this is also the set touch consults to
+     # decide a row is adjustable, and leaving them out made 背光/预览音量/按键音量
+     # read as "info" rows -- a tap on them did nothing at all, while the one
+     # stepped row that was listed answered every tap with a "+".
+     "brightness", "video_volume", "sfx_volume"}
 )
+
+#: How each settings row is operated, for touch -- a finger has no left/right to
+#: step a value with.  Booleans flip on a tap; a multi-value row opens a picker of
+#: these options (translation key, value); actions run on a tap.  A row left out
+#: keeps the keyboard's step, and "info" rows (about) do nothing.
+_MENU_ACTIONS = frozenset({"hide_game", "clear_cache", "rom_dir"})
+_MENU_TOGGLES = frozenset({"bvideo", "video_sound", "sfx", "tcache", "autostart",
+                           "status_bar", "vpad", "show_hidden"})
+_MENU_CHOICES: dict[str, tuple[tuple[str, str], ...]] = {
+    "screen": (("value.dual", "dual"), ("value.single", "single")),
+    "layout": (("games.layout_list", "list"), ("games.layout_grid", "grid"),
+               ("games.layout_carousel", "carousel")),
+    "sort": (("value.sort_name", "name"), ("value.sort_play", "play"),
+             ("value.sort_recent", "recent")),
+    "theme": tuple((f"value.theme_{name}", name) for name in THEMES),
+    "variant": tuple((f"value.variant_{name}", name) for name in VARIANTS),
+    "search_by": (("value.search_title", "title"), ("value.search_rom", "rom"),
+                  ("value.search_both", "both")),
+    # Raw codes, not labels: the row itself shows the code, so the picker does
+    # too -- and it keeps working the day another language bundle lands.
+    "language": (("value.auto", "auto"), ("zh_CN", "zh_CN"), ("en_US", "en_US")),
+}
 
 
 def _cycle(options: tuple, current, direction: int):
@@ -1023,11 +1050,16 @@ class Session:
     def _handle_menu_modal(self, event: InputEvent) -> Outcome:
         if not event.is_press:
             return Outcome()
+        # One of the rows is open for picking: it owns the input until it closes.
+        if getattr(self, "menu_choice_options", None):
+            return self._handle_menu_choice_modal(event)
         rows = self.menu_rows()
         if event.action is InputAction.UP:
             self.menu_index = (self.menu_index - 1) % len(rows)
+            self.menu_top = None  # a key press re-centres the window on the cursor
         elif event.action is InputAction.DOWN:
             self.menu_index = (self.menu_index + 1) % len(rows)
+            self.menu_top = None
         elif event.action is InputAction.A:
             return self._apply_menu(rows[self.menu_index][0])
         elif event.action in (InputAction.LEFT, InputAction.RIGHT):
@@ -1035,7 +1067,205 @@ class Session:
                                      -1 if event.action is InputAction.LEFT else 1)
         elif event.action in (InputAction.B, InputAction.MENU):
             self._cancel_menu()
+        elif event.action is InputAction.TAP and event.x is not None:
+            return self._tap_menu_row(event)
+        elif event.action in (InputAction.DRAG, InputAction.FLING):
+            # While an option list is open a drag belongs to nothing: it must not
+            # scroll the settings behind it.  ``getattr`` because the picker state
+            # only exists once a picker has been opened -- reading it directly
+            # raised AttributeError on every drag and left the menu dead.
+            if getattr(self, "menu_choice_options", None):
+                return Outcome()
+            return self._scroll_menu(event)
         return Outcome(redraw=True)
+
+    def _tap_menu_row(self, event: InputEvent) -> Outcome:
+        """Touch: run the control the finger landed on, else move the cursor.
+
+        Every row carries its own control -- a switch, an option list, a button --
+        because a phone has no left/right to step a value with.  The boxes come
+        from the dialog that drew them (``dialog_hits``), so the geometry stays in
+        one place.
+        """
+        rows = self.menu_rows()
+        # The dialog's own buttons first: the keyboard reaches them with A and B,
+        # and a finger has neither.  Confirm commits the pass the arrows staged --
+        # and never fires an action row as a side effect of confirming, which A on
+        # that row would; cancel drops the pass, exactly like B.
+        button = self._dialog_button_at(event)
+        if button is not None:
+            if button == 0:
+                self._cancel_menu()
+            else:
+                self._apply_menu("")
+            return Outcome(redraw=True)
+        # Then the stepper buttons, before the row is even looked up: they are
+        # controls of their own, and the "+" sits at the far end of the row --
+        # a tap there can miss the row's box, and testing for the row first ate
+        # the tap ("− 80 +" went down but never up).
+        stepper = self._dialog_stepper_at(event)
+        if stepper is not None:
+            index, direction = stepper
+            if index < len(rows):
+                self.menu_index = index
+                return self._adjust_menu(rows[index][0], direction)
+            return Outcome(redraw=True)
+        row = self._dialog_row_at(event)
+        if row is None or row >= len(rows):
+            return Outcome()
+        key, label, value = rows[row]
+        self.menu_index = row
+        kind = self._menu_row_kind(key)
+        if kind == "action":
+            return self._apply_menu(key)
+        if kind == "toggle":
+            # A switch is one tap; there is no right-arrow on a phone.
+            return self._adjust_menu(key, 1)
+        if kind == "choice":
+            return self._open_menu_choice(key, label, value)
+        return Outcome(redraw=True)
+
+    def _dialog_button_at(self, event: InputEvent) -> int | None:
+        """Which bottom button of the open dialog a tap landed on, if any."""
+        if event.x is None or event.y is None:
+            return None
+        for (bx, by, bw, bh), index in getattr(self, "dialog_buttons", ()) or ():
+            if bx <= event.x <= bx + bw and by <= event.y <= by + bh:
+                return index
+        return None
+
+    def _dialog_stepper_at(self, event: InputEvent) -> tuple[int, int] | None:
+        """Which stepper button of a stepped row a tap landed on: ``(row, ±1)``."""
+        if event.x is None or event.y is None:
+            return None
+        for (bx, by, bw, bh), index, direction in getattr(self, "dialog_steppers", ()) or ():
+            if bx <= event.x <= bx + bw and by <= event.y <= by + bh:
+                return index, direction
+        return None
+
+    def _menu_row_kind(self, key: str) -> str:
+        """How a row is operated, so touch knows whether to flip, pick or run it."""
+        if key in _MENU_ACTIONS:
+            return "action"
+        if key in _MENU_TOGGLES:
+            return "toggle"
+        if key in _MENU_CHOICES:
+            return "choice"
+        return "cycle" if key in _CYCLING_ROWS else "info"
+
+    def _open_menu_choice(self, key: str, label: str, value: str) -> Outcome:
+        """Touch: a multi-value row opens its options rather than stepping them."""
+        options = _MENU_CHOICES.get(key)
+        if not options:
+            return Outcome()
+        labels = [self.translator.t(tkey) for tkey, _value in options]
+        self.menu_choice_key = key
+        self.menu_choice_title = label
+        self.menu_choice_options = options
+        self.menu_choice_labels = labels
+        self.menu_choice_index = labels.index(value) if value in labels else 0
+        return Outcome(redraw=True)
+
+    def _handle_menu_choice_modal(self, event: InputEvent) -> Outcome:
+        """Input for an open option list (a radio dialog)."""
+        labels = getattr(self, "menu_choice_labels", ())
+        if event.action is InputAction.UP:
+            self.menu_choice_index = (self.menu_choice_index - 1) % max(1, len(labels))
+        elif event.action is InputAction.DOWN:
+            self.menu_choice_index = (self.menu_choice_index + 1) % max(1, len(labels))
+        elif event.action is InputAction.A:
+            return self._apply_menu_choice(self.menu_choice_index)
+        elif event.action is InputAction.TAP and event.x is not None:
+            row = self._dialog_row_at(event)
+            if row is not None and row < len(labels):
+                return self._apply_menu_choice(row)
+            # Anything else -- the cancel button, the backdrop -- dismisses it.
+            self._menu_choice_close()
+        elif event.action in (InputAction.B, InputAction.MENU):
+            self._menu_choice_close()
+        return Outcome(redraw=True)
+
+    def _apply_menu_choice(self, index: int) -> Outcome:
+        """Step the row to the picked option, then go back to the menu.
+
+        Stepping (rather than writing the field directly) reuses whatever the row
+        already does for left/right -- the only place that knows how each value is
+        stored and what else changes with it.  Direction-agnostic: step forward
+        until the row reports the wanted label, at most one full cycle.
+        """
+        key = getattr(self, "menu_choice_key", "")
+        labels = getattr(self, "menu_choice_labels", ())
+        if key and 0 <= index < len(labels):
+            target = labels[index]
+            for _ in range(len(labels) + 1):
+                if self._menu_row_value(key) == target:
+                    break
+                self._adjust_menu(key, 1)
+        self._menu_choice_close()
+        return Outcome(redraw=True)
+
+    def _menu_choice_close(self) -> None:
+        """Drop the option list and hand input back to the settings menu."""
+        self.menu_choice_options = None
+        self.menu_choice_labels = ()
+        self.menu_choice_key = ""
+        self.menu_choice_title = ""
+
+    def _menu_row_value(self, key: str) -> str:
+        """The value string a settings row currently shows."""
+        for row_key, _label, value in self.menu_rows():
+            if row_key == key:
+                return value
+        return ""
+
+    def _scroll_menu(self, event: InputEvent) -> Outcome:
+        """Touch: a drag moves the *list*, not the cursor.
+
+        The cursor belongs to the keyboard; dragging a list should not walk it,
+        which is exactly what made the menu feel wrong under a finger.  The
+        cursor stays where it is until a direction key asks for it again.
+        """
+        rows = self.menu_rows()
+        pitch = self._dialog_pitch()
+        start, visible = getattr(self, "dialog_window", None) or (0, 0)
+        if pitch <= 0 or not rows or visible <= 0:
+            return Outcome()
+        self._menu_drag_px = getattr(self, "_menu_drag_px", 0.0) + event.dy
+        steps = int(-self._menu_drag_px / pitch)  # drag up (dy<0) walks down the list
+        if steps == 0:
+            return Outcome()
+        self._menu_drag_px += steps * pitch
+        top = max(0, min(max(0, len(rows) - visible), start + steps))
+        if top == start:
+            return Outcome()
+        self.menu_top = top
+        return Outcome(redraw=True)
+
+    def _dialog_row_at(self, event: InputEvent) -> int | None:
+        """Which drawn dialog row a touch landed on, if any."""
+        box = self._dialog_box_at(event)
+        if box is None:
+            return None
+        for candidate, index in getattr(self, "dialog_hits", ()) or ():
+            if candidate == box:
+                return index
+        return None
+
+    def _dialog_box_at(self, event: InputEvent) -> tuple[int, int, int, int] | None:
+        """The box of the drawn dialog row under a touch, if any."""
+        if event.x is None or event.y is None:
+            return None
+        for (bx, by, bw, bh), _index in getattr(self, "dialog_hits", ()) or ():
+            if bx <= event.x <= bx + bw and by <= event.y <= by + bh:
+                return (bx, by, bw, bh)
+        return None
+
+    def _dialog_pitch(self) -> int:
+        """Row pitch of the drawn dialog, from the boxes it reported."""
+        boxes = getattr(self, "dialog_hits", ()) or ()
+        if len(boxes) >= 2:
+            return boxes[1][0][1] - boxes[0][0][1]
+        return boxes[0][0][3] if boxes else 0
 
     def _apply_menu(self, key: str) -> Outcome:
         """A: commit everything the arrows staged, then close.

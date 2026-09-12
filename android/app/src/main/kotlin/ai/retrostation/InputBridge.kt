@@ -140,7 +140,17 @@ class InputBridge(
                 emitTouch("touch_up", screen,
                     x = (event.x / sx).toInt(), y = (event.y / sy).toInt(),
                     kind = "release")
-                if (!dragging && event.eventTime - downAt <= TAP_MAX_MS) {
+                // A fast flick can arrive as DOWN + UP with no MOVE in between, and
+                // the old test only measured movement *inside* MOVE -- so a swipe
+                // became a tap at the finger's lift point, which is what made a
+                // menu's selection jump while scrolling it.  Measure the whole
+                // gesture here and hand the whole distance over as one drag.
+                val moved = abs(event.x - downX) + abs(event.y - downY)
+                if (!dragging && moved > TAP_SLOP_PX) {
+                    emitGesture("drag", screen,
+                        dx = ((event.x - downX) / sx).toInt(),
+                        dy = ((event.y - downY) / sy).toInt())
+                } else if (!dragging && event.eventTime - downAt <= TAP_MAX_MS) {
                     emitTouch("tap", screen,
                         x = (event.x / sx).toInt(), y = (event.y / sy).toInt())
                 } else if (dragging) {

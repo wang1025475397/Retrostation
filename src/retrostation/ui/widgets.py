@@ -307,11 +307,23 @@ def dialog(
     body: str = "",
     rows: list[tuple[str, str]] | None = None,
     selected: int = 0,
-) -> None:
+    top: int | None = None,
+    buttons: tuple[str, ...] = (),
+    steppers: frozenset[int] = frozenset(),
+) -> tuple[list[tuple[tuple[int, int, int, int], int]],
+           list[tuple[tuple[int, int, int, int], int]],
+           list[tuple[tuple[int, int, int, int], int, int]]]:
     """Centred modal with a dimmed backdrop.
 
     ``rows`` are ``(label, value)`` pairs for a settings menu; a plain
-    confirmation dialog passes an empty list and renders ``body``.
+    confirmation dialog passes an empty list and renders ``body``.  ``top`` pins
+    the first visible row (a touch drag moves the *content*, not the cursor);
+    without it the window follows ``selected``.  ``buttons`` adds a row of
+    buttons along the bottom -- a touch device has no A/B to commit with.
+    ``steppers`` names the rows whose value a finger steps: those are drawn with
+    their own ``−`` and ``+`` buttons.  Returns the row boxes, the button boxes
+    and the stepper boxes -- ``(box, index)`` and ``(box, index, ±1)`` -- so the
+    caller can hit-test touches against exactly what is on screen.
     """
     m = painter.metrics
     painter.rect((0, 0, m.width, m.height), fill=(0, 0, 0, 158))
@@ -319,7 +331,8 @@ def dialog(
     rows = rows or []
     row_h = m.u(40)
     width = m.u(470)
-    chrome = m.u(42) + m.u(16) + (m.u(44) if body else 0) + m.u(14)
+    chrome = (m.u(42) + m.u(16) + (m.u(44) if body else 0) + m.u(14)
+              + (m.u(46) if buttons else 0))
     # A settings list only ever grows, and a dialog taller than the screen is
     # unusable on a device with no scrolling: show a window around the cursor
     # instead, and hint that the list continues past its edges.
@@ -327,8 +340,11 @@ def dialog(
     visible = min(len(rows), room)
     start = 0
     if len(rows) > visible:
-        start = max(0, min(len(rows) - visible, selected - visible // 2))
+        anchor = visible // 2 if top is None else top
+        start = max(0, min(len(rows) - visible, anchor))
     shown = rows[start:start + visible]
+    # The window, for a touch drag that has to know where it currently is.
+    painter.dialog_window = (start, visible)
 
     height = chrome + row_h * visible
     x = (m.width - width) // 2
@@ -347,10 +363,17 @@ def dialog(
         )
         content_y += m.u(44)
 
+    hits: list[tuple[tuple[int, int, int, int], int]] = []
+    stepper_hits: list[tuple[tuple[int, int, int, int], int, int]] = []
     for offset, (label, value) in enumerate(shown):
         index = start + offset
         item_y = content_y + m.u(6) + offset * row_h
         is_selected = index == selected
+        # The row's box, for touch hit-testing: the caller hands it back to the
+        # session (the geometry lives here and nowhere else).  Full row height,
+        # not the highlight's inset -- a tap landing in the gap between two rows
+        # did nothing at all, which reads as "touch is broken".
+        hits.append(((x + m.u(6), item_y, width - m.u(12), row_h), index))
         if is_selected:
             painter.hgradient(
                 (x + m.u(6), item_y, width - m.u(12), row_h - m.u(8)),
@@ -367,23 +390,77 @@ def dialog(
         # (very visible with the longer translated labels).
         value_room = width // 2 - m.u(24)
         shown_value = painter.ellipsize(value, size=12, max_width=value_room)
-        label_room = width - m.u(32) - painter.text_width(shown_value, size=12) - m.u(12)
+        value_pos = (x + width - m.u(16), item_y + row_h // 2 - m.u(4))
+        value_anchor = "rm"
+        label_end = x + width - m.u(16)
+        if index in steppers:
+            # A stepped row is a little stepper -- [−] value [+] -- with the two
+            # buttons a text line tall, so the marks read as part of the row
+            # instead of as blocks parked on it.  The hit boxes recorded here are
+            # exactly what the session tests, so a tap lands on the mark it looks
+            # like it hit.  (Drawn all inside the value cell they put the "−"
+            # itself in the right half of the row, and every tap added.)
+            btn, gap, slot = m.u(22), m.u(6), m.u(56)
+            top = item_y + (row_h - btn) // 2
+            plus = (x + width - m.u(16) - btn, top, btn, btn)
+            value_left = plus[0] - gap - slot
+            minus = (value_left - gap - btn, top, btn, btn)
+            stepper_hits.append((minus, index, -1))
+            stepper_hits.append((plus, index, 1))
+            if is_selected:
+                # On the highlight the buttons belong to it: the label's own ink,
+                # and a fill that darkens the accent rather than covering it with
+                # a panel-coloured block.
+                fill, outline, glyph_color = (0, 0, 0, 46), (0, 0, 0, 0), label_color
+            else:
+                fill, outline, glyph_color = COLORS.panel_2, COLORS.border, COLORS.text
+            for box, glyph in ((minus, "−"), (plus, "+")):
+                painter.rounded_rect(box, radius=m.u(4), fill=fill, outline=outline)
+                painter.text(
+                    (box[0] + box[2] // 2, box[1] + box[3] // 2),
+                    glyph, size=12, fill=glyph_color, anchor="mm",
+                )
+            # The number sits between the two buttons.
+            value_pos = (value_left + slot // 2, item_y + row_h // 2 - m.u(4))
+            value_anchor = "mm"
+            label_end = minus[0]
+        label_room = label_end - x - m.u(28) - painter.text_width(shown_value, size=12)
         painter.text(
             (x + m.u(16), item_y + row_h // 2 - m.u(4)),
             painter.ellipsize(label, size=14, max_width=max(m.u(40), label_room)),
             size=14, fill=label_color, anchor="lm",
         )
-        painter.text(
-            (x + width - m.u(16), item_y + row_h // 2 - m.u(4)),
-            shown_value, size=12, fill=value_color, anchor="rm",
-        )
+        painter.text(value_pos, shown_value, size=12, fill=value_color, anchor=value_anchor)
 
     if start > 0 or start + visible < len(rows):
         painter.text(
-            (x + width // 2, y + height - m.u(7)),
+            (x + width // 2, y + height - m.u(7) - (m.u(46) if buttons else 0)),
             "▲" if start > 0 else "▼",
             size=9, fill=COLORS.text_dim, anchor="mm",
         )
+
+    button_hits: list[tuple[tuple[int, int, int, int], int]] = []
+    if buttons:
+        # Right-aligned along the bottom, cancel first -- the order every system
+        # dialog uses, so a finger goes where it expects.
+        bar_h, gap, pad = m.u(30), m.u(10), m.u(16)
+        btn_w = (width - pad * 2 - gap * (len(buttons) - 1)) // max(1, len(buttons))
+        bar_y = y + height - bar_h - m.u(8)
+        for index, label in enumerate(buttons):
+            bx = x + pad + index * (btn_w + gap)
+            box = (bx, bar_y, btn_w, bar_h)
+            primary = index == len(buttons) - 1
+            painter.rounded_rect(
+                box, radius=m.u(6),
+                fill=COLORS.accent if primary else COLORS.panel_2,
+                outline=COLORS.border,
+            )
+            painter.text(
+                (bx + btn_w // 2, bar_y + bar_h // 2), label, size=13,
+                fill=(26, 18, 6, 255) if primary else COLORS.text, anchor="mm",
+            )
+            button_hits.append((box, index))
+    return hits, button_hits, stepper_hits
 
 
 # --------------------------------------------------------------------------- #
