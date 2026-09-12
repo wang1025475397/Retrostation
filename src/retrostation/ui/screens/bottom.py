@@ -8,7 +8,7 @@ from ..art import ArtProvider
 from ..painter import Painter
 from ..widgets import logo_banner
 from ...core.model import Game
-from ...core.theme import COLORS
+from ...core.theme import COLORS, is_android_skin
 from .games import cover_art
 
 _STAR = "★"
@@ -68,11 +68,16 @@ class DescScroll:
 def draw(painter: Painter, art: ArtProvider, game: Game | None, meta: Meta | None, *,
          key_label: str, hints: list[tuple[str, str]],
          video_frame=None, video_progress: float | None = None,
+         video_external: bool = False,
          clip_pending: bool = False, system_desc: str = "",
          game_count: int | None = None,
          desc_scroll: DescScroll | None = None) -> None:
     m = painter.metrics
-    painter.clear()
+    if is_android_skin():
+        painter.vgradient((0, 0, m.width, m.height),
+                          start=COLORS.bg_top, end=COLORS.bg_bottom)
+    else:
+        painter.clear()
     _title_bar(painter, meta, key_label, game_count)
 
     if game is None or meta is None:
@@ -94,11 +99,18 @@ def draw(painter: Painter, art: ArtProvider, game: Game | None, meta: Meta | Non
 
     top = m.bottom_title_h + m.body_padding
     media_box = (m.u(12), top, m.media_w, m.media_h)
-    _media(painter, art, game, media_box, video_frame, video_progress, clip_pending)
+    # Tell the platform where the media box is: on Android the clip is
+    # composited there by ExoPlayer instead of being drawn by us (§9.2).
+    painter.platform.set_video_rect(media_box, index=1)
+    _media(painter, art, game, media_box, video_frame, video_progress, clip_pending,
+           external=video_external)
     logo_banner(painter, art, game, (m.u(12), top + m.media_h + m.u(8), m.media_w, m.logo_strip_h))
 
     _meta(painter, meta, (m.u(12) + m.media_w + m.body_gap, top, m.meta_w, m.bottom_body_h()),
           desc_scroll)
+    # The on-screen pad is NOT drawn here: it is an overlay owned by the app
+    # (``_draw_bottom`` / ``_draw_overlays``), so it stays put -- and stays
+    # live -- across every page of this panel instead of only the game view.
     _hints(painter, hints)
 
 
@@ -135,10 +147,10 @@ def media_inner_size(m) -> tuple[int, int]:
 
 def _media(painter: Painter, art: ArtProvider, game: Game,
            box: tuple[int, int, int, int], frame, progress: float | None,
-           pending: bool = False) -> None:
+           pending: bool = False, external: bool = False) -> None:
     m = painter.metrics
     x, y, w, h = box
-    playing = frame is not None
+    playing = frame is not None or external
     painter.rounded_rect(box, radius=m.u(8), fill=(14, 14, 16, 255),
                          outline=(232, 163, 61, 90) if playing else COLORS.border)
     inset = m.u(MEDIA_INSET)
@@ -149,7 +161,7 @@ def _media(painter: Painter, art: ArtProvider, game: Game,
     # then flashed it on every game that has a clip.
     if frame is not None:
         painter.image_fit(frame, inner)
-    elif not pending:
+    elif not pending and not external:
         cover_art(painter, art, game, inner)
     if playing:
         progress_bar(painter, x, y + h - m.u(3), w, m.u(3), progress)

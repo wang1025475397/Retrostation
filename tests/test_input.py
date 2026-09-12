@@ -153,15 +153,38 @@ class TestButtonMapping:
         assert presses(reader) == [InputAction.B]
 
     def test_every_action_is_reachable(self) -> None:
-        # HIDE and CHAR have no handheld button: HIDE is desktop-keymap only
-        # (the handheld reaches hiding from the menu), and CHAR is a typed
-        # character event.  Naming exceptions here is deliberate, so the test
-        # still catches an action that was merely forgotten.
-        desktop_only = {InputAction.HIDE, InputAction.CHAR}
+        # Actions that no handheld button produces, named one at a time on
+        # purpose: listing them keeps this test able to catch an action that was
+        # merely *forgotten* in the keymap.
+        #   HIDE              desktop keymap only (the handheld hides from the menu)
+        #   CHAR              a typed character, not a button
+        #   TAP/DRAG/FLING    touch, only from platforms with a touchscreen
+        not_buttons = {
+            InputAction.HIDE,
+            InputAction.CHAR,
+            InputAction.TAP,
+            InputAction.DRAG,
+            InputAction.FLING,
+        }
         reachable = set(DEFAULT_KEYMAP.values()) | {
             side for pair in HAT_AXES.values() for side in pair
         }
-        assert reachable | desktop_only == set(InputAction)
+        assert reachable | not_buttons == set(InputAction)
+
+    def test_touch_actions_are_recognisable_as_touch(self) -> None:
+        """``is_touch`` is what lets a screen ignore what it cannot hit-test."""
+        from retrostation.platform.base import InputEvent
+
+        assert InputEvent(InputAction.TAP, x=10, y=20).is_touch
+        assert InputEvent(InputAction.DRAG, dy=-4).is_touch
+        assert not InputEvent(InputAction.A).is_touch
+
+    def test_button_events_belong_to_no_screen(self) -> None:
+        """A key press is not owned by a panel; only a finger lands on one."""
+        from retrostation.platform.base import InputEvent
+
+        assert InputEvent(InputAction.A).screen == 0
+        assert InputEvent(InputAction.TAP, x=1, y=2, screen=1).screen == 1
 
     def test_release_after_press(self, reader: EvdevInput) -> None:
         feed(reader, raw(EV_KEY, 304, 1))

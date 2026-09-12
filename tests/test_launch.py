@@ -22,6 +22,7 @@ from retrostation.core.state import read_state
 from retrostation.data.library import Library
 from retrostation.launcher.launch import LAUNCH_CMD_PATH, build_plan, write_launch_cmd
 from retrostation.platform.base import InputAction, InputEvent
+from retrostation.platform.targets import ArgvTarget, IntentTarget, UnsupportedTarget
 from retrostation.ui.app import EXIT_RESTART, App
 from retrostation.ui.session import VIEW_GAMES, VIEW_PLATFORMS
 from tests.conftest import FakePlatform
@@ -175,9 +176,25 @@ class TestLinuxHandOff:
         target = tmp_path / "launch.cmd"
         platform.launch_cmd_path = str(target)
 
-        platform.launch_game(["/bin/true", "a b"])
+        platform.launch_game(ArgvTarget(("/bin/true", "a b")))
 
         assert shlex.split(target.read_text(encoding="utf-8"))[2:] == ["/bin/true", "a b"]
+
+    def test_a_target_this_firmware_cannot_run_is_refused(self, tmp_path: Path) -> None:
+        """An Android target must not be silently dropped on a handheld.
+
+        ``launch_game`` returning quietly would look exactly like a successful
+        hand-off: the app would exit 42 and the bootstrap would find no command
+        file, which is the one failure mode DESIGN §8.2 calls out as "abnormal".
+        """
+        from retrostation.platform.linux.platform import LinuxPlatform
+
+        platform = LinuxPlatform(rom_root=str(tmp_path), headless=True)
+        platform.launch_cmd_path = str(tmp_path / "launch.cmd")
+
+        with pytest.raises(UnsupportedTarget):
+            platform.launch_game(IntentTarget(package="com.retroarch.aarch64"))
+        assert not (tmp_path / "launch.cmd").exists()
 
 
 class TestDirectRetroArchFallback:

@@ -75,6 +75,9 @@ class Painter:
     def hgradient(self, box: Sequence[float], *, start, end, radius: int = 0) -> None:
         self.canvas.hgradient(box, start=start, end=end, radius=radius)
 
+    def vgradient(self, box: Sequence[float], *, start, end) -> None:
+        self.canvas.vgradient(box, start=start, end=end)
+
     def ellipse(self, box: Sequence[float], *, fill=None, outline=None, width: int = 1) -> None:
         self.canvas.ellipse(box, fill=fill, outline=outline, width=width)
 
@@ -92,6 +95,13 @@ class Painter:
 
     def image(self, bitmap: object, box: Sequence[float]) -> None:
         self.canvas.image(bitmap, box)
+
+    def image_rounded(self, bitmap: object, box: Sequence[float], *, radius: int) -> None:
+        self.canvas.image_rounded(bitmap, box, radius=radius)
+
+    def image_crop(self, bitmap: object, src: Sequence[float],
+                   dst: Sequence[float]) -> None:
+        self.canvas.image_crop(bitmap, src, dst)
 
     def image_fit(self, bitmap: object, box: Sequence[float]) -> None:
         self.canvas.image_fit(bitmap, box)

@@ -22,7 +22,7 @@
 
 ### 1.2 不在本期范围
 
-- 内建模拟器（全部通过外部脚本拉起）
+- 内建模拟器（Linux 端全部通过外部脚本拉起；**Android 端另做内联 libretro 宿主**，见 [DESIGN.ANDROID.md §8.6](DESIGN.ANDROID.md)）
 - NDS 双屏游戏内显示（由 `ndsCtrl.dge` + `subscreen.dge` 负责，前端启动后即让位）
 - ROM 管理（增删改），仅做只读浏览 + 收藏
 
@@ -1269,10 +1269,9 @@ toast / 平台数），这样不管是按键、toast 还是后台扫描完成触
 
 | 阶段 | 交付物 | 验收 |
 |---|---|---|
-| **E1** | `data/sources/pegasus.py` —— **Pegasus 数据源**（只读） | 只放 `metadata.pegasus.txt` 的目录能正常出封面/简介；与 ES-DE 共存时按 §6.8.4 合并 |
-| **E2** | 尺寸 token 化（`ui/theme.py`）+ 布局比例化 | 把 `prototype` 缩放到任意分辨率都不破版（**Android 前置条件**） |
-| **E3** | `platform/android/`（Chaquopy 宿主） | Android 上能扫描、浏览、看封面；单屏分区布局可用 |
-| **E4** | Android 视频（MediaPlayer 硬解）+ 启动 Intent | 副屏位置播放 30fps；能拉起 RetroArch |
+| **E1 ✅** | `data/sources/pegasus.py` —— **Pegasus 数据源**（只读） | 只放 `metadata.pegasus.txt` 的目录能正常出封面/简介；与 ES-DE 共存时按 §6.8.4 合并 |
+| **E2 ✅** | 尺寸 token 化（`core/theme.py`）+ 布局比例化 | 已落地：`Metrics.u()` / `scale` / `grid_cols` 全部从 640×480 参考设计派生，无像素字面量 |
+| **E3 / E4** | Android 移植 | **已拆解为独立设计文档 [docs/DESIGN.ANDROID.md](DESIGN.ANDROID.md) 的 A0~A8 阶段**（前置重构 → Chaquopy 宿主 → 存储权限 → 启动 Intent → 视频 → 触摸） |
 
 ---
 
@@ -1309,6 +1308,12 @@ time ffmpeg -i <视频> -vf scale=336:264 -frames:v 1 -y /tmp/first.jpg
 
 > 后续计划做 Android App。本章规定**现在写代码时必须遵守的约束**，
 > 让 Android 端能复用内核，而不是从零重写。
+>
+> **本章是约束层；具体实现设计见 [docs/DESIGN.ANDROID.md](DESIGN.ANDROID.md)** ——
+> 那份文档核查了本章预留的兑现度（结论：抽象、语义输入、比例化、数据层解耦均已到位），
+> 列出必须先补的 7 处泄漏（`ui/app.py` 直接操作 `pil_image`、`ui/screens/games.py` 导入 PIL、
+> `data/media.py` 的 PIL 图像处理、启动只能产出 argv、缺触摸语义、单屏详情条比例写死），
+> 并给出渲染方案（逻辑分辨率软渲染 + GPU 上采样）、存储权限、Intent 启动器表与 A0~A8 里程碑。
 
 ### 17.1 分层：只有 `platform/` 允许出现平台代码
 
@@ -1386,24 +1391,27 @@ class Canvas(abc.ABC):
 
 **双屏 → Android 的映射**
 
-| 掌机双屏 | Android 单屏 | Android 折叠/横屏 |
-|---|---|---|
-| 上屏 + 下屏 | **上下分区**（60% / 40%），等价 §11 方案 A | 左右分栏，等价 §11 方案 B |
-| 副屏媒体区 | 下分区的媒体卡 | 右栏顶部媒体卡 |
-| 副屏元数据 | 下分区右半 | 右栏下半 |
+| 掌机双屏 | **Android 双屏机** | Android 单屏 | Android 折叠/平板横屏 |
+|---|---|---|---|
+| 上屏 + 下屏 | **原样映射**（两块 Display，各一个 Canvas） | **上下分区**（60% / 40%），等价 §11 方案 A | 左右分栏，等价 §11 方案 B |
+| 副屏媒体区 | 副屏媒体区（可放硬解视频） | 下分区的媒体卡 | 右栏顶部媒体卡 |
+| 副屏元数据 | 副屏元数据 | 下分区右半 | 右栏下半 |
 
-> 换句话说：**Android 的单屏布局 = 掌机的单屏兼容模式**（§11 已经设计好了）。
-> 所以 §11 不是"降级方案"，它是**第二种正式形态**，必须同等打磨。
+> 两个结论：
+> 1. **Android 双屏机 = 掌机形态原样搬过去**，`ui/` 不改一行（详见 DESIGN.ANDROID §6.4）；
+>    两块屏的分辨率允许不同，因为每个 canvas 各自 `metrics_for`。
+> 2. **Android 的单屏布局 = 掌机的单屏兼容模式**（§11 已经设计好了）。
+>    所以 §11 不是"降级方案"，它是**第二种正式形态**，必须同等打磨。
 
 ### 17.4 Android 与 Linux 的差异对照
 
 | 能力 | Linux 掌机（RG DS） | Android | 影响 |
 |---|---|---|---|
-| 双屏 | 真双屏 DSI-1/2 | 基本没有；折叠屏可近似 | 走单屏分区 |
+| 双屏 | 真双屏 DSI-1/2 | **有真双屏机**：AYN Thor（1920×1080 + 1240×1080）、RG DS 的 Android 系统（双 640×480），品类在扩张 | **走 dual，UI 零改动**；见 DESIGN.ANDROID §6.4 |
 | 输入 | `/dev/input/event4` + 触摸 event1 | KeyEvent + MotionEvent + 手柄 | `platform/android/input.py` |
 | 渲染 | SDL2 + PIL（**软件**） | SDL2 / Kivy(OpenGL) / 原生 Canvas | 见 §17.5 |
 | **视频** | ffmpeg **软解**（19% 单核） | **MediaPlayer/ExoPlayer 硬解** | 比掌机强，可实现 30fps 有声预览 |
-| 启动游戏 | `/mnt/mod/ctrl/RA_launch.sh` | `Intent` + RetroArch/Android 包名 | `launch_game()` 分平台实现 |
+| 启动游戏 | `/mnt/mod/ctrl/RA_launch.sh` | **双轨**：`Intent`（RetroArch / 独立模拟器）+ **内联 libretro 宿主**（App 内自己加载核心） | `launch_game()` 分平台实现；`SystemDef.core` 三条路径共用 |
 | 存储 | `/mnt/mmc/Roms`（root，直读） | **分区存储限制**，需 SAF 授权 | 最大坑，见下 |
 | 背光/电量 | sysfs 直读 | BatteryManager / Settings.System | `platform/android/hw.py` |
 | 多语言 | 自管 `lang/*.json` | 系统 Resources | i18n key 保持一致即可 |

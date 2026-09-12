@@ -21,6 +21,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
 
+from ..core.theme import Form
+from .targets import LaunchTarget, UnsupportedTarget
+
 
 # --------------------------------------------------------------------------- #
 # Input
@@ -67,6 +70,30 @@ class InputAction(str, enum.Enum):
     #: ignore it, so it is inert everywhere except the search dialog.
     CHAR = "char"
 
+    # -- touch ------------------------------------------------------------ #
+    #
+    # Produced only by platforms that have a touchscreen (Android; the RG DS
+    # panel is wired but never exposed one).  Every feature must still be
+    # reachable with buttons alone (DESIGN §5), so a screen that does not
+    # implement hit-testing simply ignores these -- which is why adding them
+    # changes nothing on the handhelds.
+
+    #: A finger landed and lifted at :attr:`InputEvent.x` / ``y``, in the
+    #: coordinate space of :attr:`InputEvent.screen`'s canvas.
+    TAP = "tap"
+    #: A finger touched down (``TOUCH_DOWN``) or lifted (``TOUCH_UP``) at
+    #: :attr:`InputEvent.x` / ``y``.  Not commands in themselves: the on-screen
+    #: pad uses them to start and stop *holding* a button, which is the only way
+    #: a press on a flat panel can repeat the way a real held key does.
+    TOUCH_DOWN = "touch_down"
+    TOUCH_UP = "touch_up"
+    #: A finger is dragging: :attr:`InputEvent.dx` / ``dy`` carry the movement
+    #: since the previous event, in canvas units.
+    DRAG = "drag"
+    #: The finger left the screen while still moving; ``dx`` / ``dy`` carry the
+    #: velocity for inertial scrolling.
+    FLING = "fling"
+
 
 class InputKind(str, enum.Enum):
     PRESS = "press"
@@ -83,9 +110,19 @@ class InputEvent:
 
     action: InputAction
     kind: InputKind = InputKind.PRESS
-    #: Touch coordinates, only set for ``InputAction.TAP``.
+    #: Touch position for :attr:`InputAction.TAP`, in the coordinate space of
+    #: :attr:`screen`'s canvas -- the platform maps physical pixels into it, so
+    #: the UI never learns the device's real resolution.
     x: int | None = None
     y: int | None = None
+    #: Movement (``DRAG``) or velocity (``FLING``) in the same canvas units.
+    dx: int = 0
+    dy: int = 0
+    #: Which canvas the touch landed on: 0 = top, 1 = bottom.  Button events
+    #: leave it 0 -- a key press does not belong to a screen, and on a
+    #: dual-screen device both windows feed the same queue (DESIGN.ANDROID
+    #: §6.4.3).
+    screen: int = 0
     #: The typed character for keys that carry one (desktop keyboard).  An
     #: event can be both: ``s`` types an "s" *and* maps to START, and the
     #: handler in charge decides which side it consumes.
@@ -103,9 +140,16 @@ class InputEvent:
     def is_long(self) -> bool:
         return self.kind is InputKind.LONG_PRESS
 
+    @property
+    def is_touch(self) -> bool:
+        """Whether this came from a finger rather than a button."""
+        return self.action in (InputAction.TAP, InputAction.DRAG, InputAction.FLING)
+
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
         pos = f" @({self.x},{self.y})" if self.x is not None else ""
-        return f"<{self.kind.value}:{self.action.value}{pos}>"
+        delta = f" d({self.dx},{self.dy})" if (self.dx or self.dy) else ""
+        screen = f" s{self.screen}" if self.screen else ""
+        return f"<{self.kind.value}:{self.action.value}{pos}{delta}{screen}>"
 
 
 # --------------------------------------------------------------------------- #
@@ -172,6 +216,38 @@ class Canvas(abc.ABC):
     @abc.abstractmethod
     def clear(self, color: Sequence[int]) -> None:
         """Fill the whole surface with ``color`` (RGBA)."""
+
+    # -- incremental repaint ---------------------------------------------- #
+    #
+    # Repainting a whole panel costs more than a frame budget on the handheld
+    # (~32 ms measured, DESIGN §9.4), so the app paints one without its
+    # selection highlight, keeps that, and restores it while only the cursor
+    # moves.  The stored handle is **opaque**: PIL image here, a Bitmap on
+    # Android.  Callers may only hand it back to the methods below -- that is
+    # what keeps ``ui/`` free of any imaging library.
+
+    @abc.abstractmethod
+    def snapshot(self, box: Sequence[float] | None = None) -> object:
+        """Copy of the whole surface, or of ``box`` ``(x, y, w, h)``."""
+
+    @abc.abstractmethod
+    def restore(self, snapshot: object, at: Sequence[float] | None = None) -> None:
+        """Blit ``snapshot`` back, at ``at`` ``(x, y)`` or at the origin.
+
+        Replaces the destination pixels rather than compositing: a snapshot is
+        a previous state of this surface, not an overlay.
+        """
+
+    @abc.abstractmethod
+    def update_snapshot(self, snapshot: object, box: Sequence[float]) -> None:
+        """Copy this surface's ``box`` region into ``snapshot`` at the same place.
+
+        The inverse of :meth:`restore`, for the part of a cached panel that
+        keeps changing after the snapshot was taken (the single-screen detail
+        strip repaints on every video frame; without re-capturing it, a restore
+        would resurrect a stale frame -- that is the flicker described in
+        ``App._cache_strip``).
+        """
 
     # -- shapes ----------------------------------------------------------- #
 
@@ -278,6 +354,34 @@ class Canvas(abc.ABC):
         same bitmap when ``opacity`` is 255.
         """
 
+    @abc.abstractmethod
+    def bitmap_size(self, bitmap: object) -> tuple[int, int]:
+        """``(width, height)`` of an opaque bitmap handle.
+
+        Screens need it to key their own caches; reading ``.width`` off the
+        handle would assume it is a PIL image.
+        """
+
+    @abc.abstractmethod
+    def round_corners(self, bitmap: object, radius: int) -> object:
+        """Return ``bitmap`` with its corners clipped to a rounded rectangle.
+
+        Multiplied into the existing alpha, so a dimmed (semi-transparent)
+        cover keeps its fade instead of snapping back to opaque.  Returns the
+        same bitmap when ``radius`` is 0 or less.
+        """
+
+    @abc.abstractmethod
+    def flatten(self, bitmap: object, background: Sequence[int]) -> object:
+        """Composite ``bitmap`` onto opaque ``background`` and drop its alpha.
+
+        The canvas has to stay fully opaque: on the handheld Weston composites
+        the RGBA framebuffer using its alpha channel, so any pixel with
+        alpha < 255 shows through to black rather than to what is behind it
+        (DESIGN §4.4).  That is why a dimmed backdrop is flattened before it is
+        drawn instead of being blended in.
+        """
+
     # -- text layout ------------------------------------------------------ #
 
     @abc.abstractmethod
@@ -302,6 +406,17 @@ class VideoPipe(abc.ABC):
 
     #: Decoded frame size in pixels.
     size: tuple[int, int]
+
+    #: Platform composites the frames itself; read_frame() stays None.
+    external: bool = False
+
+    def set_volume(self, value: float) -> None:
+        """Set the clip's soundtrack level, 0.0-1.0.
+
+        Only meaningful for external pipes, where the platform owns both the
+        pictures and the sound; the handheld mixes through its audio pipe.
+        """
+        return None
 
     @abc.abstractmethod
     def read_frame(self) -> object | None:
@@ -401,6 +516,17 @@ class Platform(abc.ABC):
     def present(self, index: int) -> None:
         """Push the current contents of canvas ``index`` to the screen."""
 
+    def screen_form(self) -> Form:
+        """How to arrange the detail view when there is only one screen.
+
+        Only consulted in the single-screen case -- two canvases always mean
+        :attr:`~retrostation.core.theme.Form.DUAL`.  The default is the
+        handhelds' fixed strip; a platform whose screen is tall (a phone in
+        portrait) returns ``PORTRAIT`` instead so the detail area is a
+        proportion of the height (docs/DESIGN.ANDROID.md §11.1).
+        """
+        return Form.COMPACT
+
     # -- input ------------------------------------------------------------ #
 
     @abc.abstractmethod
@@ -474,8 +600,30 @@ class Platform(abc.ABC):
 
     # -- launching -------------------------------------------------------- #
 
+    def rom_access_granted(self) -> bool:
+        """Whether a ROM can be handed to another app as a URI.
+
+        Always true off Android: a Linux command line carries the path itself and
+        needs no grant.  On Android some emulators only accept a ``content://``
+        URI that this app *holds*, and an app can only grant what it holds, so the
+        player authorises the ROM folder once (SAF).
+        """
+        return True
+
+    def rom_access_label(self) -> str:
+        """The authorised ROM folder, for display; empty when there is none.
+
+        Only Android has one to show: the handheld carries the path in its own
+        command line and never asks the player for a folder.
+        """
+        return ""
+
+    def request_rom_access(self) -> None:
+        """Ask the player to authorise the ROM folder (no-op off Android)."""
+        return None
+
     @abc.abstractmethod
-    def launch_game(self, argv: Sequence[str]) -> None:
+    def launch_game(self, target: LaunchTarget) -> None:
         """Hand the device over to a game.
 
         Implementations **return** -- they must not replace the process.  The
@@ -483,8 +631,24 @@ class Platform(abc.ABC):
         which is the only way the shell bootstrap can tell that apart from a
         plain quit (DESIGN §8.2).  On Linux the command is written to
         :attr:`launch_cmd_path` for the bootstrap to run; on Android it will
-        start an activity.
+        start an activity or host a libretro core.
+
+        A platform that does not understand this kind of target raises
+        :class:`~retrostation.launcher.target.UnsupportedTarget`.
         """
+
+    def run_foreground(self, target: LaunchTarget) -> int | None:
+        """Run the game *now* and return once it exits (resident path).
+
+        Only called when :meth:`can_stay_resident` is True: the app keeps its
+        windows and memory, hides the display, runs this, then comes back
+        (DESIGN §8.2 fast path).  The default refuses, so a platform that
+        reports itself resident without implementing this fails loudly rather
+        than appearing to launch nothing.
+
+        Returns the game's exit status when there is one.
+        """
+        raise UnsupportedTarget(self.name, target)
 
     def on_resume(self) -> None:
         """Called after a game exits.  Default: nothing to do."""
@@ -522,6 +686,17 @@ class Platform(abc.ABC):
     def save_screenshot(self, canvas: Canvas, path: Path) -> None:
         """Write ``canvas`` to ``path`` (development / diagnostics only)."""
         raise NotImplementedError
+
+    def set_video_rect(
+        self, rect: tuple[int, int, int, int] | None, *, index: int = 0
+    ) -> None:
+        """Where the preview box sits, in canvas units (x, y, w, h).
+
+        Only platforms that composite video themselves need it (Android's
+        ExoPlayer surface): the UI leaves that box empty and the platform puts
+        the moving picture behind it.  Default: nothing to do.
+        """
+        return None
 
     def open_video_pipe(
         self,

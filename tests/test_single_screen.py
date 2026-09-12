@@ -15,7 +15,7 @@ from PIL import Image
 
 from retrostation.core.config import Config
 from retrostation.core.i18n import Translator
-from retrostation.core.theme import metrics_for
+from retrostation.core.theme import Form, metrics_for
 from retrostation.data.library import Library
 from retrostation.platform.base import InputAction, InputEvent, InputKind
 from retrostation.ui.app import EXIT_OK, EXIT_RESTART, App
@@ -27,6 +27,10 @@ def single_app(rom_root: Path) -> tuple[App, FakePlatform]:
     platform = FakePlatform(rom_root)
     config = Config()
     config.screen_mode = "single"
+    # The carousel keeps the folded panel underneath the content; list and grid
+    # move it beside the rows (DESIGN §11.3).  These tests are about the folded
+    # strip, so they pin the arrangement that has one.
+    config.layout = "carousel"
     script = rom_root / "RA_launch.sh"
     script.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     config.launcher.ra_script = str(script)
@@ -56,7 +60,7 @@ class TestSingleScreen:
         app, platform = pair
         app.run(max_frames=2)
         assert app._video.enabled is True
-        box = app._strip_art_box(metrics_for(640, 480))
+        box = app._strip_art_box(metrics_for(640, 480, Form.COMPACT))
         assert (app._video._settings.width, app._video._settings.height) == (box[2], box[3])
 
     def test_all_three_views_render(self, pair) -> None:
@@ -102,7 +106,7 @@ class TestSingleScreen:
         platform.send(InputEvent(InputAction.A))     # into a system
         app.run(max_frames=1)
 
-        metrics = metrics_for(640, 480)
+        metrics = metrics_for(640, 480, Form.COMPACT)
         top = metrics.content_top + metrics.content_h(single=True)
         strip = platform.canvases[0].pil_image.crop((0, top, 640, top + metrics.strip_h))
         assert len(set(strip.getdata())) > 3, "the detail strip is blank"
@@ -119,7 +123,7 @@ class TestSingleScreen:
         platform.send(InputEvent(InputAction.A))     # into a system
         app.run(max_frames=1)
 
-        metrics = metrics_for(640, 480)
+        metrics = metrics_for(640, 480, Form.COMPACT)
         top = metrics.content_top + metrics.content_h(single=True)
         app.run(max_frames=4)                        # idle: nothing changes
         strip = platform.canvases[0].pil_image.crop((0, top, 640, top + metrics.strip_h))
@@ -137,7 +141,7 @@ class TestSingleScreen:
         platform.send(InputEvent(InputAction.A))     # into a system
         app.run(max_frames=1)
 
-        metrics = metrics_for(640, 480)
+        metrics = metrics_for(640, 480, Form.COMPACT)
         top = metrics.content_top + metrics.content_h(single=True)
         box = (0, top, 640, top + metrics.strip_h)
         # Blank the canvas: only a cache restore may bring the strip back.
@@ -160,7 +164,7 @@ class TestSingleScreen:
         platform.send(InputEvent(InputAction.A))     # into a system
         app.run(max_frames=1)
 
-        metrics = metrics_for(640, 480)
+        metrics = metrics_for(640, 480, Form.COMPACT)
         top = metrics.content_top + metrics.content_h(single=True)
         box = (0, top, 640, top + metrics.strip_h)
 

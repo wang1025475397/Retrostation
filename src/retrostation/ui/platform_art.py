@@ -146,21 +146,36 @@ class PlatformArt:
     # Bitmaps
     # ------------------------------------------------------------------ #
 
-    def background(self, key: str, width: int, height: int) -> object | None:
-        """Square art scaled into the card's art box, or ``None``."""
-        return self._get("background", key, width, height)
+    def background(self, key: str, width: int, height: int, *,
+                   decode: bool = True) -> object | None:
+        """Square art scaled into the card's art box, or ``None``.
 
-    def logo(self, key: str, width: int, height: int) -> object | None:
-        """The platform logo, alpha preserved, or ``None``."""
-        return self._get("logo", key, width, height)
+        ``decode=False`` serves the cache only.  The frame loop uses it while
+        the player is moving, where a 256 px JPEG decode is exactly the hitch
+        felt on arriving at a card that has not been on screen yet; the caller
+        repaints once the cursor stops and decodes it then.
+        """
+        return self._get("background", key, width, height, decode=decode)
 
-    def _get(self, kind: str, key: str, width: int, height: int) -> object | None:
+    def logo(self, key: str, width: int, height: int, *,
+             decode: bool = True) -> object | None:
+        """The platform logo, alpha preserved, or ``None`` (see :meth:`background`)."""
+        return self._get("logo", key, width, height, decode=decode)
+
+    def _get(self, kind: str, key: str, width: int, height: int, *,
+             decode: bool = True) -> object | None:
         if width <= 0 or height <= 0:
             return None
         cache_key = (kind, key.casefold(), width, height)
         cached = self._cache.get(cache_key)
         if cached is not None:
             return cached
+        if not decode:
+            # Cache-only: the frame loop is mid-move, and a 256px JPEG decode
+            # here is the ~10 ms hitch the player feels on arriving at a card
+            # that has not been on screen yet.  The settle repaint comes back
+            # for it once the cursor stops.
+            return None
 
         if not self.candidates(kind, key):
             return None

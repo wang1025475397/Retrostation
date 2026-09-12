@@ -80,22 +80,210 @@ def button_bar(painter: Painter, hints: list[tuple[str, str]]) -> None:
     center = top + m.bar_h // 2
     radius = m.u(9)
     x = m.u(10)
+    hits: list[tuple[tuple[int, int, int, int], str]] = []
     for key_label, action_label in hints:
+        left = x
         painter.ellipse((x, center - radius, radius * 2, radius * 2), fill=COLORS.accent_d1)
         painter.text((x + radius, center), key_label, size=10, fill=(26, 18, 6, 255), anchor="mm")
         x += radius * 2 + m.u(5)
         painter.text((x, center), action_label, size=12, fill=COLORS.text_dim, anchor="lm")
         x += painter.text_width(action_label, size=12) + m.u(12)
+        hits.append(((left, top, x - left, m.bar_h), key_label))
+    # The bar is tappable: a phone has no physical buttons, so each span presses
+    # the button it advertises (DESIGN.ANDROID §10.4).  The app hit-tests these;
+    # it clears the list each frame before anything draws.
+    if getattr(painter, "button_hits", None) is None:
+        painter.button_hits = []
+    painter.button_hits.extend(hits)
 
 
-def scrollbar(painter: Painter, *, index: int, total: int, visible: int, content_h: int) -> None:
+#: Arrow glyphs for the virtual d-pad arms.
+_PAD_GLYPHS = {"UP": "\u25b2", "DOWN": "\u25bc", "LEFT": "\u25c0", "RIGHT": "\u25b6"}
+
+
+def _scaled(alpha: int, opacity: int) -> int:
+    """``alpha`` at ``opacity`` percent (0-100), clamped to a byte."""
+    return max(0, min(255, round(alpha * max(0, min(100, opacity)) / 100)))
+
+
+def _fit_text(painter: Painter, text: str, *, max_width: int, size: int) -> int:
+    """Largest size <= ``size`` at which ``text`` still fits ``max_width``.
+
+    The pad's labels go into fixed pills; on a wide canvas the size derived from
+    the pill's height runs past the pill's width, so "SELECT" spilled over both
+    edges.  Measure and step down instead.
+    """
+    while size > 8 and painter.text_width(text, size=size) > max_width:
+        size -= 1
+    return size
+
+
+def dpad(painter: Painter, box: tuple[int, int, int, int], *,
+         opacity: int = 100) -> None:
+    """A translucent d-pad whose arms join ``painter.button_hits``.
+
+    Directions only -- confirm / back / view live on the button bar and on the
+    face buttons (see :func:`game_pad`).  Call it *after* :func:`button_bar`:
+    that one resets the hit list each frame, this one appends to it.
+    """
+    x, y, w, h = box
+    side = min(w, h)
+    cx, cy = x + w // 2, y + h // 2
+    half = side // 2
+    painter.ellipse((cx - half, cy - half, side, side),
+                    fill=(255, 255, 255, _scaled(90, opacity)))
+
+    arm = int(side * 0.35)
+    btn = int(side * 0.30)          # arm + btn/2 = 0.50: flush with the disc
+    radius = max(2, int(side * 0.11))
+    hits: list[tuple[tuple[int, int, int, int], str]] = []
+    for dx, dy, label in ((-1, 0, "LEFT"), (1, 0, "RIGHT"), (0, -1, "UP"), (0, 1, "DOWN")):
+        bx = cx + dx * arm - btn // 2
+        by = cy + dy * arm - btn // 2
+        area = (bx, by, btn, btn)
+        painter.rounded_rect(area, radius=radius,
+                             fill=(255, 255, 255, _scaled(150, opacity)))
+        painter.text((bx + btn // 2, by + btn // 2), _PAD_GLYPHS[label],
+                     size=max(9, side // 7), fill=(240, 240, 244), anchor="mm")
+        hits.append((area, label))
+    painter.button_hits.extend(hits)
+
+
+#: Face-button colours, Switch-ish so each letter reads at a glance.
+_FACE_COLOURS = {
+    "A": (86, 196, 120),
+    "B": (214, 92, 92),
+    "X": (92, 148, 220),
+    "Y": (214, 178, 84),
+}
+
+
+def game_pad(painter: Painter, box: tuple[int, int, int, int], *,
+             opacity: int = 100,
+             avoid: tuple[int, int, int, int] | None = None) -> None:
+    """The full on-screen pad: d-pad, A/B/X/Y and select/start (§10.4).
+
+    A phone has no keys at all, so every action the session understands has to
+    be reachable by touch -- the button bar only carries context actions.  All
+    arms, buttons and pills join ``painter.button_hits``, so the app's existing
+    tap-to-button path presses them with no extra wiring.
+    """
+    x, y, w, h = box
+    margin = painter.metrics.u(6)
+    side = min(h, w // 3)
+    cy = y + (h - side) // 2
+    left = x + margin
+    if avoid is not None:
+        ax, ay, aw, ah = avoid
+        # The clip is a native surface painted above this canvas, so it cannot
+        # be covered: the d-pad steps aside instead -- it is the cluster that
+        # shares a corner with the media box.  Clamped afterwards so a wide
+        # media box (the platform page's bottom strip) cannot shove it clean off
+        # the right edge, where it would simply vanish.
+        if ax < left + side and left < ax + aw and ay < cy + side and cy < ay + ah:
+            left = ax + aw + painter.metrics.u(8)
+    left = max(x + margin, min(left, x + w - side - margin))
+    dpad(painter, (left, cy, side, side), opacity=opacity)
+
+    r = max(9, int(side * 0.205))
+    # Clamp the spread to the box: the diamond reaches ``off + r`` out from the
+    # centre, and letting that exceed half the box height clipped the bottom
+    # button against the panel edge.
+    off = min(int(side * 0.355), max(4, h // 2 - r - 2))
+    # Right edge, not the centre of the right third: A ends at ``w - margin`` so
+    # the cluster lands under the thumb resting on the corner.
+    cx = x + w - margin - off - r
+    mid = y + h // 2
+    hits: list[tuple[tuple[int, int, int, int], str]] = []
+    # Diamond, Switch layout: A right, B down, X up, Y left.
+    for dx, dy, label in ((0, -off, "X"), (off, 0, "A"), (0, off, "B"), (-off, 0, "Y")):
+        bx, by = cx + dx - r, mid + dy - r
+        painter.ellipse((bx, by, r * 2, r * 2),
+                        fill=(*_FACE_COLOURS[label], _scaled(255, opacity)))
+        painter.text((bx + r, by + r), label,
+                     size=_fit_text(painter, label, max_width=int(r * 1.15),
+                                    size=max(10, int(r * 0.85))),
+                     fill=(24, 24, 28), anchor="mm")
+        hits.append(((bx, by, r * 2, r * 2), label))
+
+    # SELECT / START: side by side along the bottom, centred between the sticks.
+    pill_h = max(16, int(side * 0.20))
+    pill_w = max(56, int(side * 0.52))
+    gap = max(8, side // 10)         # the two pills read as a pair, not a blob
+    px = x + (w - (pill_w * 2 + gap)) // 2
+    py = y + h - pill_h
+    for i, label in enumerate(("SELECT", "START")):
+        bx = px + i * (pill_w + gap)
+        painter.rounded_rect((bx, py, pill_w, pill_h), radius=pill_h // 2,
+                             fill=(236, 238, 244, _scaled(230, opacity)))
+        size = _fit_text(painter, label, max_width=pill_w - 2 * margin,
+                         size=max(9, int(pill_h * 0.62)))
+        painter.text((bx + pill_w // 2, py + pill_h // 2), label,
+                     size=size, fill=(22, 22, 26), anchor="mm")
+        hits.append(((bx, py, pill_w, pill_h), label))
+
+    painter.button_hits.extend(hits)
+
+
+def pad_box(m, *, single: bool, height: int | None = None) -> tuple[int, int, int, int]:
+    """Where the floating pad sits, per form (DESIGN.ANDROID §10.4).
+
+    The pad is an overlay, so its box comes from the surface it floats on, not
+    from whatever page is showing: both forms anchor it to the bottom with one
+    cluster in each lower corner.  ``height`` is that surface's height.
+    """
+    panel_h = m.height if height is None else height
+    h = m.u(112) if single else m.u(150)
+    if single:
+        # Landscape: on the strip's band, clear of the button bar.
+        y = m.height - m.bar_h - h - m.u(4)
+    else:
+        # Portrait: the same rule -- hard against the bottom of the surface the
+        # pad is painted on.  ``height`` is that surface's height; ``m.height``
+        # is the panel the layout was *planned* for and is taller than the
+        # canvas handed to the painter, so anchoring to it pushed the pad past
+        # the visible bottom and clipped it (which is why this used to sit at a
+        # made-up 65% instead of at the bottom).
+        y = panel_h - h - m.u(16)
+    # Full width, edge to edge: the d-pad hugs the left and A/B/X/Y the right,
+    # which is where the thumbs actually rest.  Insetting the box and then
+    # centring each cluster inside its third left both well inboard of the
+    # corners they are meant to reach.
+    return (0, y, m.width, h)
+
+
+def pad_bitmap(m, box, *, opacity: int, avoid=None, platform=None, translator=None):
+    """The pad composited into its own surface: ``(image, hits)``.
+
+    True alpha costs a layer per shape, and the pad is a dozen of them, so the
+    whole cluster is drawn once into a scratch surface and pasted as a single
+    picture.  Hit boxes come back in canvas coordinates, ready to append.
+    """
+    from ..platform.canvas import PilCanvas
+
+    x, y, w, h = box
+    # Transparent scratch: PilCanvas defaults to *opaque* black, and the pad is
+    # only translucent shapes -- pasting that black plate back would leave the
+    # whole cluster sitting on a solid black rectangle instead of the content.
+    surface = PilCanvas(max(1, w), max(1, h), (0, 0, 0, 0))
+    scratch = Painter(surface, m, platform, translator)
+    scratch.button_hits = []
+    local = None if avoid is None else (avoid[0] - x, avoid[1] - y, avoid[2], avoid[3])
+    game_pad(scratch, (0, 0, w, h), opacity=opacity, avoid=local)
+    hits = [((bx + x, by + y, bw, bh), label)
+            for (bx, by, bw, bh), label in scratch.button_hits]
+    return surface.snapshot(), hits
+
+
+def scrollbar(
+    painter: Painter, *, index: int, total: int, visible: int, content_h: int) -> None:
     """Thin indicator on the right edge; a no-op when everything fits."""
     m = painter.metrics
     if total <= visible:
         return
     thumb_h = max(m.u(24), content_h * visible / total)
     y = (content_h - thumb_h) * index / max(1, total - 1)
-    x = m.width - m.scrollbar_w - m.u(3)
+    x = m.content_w - m.scrollbar_w - m.u(3)
 
     painter.rect((x, m.u(4), m.scrollbar_w, content_h - m.u(8)), fill=(255, 255, 255, 15))
     painter.rect((x, m.u(4) + int(y), m.scrollbar_w, int(thumb_h)), fill=COLORS.accent)

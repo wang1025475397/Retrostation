@@ -24,11 +24,10 @@ import threading
 
 from .core.config import Config
 from .core.i18n import Translator
-from .core.theme import COLORS
+from .core.theme import COLORS, set_skin
 from .data.library import Library
 from .data.systems import USER_SYSTEMS_FILE, apply_user_systems, display_name
 from .platform.base import Platform
-from .platform.linux.platform import LinuxPlatform, resolve_config_dir
 from .ui.app import EXIT_OK, App
 
 log = logging.getLogger("retrostation")
@@ -51,6 +50,9 @@ def build_platform(args: argparse.Namespace, config: Config) -> Platform:
     keymap_name = os.environ.get("RETROSTATION_KEYMAP", "default")
     from retrostation.platform.linux.input import NAMED_KEYMAPS
     keymap = NAMED_KEYMAPS.get(keymap_name)
+    # Lazy: importing LinuxPlatform pulls in SDL/evdev, which do not exist on
+    # Android -- so this import must only happen on the Linux/desktop path.
+    from .platform.linux.platform import LinuxPlatform
     return LinuxPlatform(
         rom_root=explicit,
         headless=args.headless,
@@ -152,6 +154,40 @@ def _scan_in_background(app: App, library: Library) -> None:
         log.exception("thumbnail prune failed")
 
 
+def run_android(bridge) -> int:
+    """Android bootstrap (DESIGN.ANDROID §6.2).
+
+    ``bridge`` is the Kotlin ``HostBridge`` handed in by PyRuntime.  We wrap it in
+    the Python [AndroidBridge] and reuse the shared boot order: platform -> config
+    -> translator -> library -> UI.  The only platform-specific piece is the
+    platform object itself; everything downstream is identical to the Linux path.
+    """
+    # Lazy import: the android package pulls in Chaquopy-free pure Python, but
+    # keeping it out of the Linux/desktop import graph matches build_platform().
+    from .platform.android.bridge import AndroidBridge
+    from .platform.android.platform import AndroidPlatform
+
+    platform = AndroidPlatform(AndroidBridge(bridge))
+    config = Config.load(platform.config_dir / "config.json")
+    COLORS.apply(config.theme, config.theme_variant)
+    # Android paints with the modern-dark skin: deeper surfaces, gradient
+    # background, larger radii (DESIGN.ANDROID §11).  Applied after the theme
+    # load so the player's accent choice survives.
+    set_skin("android")
+    translator = Translator(config.language)
+    apply_user_systems(platform.config_dir / USER_SYSTEMS_FILE)
+    try:
+        return run_ui(platform, config, translator)
+    except Exception:  # noqa: BLE001 - the host asked us to stop
+        # A rotation rebuild closes the bridges, and the next drain/present
+        # throws to unwind this thread.  That is a normal hand-off to the new
+        # activity instance, so log it instead of letting Chaquopy turn it
+        # into a FATAL EXCEPTION.
+        log.exception("android frontend handed off to a new host instance")
+        return 0
+
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     logging.basicConfig(
@@ -162,6 +198,9 @@ def main(argv: list[str] | None = None) -> int:
     # Config before platform: it names the card in use, and the platform needs
     # that to resolve the ROM root.  The config directory does not depend on
     # which card is active, so resolving it on its own is safe.
+    # Lazy: resolve_config_dir lives in platform.linux, which must not be imported
+    # on Android (it pulls in SDL/evdev).  Only the Linux/desktop entry reaches here.
+    from .platform.linux.platform import resolve_config_dir
     config = Config.load(args.config or (resolve_config_dir(None) / "config.json"))
     # On the desktop we cannot probe the handheld's two displays, so pick a
     # layout explicitly: dual by default (see the linked bottom screen), single

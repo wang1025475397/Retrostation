@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import logging
 import math
-import subprocess
 import threading
 import time
 from pathlib import Path
@@ -24,12 +23,19 @@ from ..core.model import Game
 from ..core.state import read_state, update_state, update_state
 from typing import Callable
 
-from ..core.theme import COLORS, metrics_for
+from ..core.theme import COLORS, Form, is_android_skin, metrics_for
 from ..data.library import Library
 from ..data.systems import display_name, lookup, variant_suffix
 from ..data.video import VideoPlayer, VideoSettings
-from ..launcher.launch import LaunchError, LaunchPlan, build_plan
+from ..launcher.launch import (
+    LaunchError,
+    LaunchPlan,
+    android_missing_app,
+    build_android_plan,
+    build_plan,
+)
 from ..platform.base import InputAction, InputEvent, InputKind, Platform
+from ..platform.targets import UnsupportedTarget
 from .art import ArtProvider
 from .painter import Painter
 from .session import (
@@ -42,7 +48,8 @@ from .session import (
     VIEW_PLATFORMS,
 )
 from .screens import bottom, games, home, menu, search
-from .widgets import button_bar, dialog, status_bar, toast, version_tag
+from .widgets import (
+    button_bar, dialog, pad_bitmap, pad_box, status_bar, toast, version_tag)
 
 log = logging.getLogger(__name__)
 
@@ -87,9 +94,41 @@ _POLL_SLICE = 0.008
 #: it delays the game.  The spinner animates for this whole window.
 _LAUNCH_SPIN_SECONDS = 0.9
 _SPIN_FRAME = 0.05
+#: How long a finger must stay on a pad button before it starts repeating, and
+#: how often it repeats after that.  A flat panel has no key repeat of its own,
+#: so "hold the direction and keep scrolling" has to be built here; the first
+#: delay is what keeps a plain press from turning into two moves.
+_HOLD_FIRST = 0.40
+_HOLD_REPEAT = 0.08
+#: A frame slower than this means the core stalled (a cold cover/clip decode, a
+#: scan): the pending repeat is dropped rather than delivered late, or one press
+#: turns into a jump the moment the load finishes.
+_HOLD_STALL = 0.25
+
 #: Which blip each button makes.  Only the buttons that move or commit
 #: something answer: the volume rocker already changes something audible, and
 #: typing a query is confirmed by the results appearing.
+#: Button-bar labels -> the action each one stands for.  A tap on the bar
+#: presses that button, which is how a phone with no physical keys reaches
+#: Start / Back / Grid / Search / Menu (DESIGN.ANDROID §10.4).
+_BAR_LABEL_ACTIONS = {
+    "A": InputAction.A,
+    "B": InputAction.B,
+    "X": InputAction.X,
+    "Y": InputAction.Y,
+    "UP": InputAction.UP,
+    "DOWN": InputAction.DOWN,
+    "LEFT": InputAction.LEFT,
+    "RIGHT": InputAction.RIGHT,
+    "L1": InputAction.L1,
+    "R1": InputAction.R1,
+    "L2": InputAction.L2,
+    "R2": InputAction.R2,
+    "START": InputAction.START,
+    "SELECT": InputAction.SEARCH,
+    "MENU": InputAction.MENU,
+}
+
 _SFX_FOR_ACTION = {
     InputAction.UP: "move",
     InputAction.DOWN: "move",
@@ -129,6 +168,14 @@ _STRIP_DESC_CHARS = 60
 #: brief pause on a game pays off, long enough not to fire between two holds
 #: of the d-pad.
 _PREFETCH_IDLE = 0.35
+#: Yield between platforms in the home warm-up.  That pass runs while the player
+#: is looking at (and walking along) the platform row, so it has to hand the
+#: frame loop a slice between decodes rather than block on stillness.
+_HOME_WARM_PAUSE = 0.02
+#: How long the home page has to stand still before its shipped platform art is
+#: decoded again.  Moving is exactly when a JPEG decode shows, and the card is
+#: happy to show its placeholder for that long instead.
+_HOME_ART_SETTLE = 0.18
 #: Sources queued per frame.  Each is a full decode once the thread reaches
 #: it, so this only paces how much work is in flight.
 _PREFETCH_BATCH = 3
@@ -153,7 +200,7 @@ _MARQUEE_GAP = 48
 #: one the player actually reads, unlike the strip's glance-and-go blurb.
 _DESC_SCROLL_SPEED = 16
 #: Seconds a scrolling description rests at each end before turning back.
-_DESC_SCROLL_PAUSE = 1.5
+_DESC_SCROLL_PAUSE = 3
 
 
 def _prefetch_order(index: int, total: int):
@@ -195,11 +242,22 @@ class App:
         # these to offer a switch -- and only when there is more than one card.
         self.session.rom_roots = platform.available_rom_roots()
         self.session.current_rom_root = platform.rom_root
+        # Android asks the player for the ROM folder itself (SAF): emulators that
+        # take a content:// URI can only be handed a grant this app holds.  The
+        # session shows what was authorised and re-opens the picker on demand --
+        # on the handheld there is nothing to ask, so the row is left out.
+        if platform.name == "android":
+            self.session.rom_access_label = platform.rom_access_label
+            self.session.rom_access_request = platform.request_rom_access
         # Injected by tests and by the screenshot tool (which wants no ffmpeg).
         self._video = video or VideoPlayer(platform, VideoSettings.from_config(config))
         self._canvases: list = []
         self._painters: list[Painter] = []
         self._running = True
+        #: Composited pad picture and its cache key (see :meth:`_draw_pad`).
+        self._pad_key: tuple | None = None
+        self._pad_image = None
+        self._pad_hits: list = []
         #: Called once, just after the first frame is on screen.  Startup work
         #: that is not needed for that frame (re-listing the ROM tree) goes
         #: here: running it alongside the first paint doubled its cost.
@@ -253,6 +311,33 @@ class App:
         #: like the backdrop so fast scrolling does not decode a cover per move.
         self._strip_state_pending = False
         self._strip_state_at = 0.0
+        #: Last ``HH:MM`` stamped into the status bar.  A single-screen frame is
+        #: only re-shipped when something changed, and the clock is the one thing
+        #: that changes on its own, so it is what forces a minute tick.
+        self._last_clock = ""
+        #: Last thumbnail-cache epoch seen.  The frame loop draws only artwork
+        #: that is already cached, so a bump here means the warm thread finished
+        #: something and the panel has to be repainted to show it.
+        self._art_epoch = -1
+        #: The pad button a finger is holding down, when it repeats next, and how
+        #: long a following tap should be ignored (see :meth:`_touch_down`).
+        self._held_action: InputAction | None = None
+        self._hold_next = 0.0
+        self._hold_swallow_until = 0.0
+        #: Single screen only: whether the detail column is unfolded.  Retracted,
+        #: the rows take the whole screen and the clip is not decoded at all --
+        #: there would be nowhere to show it.  Starts folded: the list is what
+        #: the player is looking at, and the column is one tap away.
+        self._detail_open = False
+        #: Hit box of the fold/unfold tab, recorded whenever the panel is painted.
+        self._toggle_box: tuple[int, int, int, int] | None = None
+        #: When the home page's platform art may be decoded again; see
+        #: :meth:`_tick_settle`.  Zero means "not deferring anything".
+        self._home_settle_at = 0.0
+        #: Scroll offset the cached top panel was painted at, and -- while
+        #: :meth:`_pan_paint` runs -- the canvas slice it has to redraw.
+        self._top_scroll = 0
+        self._pan_band: tuple[int, int] | None = None
         #: Same as ``_strip_state_*`` but for the dual-screen bottom panel, which
         #: is only used when there are two painters (see :meth:`_bottom_due`).
         self._bottom_state_pending = False
@@ -291,14 +376,21 @@ class App:
         """Run until quit.  ``max_frames`` bounds it (tests, screenshots)."""
         canvases = self.platform.init_display(self.config.screen_mode)
         dual = len(canvases) > 1
-        metrics = metrics_for(*canvases[0].size)
+        # The form drives every layout number that differs between "there is a
+        # second screen for the detail view" and "it has to fold into this one"
+        # (core.theme.Form).  The bottom panel of a dual setup is itself DUAL:
+        # it *is* the detail view, so nothing folds there either.
+        form = Form.DUAL if dual else self.platform.screen_form()
+        metrics = metrics_for(*canvases[0].size, form)
         self.session.attach_metrics(metrics, single=not dual)
 
         self._canvases = canvases
         self._dual = dual
         self._painters = [
-            Painter(canvas, metrics_for(*canvas.size), self.platform, self.translator)
-            for canvas in canvases
+            Painter(canvas,
+                    metrics_for(*canvas.size, form if index == 0 else Form.DUAL),
+                    self.platform, self.translator)
+            for index, canvas in enumerate(canvases)
         ]
         self._painters[0].single = not dual
         # Backlight is saved per panel; only the platform knows how to set it.
@@ -326,7 +418,10 @@ class App:
                     # Hand-off splash: keep spinning it so the player sees motion.
                     # Resident devices hand off by hiding the windows (no exit), so
                     # the spin ends by running the game rather than stopping the loop.
-                    self._draw(now)
+                    try:
+                        self._draw(now)
+                    except Exception:  # noqa: BLE001
+                        log.exception("launch splash draw crashed; frame skipped")
                     if now - self._launch_at >= _LAUNCH_SPIN_SECONDS:
                         if self._launch_resident_mode:
                             self._launch_resident(self._launch_plan)
@@ -358,10 +453,16 @@ class App:
                     # loop just under 30 fps (29.2 measured).
                     time.sleep(min(0.002, _TARGET_FPS - (now - last_frame)))
                     continue
+                gap = now - last_frame
                 last_frame = now
-                self._tick_video()
-                self._draw(now)
-                self._tick_prefetch(now)
+                self._tick_hold(now, gap)
+                self._tick_settle(now)
+                try:
+                    self._tick_video()
+                    self._draw(now)
+                    self._tick_prefetch(now)
+                except Exception:  # noqa: BLE001 - a bad frame must not kill the loop
+                    log.exception("frame crashed; skipped")
                 frames += 1
                 if frames == 1:
                     self._fire_ready()
@@ -401,11 +502,48 @@ class App:
     # ------------------------------------------------------------------ #
 
     def _handle(self, event: InputEvent) -> None:
+        if self.session.view == VIEW_PLATFORMS:
+            # Any input on the home page defers its shipped platform art: the
+            # frames that follow a move then draw those cards from cache, and the
+            # decode waits for the pause (:meth:`_tick_settle` repaints with it).
+            self._home_settle_at = time.monotonic() + _HOME_ART_SETTLE
+        # The pad's own touch events are consumed here: neither is a command the
+        # session knows about, and both only exist so a held button can repeat.
+        if event.action is InputAction.TOUCH_DOWN:
+            self._touch_down(event)
+            return
+        if event.action is InputAction.TOUCH_UP:
+            self._held_action = None
+            # Let the session settle whatever a drag left half-way: the carousel
+            # rounds onto its card instead of resting between two.  The panel is
+            # then repainted from scratch -- settling moves the cursor and the
+            # offset without an Outcome, and a stale snapshot would leave the
+            # card it just left behind, overlapped with the new centre one.
+            self.session.end_drag()
+            self._top_dirty = True
+            return
+        # A tap on the button bar presses that button before anything else reads
+        # the coordinates (DESIGN.ANDROID §10.4).
+        if event.action is InputAction.TAP and event.x is not None:
+            if self._hit_toggle(event):
+                self._toggle_detail()
+                return
+            if self._hold_swallow_until and time.monotonic() <= self._hold_swallow_until:
+                # The press already happened on touch-down (see _touch_down);
+                # the lift arrives as a TAP and must not press twice.
+                self._hold_swallow_until = 0.0
+                return
+            if self._tap_button(event):
+                return
         self._blip(event)
         # Anything the player does outranks the warm-up: they are about to
         # move, and the thread shares this core with the frame loop.
         self._activity_at = time.monotonic()
-        outcome = self.session.handle(event)
+        try:
+            outcome = self.session.handle(event)
+        except Exception:  # noqa: BLE001 - one bad key must not kill the core thread
+            log.exception("input handler crashed on %r; event dropped", event)
+            return
         if outcome.quit:
             self._running = False
             return
@@ -439,6 +577,89 @@ class App:
         if kind is not None:
             self.platform.play_sfx(kind)
 
+    def _tap_button(self, event: InputEvent) -> bool:
+        """Press the bar button under a tap; ``False`` when the tap missed it."""
+        index = event.screen if 0 <= event.screen < len(self._painters) else 0
+        hits = getattr(self._painters[index], "button_hits", ())
+        for (x, y, w, h), label in hits:
+            if x <= event.x <= x + w and y <= event.y <= y + h:
+                action = _BAR_LABEL_ACTIONS.get(label)
+                if action is None:
+                    return False
+                # Re-enter as a normal press: every screen already handles it.
+                self._handle(InputEvent(action=action, kind=InputKind.PRESS,
+                                        screen=event.screen))
+                return True
+        return False
+
+    def _touch_down(self, event: InputEvent) -> None:
+        """A finger landed: a pad button under it presses and starts repeating.
+
+        A flat panel has no key repeat, and a press held past the tap window used
+        to emit nothing at all -- so holding a direction did nothing.  The button
+        is pressed once here and then repeated by :meth:`_tick_hold` for as long
+        as the finger stays down.  Anywhere else, this is ignored: the tap and
+        the gestures still arrive on their own.
+        """
+        action = self._pad_action_at(event)
+        self._held_action = action
+        if action is None:
+            return
+        self._hold_next = time.monotonic() + _HOLD_FIRST
+        self._hold_swallow_until = time.monotonic() + 0.75
+        self._handle(InputEvent(action=action, kind=InputKind.PRESS, screen=event.screen))
+
+    def _pad_action_at(self, event: InputEvent) -> InputAction | None:
+        """The action of the pad button under a touch, or ``None`` elsewhere."""
+        if event.x is None or event.y is None:
+            return None
+        index = event.screen if 0 <= event.screen < len(self._painters) else 0
+        hits = getattr(self._painters[index], "button_hits", ())
+        for (x, y, w, h), label in hits:
+            if x <= event.x <= x + w and y <= event.y <= y + h:
+                return _BAR_LABEL_ACTIONS.get(label)
+        return None
+
+    def _tick_hold(self, now: float, gap: float) -> None:
+        """Repeat the pad button a finger is holding down.
+
+        Sent as ``InputKind.REPEAT``: every screen treats a repeat as a press
+        (that is what a held key looks like) but the button click is skipped, so
+        auto-repeat does not turn into a machine-gun of blips.
+
+        ``gap`` is how long the frame that just finished actually took.  A slow
+        one means the core was busy (a cold cover or clip decode landing under
+        the cursor), and a repeat that comes due during it must be *dropped*, not
+        delivered afterwards: delivering it late walked the cursor past the item
+        the player had stopped on -- which is exactly what "select NDS, stutter,
+        end up one past NDS" was.
+        """
+        if self._held_action is None:
+            return
+        if now < self._hold_next:
+            return
+        self._hold_next = now + _HOLD_REPEAT
+        if gap > _HOLD_STALL:
+            return
+        self._handle(InputEvent(action=self._held_action, kind=InputKind.REPEAT))
+
+    def _tick_settle(self, now: float) -> None:
+        """Decode the shipped platform art again once the cursor stands still.
+
+        The frames that follow a move draw those cards from cache (a miss shows
+        the placeholder); the moment the player stops, the deferral is lifted and
+        the panel repaints once -- which is when a JPEG decode costs nothing
+        anyone can see.
+        """
+        if not self._home_settle_at:
+            return
+        if now < self._home_settle_at:
+            self.art.set_art_deferred(True)
+            return
+        self._home_settle_at = 0.0
+        self.art.set_art_deferred(False)
+        self._top_dirty = True
+
     def _apply_sfx(self) -> None:
         """Push the button-sound settings down to the platform."""
         self.platform.configure_sfx(
@@ -456,8 +677,14 @@ class App:
         Single screen included: there is no bottom panel, but the clip plays in
         the detail strip, so there is still something to decode.
         """
-        # The settings dialog can switch video off while we are running.
-        self._video.configure(enabled=self.config.bottom_video)
+        # The settings dialog can switch video off while we are running, and the
+        # fold tab can take the panel it plays in off the screen.
+        self._video.configure(enabled=self._video_enabled())
+        if not self._detail_visible():
+            # No panel to play in -- a single screen on the platform page.  An
+            # empty rect parks the host's surface; without it the clip kept
+            # hovering over the corner where the strip would have been.
+            self.platform.set_video_rect((0, 0, 0, 0), index=0)
         game = None
         if self.session.modal == MODAL_SEARCH:
             # 搜索（筛选）时停止解码：切换结果不需要视频，关闭后由 select 恢复播放。
@@ -469,6 +696,14 @@ class App:
             previews = self.session.preview_games()
             if previews:
                 game = previews[min(self.session.preview_index, len(previews) - 1)]
+        if not self._dual:
+            # Publish the strip's artwork box *before* selecting.  The Android
+            # clip is composited into that box by the host, and opening the pipe
+            # is a no-op while the box is unknown.  It used to be published only
+            # during a strip repaint -- and selection usually won that race, so
+            # the single-screen strip stayed silent on a clip it had loaded.
+            self.platform.set_video_rect(
+                self._strip_art_box(self._painters[0].metrics), index=0)
         self._video.select(game)
 
     def _fire_ready(self) -> None:
@@ -511,6 +746,14 @@ class App:
         if bk != self._top_backdrop:
             self._backdrop_pending = True
             self._backdrop_at = now
+        # The frame loop draws only artwork that is already cached (see
+        # ArtProvider.thumbnail), so when the warm thread lands a bitmap the
+        # panel has to be repainted or the empty plate would stay on screen
+        # until something else happened to move.
+        epoch = self.library.thumbnail_epoch
+        if epoch != self._art_epoch:
+            self._art_epoch = epoch
+            self._top_dirty = True
         due = key != self._top_key or self._top_dirty
         # Postpone a repaint that would land on top of a video frame: the frame
         # is published on the decoder's clock, so it waits for us.  ``overdue``
@@ -521,6 +764,13 @@ class App:
         # Moving the cursor inside a page repaints one row (~3 ms); holding
         # that back for a frame that is about to land made the list feel slow
         # whenever a clip was playing, which is most of the time.
+        # Settle the single screen's fold *before* anything reads the metrics: the
+        # view can change on this very frame (entering the games list), and doing
+        # it after the paint left one frame with the detail still under the
+        # content -- a visible flash of the wrong layout before it moved to the
+        # right column.  A no-op whenever the arrangement already matches.
+        if len(self._painters) < 2:
+            self._sync_side_detail()
         full = (self._top_cache is None or self._top_dirty
                 or self._struct_changed() or not self._same_page()
                 or (self._backdrop_pending
@@ -535,12 +785,17 @@ class App:
 
         painter = self._painters[0]
         top_painted = False
+        #: Whether the panel's pixels actually changed.  ``top_painted`` only
+        #: says the stage ran (a cache reuse counts), which is not the same thing
+        #: and cannot drive the "nothing moved, do not re-ship the frame" test.
+        top_repainted = False
         if not blocked:
             if due or self._top_cache is None:
                 if full:
                     self._paint_full(painter)
                 else:
                     self._paint_incremental(painter)
+                top_repainted = True
             else:
                 self._reuse(painter)
             top_painted = True
@@ -572,27 +827,49 @@ class App:
             # A scrolling description is animation: the strip has to be
             # repainted every frame while one is running, or the blurb would
             # sit frozen at whatever offset the last repaint happened to use.
-            strip_due = video_due or state_ready or self._marquee_active
-            if top_painted and not strip_due:
+            # A vertical scroll in the detail column is animation, exactly like
+            # the dual screen's blurb: the offset has to be advanced and the
+            # panel has to come back every frame, not only when its content
+            # changes (the dual path does both in ``_bottom_due``).
+            self._advance_desc_scroll(now)
+            strip_due = (video_due or state_ready or self._marquee_active
+                         or self._desc_scroll.active)
+            # The status bar carries a clock, so the frame has to be re-stamped
+            # when the minute turns even if nothing else moved.
+            stamp = time.strftime("%H:%M")
+            clock_due = stamp != self._last_clock
+            if top_repainted and not strip_due:
                 self._draw_overlays(painter)
                 status_bar(painter, dual=False)
                 self.platform.present(0)
-            else:
-                if not top_painted:
-                    # A guard rather than decoration: paste() treats a non-image
-                    # as a colour and demands a box, so a missing cache has to
+                self._last_clock = stamp
+            elif top_repainted or strip_due or clock_due:
+                if not top_repainted:
+                    # A guard rather than decoration: restoring a snapshot that
+                    # was never taken is meaningless, so a missing cache has to
                     # be caught here and not just in the scheduling above.
                     if self._top_cache is not None:
-                        painter.canvas.pil_image.paste(self._top_cache)
+                        painter.canvas.restore(self._top_cache)
                         self._draw_selection(painter, only=self._top_sel)
-                self._draw_detail_strip(painter)
-                self._cache_strip(painter)
+                    # Only the restore path paints the strip here: a full repaint
+                    # has already baked it into the cache (see _paint_full), and
+                    # drawing it a second time measured ~21 ms of a scroll frame.
+                    if not painter.metrics.detail_hidden:
+                        self._draw_detail_strip(painter)
+                        self._cache_strip(painter)
                 self._draw_overlays(painter)
                 status_bar(painter, dual=False)
                 self.platform.present(0)
+                self._last_clock = stamp
                 if state_ready:
                     # The debounced static content is now current.
                     self._strip_state_pending = False
+            # else: nothing changed this frame.  The canvas still holds exactly
+            # this frame's pixels, so re-stamping it, redrawing the strip and
+            # shipping another 8.8 MB again would cost ~20 ms for nothing --
+            # measured on the device as tobytes 9 ms + bridge 7 ms + overlays,
+            # on essentially every idle frame.  The clock above is the only
+            # thing that would have gone stale.
             self._bottom_at = now
             self._bottom_key = key
             self._bottom_seq = self._video.frame_seq
@@ -624,7 +901,11 @@ class App:
         angle = (time.monotonic() * 7.0) % (2 * math.pi)
         for i, painter in enumerate(self._painters):
             w, h = painter.canvas.size
-            painter.clear((16, 16, 20))
+            if is_android_skin():
+                painter.vgradient((0, 0, w, h),
+                                  start=COLORS.bg_top, end=COLORS.bg_bottom)
+            else:
+                painter.clear((16, 16, 20))
             size = 22
             tw = painter.text_width(title, size=size)
             painter.text(((w - tw) / 2, h * 0.40), title, size=size,
@@ -668,6 +949,20 @@ class App:
             self._prefetch_scope = scope
             self._prefetch_done.clear()
             self._cache_count = None
+        # Both halves wait for a pause.  The screens decode on demand when they
+        # need something now, so the warm-up is only ever *ahead* of the cursor:
+        # it shares this interpreter with the frame loop, and a decode held
+        # across a scroll starves it.  Starting after the pause also means the
+        # queue begins at the cursor instead of at wherever a scroll left it.
+        # The home page is the one that cannot wait for a pause: it is what is up
+        # at boot and the walk along the platform row starts immediately.  Gating
+        # it behind the games rule below meant the branch never ran (``active``
+        # demanded VIEW_GAMES, and a false ``active`` returns early), so every
+        # platform's art and preview covers were decoded under the cursor -- the
+        # stutter on arriving at one that has media.
+        if session.view == VIEW_PLATFORMS and not self._launching:
+            self._start_home_warm()
+
         active = (not self._launching
                   and session.view == VIEW_GAMES
                   and now - self._activity_at >= _PREFETCH_IDLE)
@@ -683,8 +978,6 @@ class App:
         if session.view == VIEW_GAMES:
             self._enqueue_prefetch()
             self._tick_cache_count(now)
-        elif session.view == VIEW_PLATFORMS:
-            self._start_home_warm()
 
     def _start_home_warm(self) -> None:
         """Warm the home page's two kinds of art, off the frame loop.
@@ -720,12 +1013,19 @@ class App:
             card_w = side + m.u(8)
             preview = [("cover", m.u(88), m.u(50), False)]
             for key in keys:
-                if not self._wait_for_idle():
+                # Paced, not parked: this pass runs on the page the player is
+                # on at boot and walks along next, so waiting for a pause before
+                # every platform (as the game-list pass does) meant arriving at
+                # a cold platform every time.  A short yield between platforms
+                # hands the frame loop its slices instead.
+                if not self._running:
                     return
-                self.art.platform_background(key, side, side)
-                self.art.platform_logo(key, card_w - m.u(10), logo_h)
+                time.sleep(_HOME_WARM_PAUSE)
+                self.art.platform_background(key, side, side, decode=True)
+                self.art.platform_logo(key, card_w - m.u(10), logo_h, decode=True)
                 # The selected card is wider, so its logo is a second size.
-                self.art.platform_logo(key, card_w + m.u(12) - m.u(10), logo_h)
+                self.art.platform_logo(key, card_w + m.u(12) - m.u(10), logo_h,
+                                       decode=True)
                 for game in self.session.preview_games_for(key):
                     self.art.prefetch(game, preview)
                 self._home_warm_done.add(key)
@@ -733,12 +1033,6 @@ class App:
             log.debug("home warm-up failed", exc_info=True)
         finally:
             self._home_warm_running = False
-
-    def _wait_for_idle(self) -> bool:
-        """Sleep while the player is moving; ``False`` once the app is stopping."""
-        while self._running and time.monotonic() - self._activity_at < _PREFETCH_IDLE:
-            time.sleep(0.12)
-        return self._running
 
     def _warm_slots(self) -> list:
         """The whole set of sizes one game needs, whatever view is showing.
@@ -763,7 +1057,7 @@ class App:
         only while the number can still change (the warm-up is running, or it
         has not been taken yet).
         """
-        if self._cache_count_running or not self.config.thumbnail_cache:
+        if self._cache_count_running or not self.library.caches_thumbnails:
             return
         writes = self.library.thumbnail_writes
         if (self._cache_count is not None and not self._prefetch_active
@@ -807,6 +1101,10 @@ class App:
     def _enqueue_prefetch(self) -> None:
         """Hand the warm-up thread the games the cursor is most likely to
         reach next, nearest first."""
+        if not self.library.caches_thumbnails:
+            # Nothing is cached on this platform: the decoder lands on the
+            # requested size by itself (see Platform.caches_thumbnails).
+            return
         session = self.session
         games_list = session.games()
         if not games_list:
@@ -860,7 +1158,14 @@ class App:
         painted result can be cached and the cursor moved cheaply.  Overlays
         (menu, toast) are drawn by :meth:`_draw_overlays` on top.
         """
-        painter.clear()
+        painter.button_hits = []  # this frame's tap targets (§10.4)
+        if is_android_skin():
+            painter.vgradient(
+                (0, 0, painter.width, painter.height),
+                start=COLORS.bg_top, end=COLORS.bg_bottom,
+            )
+        else:
+            painter.clear()
         if self.session.view == VIEW_GAMES:
             self._last_first = self._draw_games(painter, highlight=highlight)
         else:
@@ -933,26 +1238,108 @@ class App:
         first = self._first_for(self._top_index())
         return first is not None and first == self._top_first
 
+    def _pan_paint(self, painter: Painter) -> bool:
+        """Repaint a panned grid by *shifting* the last panel, not redrawing it.
+
+        A drag moves the scroll a few pixels at a time, and every cell shifts by
+        exactly that much -- so the previous snapshot, blitted a little higher or
+        lower, is already the new picture minus the strip the content vacated.
+        Drawing just that strip is the difference between ~21 cells a frame
+        (~20 ms) and one or two (~2 ms), which is what makes the pan smooth.
+
+        Only for the grid, only with the right-hand column collapsed (it does not
+        scroll, so a shifted blit would smear it), and only when the scroll is
+        the *only* thing that changed.
+        """
+        session = self.session
+        m = painter.metrics
+        if (self._top_cache is None or session.view != VIEW_GAMES
+                or session.layout not in ("grid", "list") or not m.detail_hidden):
+            return False
+        canvas = (len(session.system_keys()),)  # cheap guard: same list
+        if not canvas:
+            return False
+        scroll = session.scroll_offset(len(session.games()))
+        delta = scroll - self._top_scroll
+        view = m.content_h(single=painter.single)
+        if delta == 0 or abs(delta) >= view:
+            return False
+        if self._top_struct[:-1] != self._struct_key()[:-1]:
+            # Something else moved too (a new game, a layout flip): only a pure
+            # scroll can be served by shifting pixels.
+            return False
+
+        if delta > 0:                      # scrolled down: the tail is new
+            band = (m.content_top + view - delta - m.grid_gap,
+                    m.content_top + view)
+        else:                              # scrolled up: the head is new
+            band = (m.content_top, m.content_top - delta + m.grid_gap)
+        painter.button_hits = []
+        # Shift *only the content area*: the snapshot's copy of it, moved by
+        # ``delta``.  The button bar and the on-screen pad sit below this strip and
+        # are never touched -- that is what keeps a half-drawn button from being
+        # dragged up the screen as a ghost (the pad is an overlay and is not in
+        # the snapshot at all, so blitting the whole canvas smeared it).
+        keep = view - abs(delta)
+        if delta > 0:                      # scrolled down: the tail is new
+            band = (m.content_top + keep, m.content_top + view)
+            painter.image_crop(self._top_cache,
+                               (0, m.content_top + delta, m.width, keep),
+                               (0, m.content_top, m.width, keep))
+        else:                              # scrolled up: the head is new
+            band = (m.content_top, m.content_top - delta)
+            painter.image_crop(self._top_cache,
+                               (0, m.content_top, m.width, keep),
+                               (0, m.content_top - delta, m.width, keep))
+        # Refill the exposed strip with the backdrop the panel is painted on (or
+        # the plain background when there is none) *before* its cells go on top,
+        # so the gaps between them match the rest of the panel exactly.
+        game = session.games()[session.game_index] if session.games() else None
+        painted = (game is not None
+                   and games.paint_backdrop_region(painter, self.art, game, band))
+        if not painted:
+            if is_android_skin():
+                painter.vgradient((0, band[0], m.width, band[1] - band[0]),
+                                  start=COLORS.bg_top, end=COLORS.bg_bottom)
+            else:
+                painter.rect((0, band[0], m.width, band[1] - band[0]),
+                             fill=COLORS.bg_top)
+        self._pan_band = (band[0] - m.grid_gap, band[1] + m.grid_gap)
+        try:
+            self._draw_games(painter, highlight=False)
+        finally:
+            self._pan_band = None
+        self._top_cache = painter.canvas.snapshot()
+        self._draw_selection(painter, only=self._top_index())
+        self._top_struct = self._struct_key()
+        self._top_sel = self._top_index()
+        self._top_first = self._last_first
+        self._top_scroll = scroll
+        return True
+
     def _paint_full(self, painter: Painter) -> None:
+        if self._pan_paint(painter):
+            return
         self._draw_top(painter, highlight=False)
         # One panel: bake the strip into the cache.  It lives on this canvas,
         # so a restore has to bring it back -- otherwise every frame would have
         # to repaint it, and a strip costs more than a whole frame budget.
         if painter.single:
             self._draw_detail_strip(painter)
-        self._top_cache = painter.canvas.pil_image.copy()
+        self._top_cache = painter.canvas.snapshot()
         self._draw_selection(painter, only=self._top_index())
         self._top_struct = self._struct_key()
         self._top_sel = self._top_index()
         self._top_first = self._last_first
+        self._top_scroll = self.session.scroll_offset(len(self.session.games()))
 
     def _paint_incremental(self, painter: Painter) -> None:
-        painter.canvas.pil_image.paste(self._top_cache)
+        painter.canvas.restore(self._top_cache)
         self._draw_selection(painter, only=self._top_index())
         self._top_sel = self._top_index()
 
     def _reuse(self, painter: Painter) -> None:
-        painter.canvas.pil_image.paste(self._top_cache)
+        painter.canvas.restore(self._top_cache)
         self._draw_selection(painter, only=self._top_sel)
 
     def _draw_selection(self, painter: Painter, *, only: int) -> None:
@@ -966,23 +1353,63 @@ class App:
         m = painter.metrics
         index = session.game_index
         if session.layout == "grid":
+            # No scrollbar: the cells themselves are the scroll position now, so
+            # a bar between two columns only read as a stray one.  The offset has
+            # to be the same one the cached panel was painted with, or the
+            # highlight lands on a different cell than the one selected.
             cols, rows = m.grid_cols, m.grid_rows(single=painter.single)
             games.draw_grid(painter, self.art, all_games, index,
-                            cols=cols, rows=rows, highlight=True, only=only)
-            games.draw_scrollbar(painter, index, len(all_games), cols * rows,
-                                 m.content_h(single=painter.single))
+                            cols=cols, rows=rows, highlight=True, only=only,
+                            scroll=session.scroll_offset(len(all_games)))
         elif session.layout == "carousel":
             games.draw_carousel(painter, self.art, all_games, index,
-                                highlight=True, only=only)
+                                highlight=True, only=only,
+                                scroll=session.scroll_offset(len(all_games)))
         else:
             rpp = m.rows_per_page(single=painter.single)
             games.draw_list(painter, self.art, all_games, index,
-                            rows_per_page=rpp, highlight=True, only=only)
-            games.draw_scrollbar(painter, index, len(all_games), rpp,
-                                 m.content_h(single=painter.single))
+                            rows_per_page=rpp, highlight=True, only=only,
+                            scroll=session.scroll_offset(len(all_games)))
+
+    def _draw_pad(self, painter: Painter, *, single: bool) -> None:
+        """Draw the on-screen pad, pasting a cached picture when nothing moved.
+
+        The pad is a dozen translucent shapes and each one needs its own layer
+        to blend, so it is composited into a scratch surface once and pasted as
+        a single image afterwards.  The cache key covers everything the picture
+        depends on: position, opacity and where the clip box forces the d-pad
+        to step aside.
+        """
+        m = painter.metrics
+        box = pad_box(m, single=single, height=painter.canvas.size[1])
+        # No dodging: the d-pad is anchored to the left corner.  On a single
+        # screen the only media box is the detail panel's artwork slot -- the
+        # right-hand column on the game page (nowhere near the left) or the
+        # bottom strip's cover on the platform page (drawn on this canvas, under
+        # this overlay).  Dodging it shoved the d-pad a quarter of the way
+        # across the panel on the platform page, which is exactly what it must
+        # not do.
+        opacity = self.config.virtual_pad_opacity
+        key = (box, opacity)
+        if key != self._pad_key:
+            self._pad_image, self._pad_hits = pad_bitmap(
+                m, box, opacity=opacity,
+                platform=self.platform, translator=self.translator)
+            self._pad_key = key
+        painter.image(self._pad_image, box)
+        painter.button_hits.extend(self._pad_hits)
+
+    def _pad_visible(self) -> bool:
+        """Android's on-screen pad: only there, and only while enabled."""
+        return is_android_skin() and self.session.config.virtual_pad
 
     def _draw_overlays(self, painter: Painter) -> None:
         session = self.session
+        # Drawn here rather than with the content: this runs on every frame that
+        # presents the panel -- including the ones that restore it from the cache
+        # -- so the fold tab is never painted over by the selection highlight and
+        # its hit box is always the one on screen.
+        self._draw_detail_toggle(painter)
         if session.modal == MODAL_MENU:
             menu.draw(painter, session)
         elif session.modal == MODAL_EXIT:
@@ -994,6 +1421,10 @@ class App:
         message = session.active_toast()
         if message:
             toast(painter, message)
+        if painter.single and self._pad_visible():
+            # The pad is an overlay, so it survives every view change instead of
+            # disappearing with the page that owned it (DESIGN.ANDROID §10.4).
+            self._draw_pad(painter, single=True)
 
     def _draw_home(self, painter: Painter) -> None:
         session = self.session
@@ -1064,36 +1495,152 @@ class App:
         right = self.translator('games.layout_' + session.layout)
 
         index = session.game_index
-        if 0 <= index < len(all_games):
+        if 0 <= index < len(all_games) and self._pan_band is None:
+            # Not while panning: it fills the whole canvas, which would erase the
+            # shifted pixels the pan just blitted.
             games.draw_backdrop(painter, self.art, all_games[index])
-        games.header(painter, title=title, subtitle=subtitle, right=right)
-
         m = painter.metrics
         index = session.game_index
         if session.layout == "grid":
             first = games.draw_grid(painter, self.art, all_games, index,
                                     cols=m.grid_cols, rows=m.grid_rows(single=painter.single),
-                                    highlight=highlight)
+                                    highlight=highlight,
+                                    scroll=session.scroll_offset(len(all_games)),
+                                    band=self._pan_band)
         elif session.layout == "carousel":
             first = games.draw_carousel(painter, self.art, all_games, index,
-                                        highlight=highlight)
+                                        highlight=highlight,
+                                        scroll=session.scroll_offset(len(all_games)))
         else:
             first = games.draw_list(painter, self.art, all_games, index,
                                     rows_per_page=m.rows_per_page(single=painter.single),
-                                    highlight=highlight)
+                                    highlight=highlight,
+                                    scroll=session.scroll_offset(len(all_games)),
+                                    band=self._pan_band)
+        # Header last, not first: a panned grid leaves half a cell above the
+        # content area, and this band is what hides it (the painter has no
+        # clipping rectangle for bitmaps, only for text).
+        games.header(painter, title=title, subtitle=subtitle, right=right)
         button_bar(painter, hints)
         return first
+
+    def _sync_side_detail(self) -> None:
+        """Single screen: the video + detail panel lives on the right.
+
+        A single-screen phone runs one canvas; on the game page the video +
+        detail column moves to the right so the rows keep the full height, while
+        the platform page keeps its preview strip along the bottom.  Only ever
+        called for a single canvas -- a dual setup keeps its detail on the second
+        screen.  A no-op while the arrangement already matches, which is every
+        frame but the ones that follow a view change.
+        """
+        side = self.session.view == VIEW_GAMES
+        hidden = side and not self._detail_open
+        first = self._painters[0].metrics
+        if first.side_detail == side and first.detail_hidden == hidden:
+            return
+        for painter in self._painters:
+            painter.metrics = painter.metrics.with_side_detail(side, hidden=hidden)
+        # The previous arrangement's pixels are still in the caches: drop them,
+        # or the side panel stays on screen as a ghost beside the rows after
+        # switching to the carousel.
+        self._top_cache = None
+        self._bottom_key = None
+        self._strip_state_pending = True
+        # The session hit-tests and paginates against the same numbers.
+        self.session.attach_metrics(self._painters[0].metrics, single=True)
+
+    def _detail_collapsible(self) -> bool:
+        """Whether the detail panel can fold at all -- single screen only."""
+        return len(self._canvases) < 2
+
+    def _detail_visible(self) -> bool:
+        """Whether the detail panel -- and the clip that plays in it -- is shown.
+
+        A dual-screen device has the panel as its second canvas, so it is always
+        there.  A single screen only has one on the game page: the platform page
+        has no column to fold the clip into, so its preview row shows cover art
+        instead of a clip hovering in the corner of the screen.
+        """
+        if len(self._canvases) >= 2:
+            return True
+        if self.session.view != VIEW_GAMES:
+            return False
+        return self._detail_open
+
+    def _video_enabled(self) -> bool:
+        """Whether the clip should be decoded at all."""
+        return self.config.bottom_video and self._detail_visible()
+
+    def _toggle_detail(self) -> None:
+        """Fold the single screen's detail column away, or bring it back."""
+        self._detail_open = not self._detail_open
+        log.debug("detail toggle -> open=%s", self._detail_open)
+        self._sync_side_detail()
+        # Stop (or restart) the clip in the same breath as the panel: waiting for
+        # the next frame would leave the decoder running for a panel that has
+        # just disappeared.
+        self._video.configure(enabled=self._video_enabled())
+
+    def _hit_toggle(self, event: InputEvent) -> bool:
+        """Whether a tap landed on the fold/unfold tab."""
+        box = self._toggle_box
+        if box is None or event.x is None or event.y is None:
+            return False
+        x, y, w, h = box
+        return x <= event.x <= x + w and y <= event.y <= y + h
+
+    def _draw_detail_toggle(self, painter: Painter) -> None:
+        """The fold tab, on the seam beside the single screen's detail column.
+
+        A dual-screen device has nothing to fold -- its detail *is* the second
+        panel -- so the tab is only painted on a single canvas.
+        """
+        if not self._detail_collapsible() or self.session.view != VIEW_GAMES:
+            # Foldable exists only where the column does: a dual screen's detail
+            # is its second panel, and the platform page has no column at all --
+            # a tab there just swallowed taps without doing anything.
+            self._toggle_box = None
+            return
+        m = painter.metrics
+        # A translucent half-pill hugging the seam: round-ended, tall and narrow,
+        # so it reads as a handle on the panel edge rather than a button dropped
+        # on the content.  The fill keeps an alpha well under 255 -- the row
+        # underneath has to show through, or it looks like a hole punched in it.
+        w, h = m.u(15), m.u(58)
+        x = max(0, m.content_w - w)
+        y = m.content_top + max(0, (m.content_h() - h) // 2)
+        box = (x, y, w, h)
+        painter.rounded_rect(box, radius=w // 2, fill=(18, 18, 22, 150),
+                             outline=(232, 163, 61, 130))
+        # Points the way the panel travels: expanded it slides away to the right,
+        # collapsed it comes back to the left.  (The first cut had these the other
+        # way round, which read as backwards.)
+        painter.text((x + w // 2, y + h // 2),
+                     ">" if not m.detail_hidden else "<",
+                     size=m.u(12), fill=(238, 238, 242, 230), anchor="mm")
+        # Generous hit box: the pill is deliberately slim, and a tap a few pixels
+        # off should still fold the panel rather than pick the row behind it.
+        pad = m.u(7)
+        self._toggle_box = (x - pad, y - pad, w + 2 * pad, h + 2 * pad)
 
     def _strip_art_box(self, m) -> tuple[int, int, int, int]:
         """The detail strip's artwork slot, in absolute pixels.
 
         Cover and clip share it, and the decoder is sized from it, so all three
-        have to agree on one number.
+        have to agree on one number.  The strip's own box comes from
+        ``Metrics.detail_box()``, so a form that arranges it differently moves
+        the artwork with it.
         """
-        return (m.u(8) + m.u(10),
-                m.content_top + m.content_h(single=True) + m.u(10),
-                m.u(_STRIP_ART_W),
-                m.strip_h - 2 * m.u(10))
+        strip_x, strip_y, strip_w, strip_h = m.detail_box()
+        inset = m.u(10)
+        if m.side_detail:
+            # A wide column rather than a tall strip: the artwork leads at its
+            # own aspect and the text runs underneath it (DESIGN §11.3).
+            art_w = strip_w - 2 * inset
+            return (strip_x + inset, strip_y + inset, art_w, round(art_w * 0.72))
+        return (strip_x + inset, strip_y + inset,
+                m.u(_STRIP_ART_W), strip_h - 2 * inset)
 
     def _strip_art_size(self, m) -> tuple[int, int]:
         """Decode size for the strip's slot (no per-frame resize)."""
@@ -1109,10 +1656,7 @@ class App:
         """
         m = painter.metrics
         session = self.session
-        x = m.u(8)
-        w = m.width - 2 * m.u(8)
-        y = m.content_top + m.content_h(single=True)
-        h = m.strip_h
+        x, y, w, h = m.detail_box()
 
         painter.rounded_rect((x, y, w, h), radius=m.u(8),
                              fill=COLORS.panel, outline=COLORS.border)
@@ -1148,6 +1692,11 @@ class App:
 
         game = session.current_game()
         meta = self._meta(game) if game is not None else None
+        if m.detail_hidden:
+            # Retracted: there is no panel to fill, and a zero-width artwork box
+            # makes PIL raise (``x1 must be greater than or equal to x0``).
+            # Guarded here rather than at the call sites so no path can miss it.
+            return
         if game is None or meta is None:
             return
 
@@ -1156,36 +1705,119 @@ class App:
         # plus a frame before there is anything to draw, though -- showing the
         # cover for that moment flashed one on every game that has a clip.
         art = self._strip_art_box(m)
+        self.platform.set_video_rect(art, index=0)
         frame = self._video.frame()
+        # External clip (Android ExoPlayer): the host fills this box, so leave
+        # it empty rather than painting a cover over the moving picture (§9.2).
+        external = frame is None and self._video.is_playing()
         painter.rounded_rect(art, radius=m.u(8), fill=(14, 14, 16, 255),
-                             outline=(232, 163, 61, 90) if frame is not None else COLORS.border)
+                             outline=(232, 163, 61, 90)
+                             if (frame is not None or external) else COLORS.border)
         if frame is not None:
             painter.image_fit(frame, art)
             bottom.progress_bar(painter, art[0], art[1] + art[3] - m.u(3),
                                 art[2], m.u(3), self._video.progress())
+        elif external:
+            pass  # the host is drawing the clip here
         elif not self._video.is_pending(game.key):
             games.cover_art(painter, self.art, game, art)
 
-        text_x = art[0] + art[2] + m.u(10)
-        text_w = max(m.u(20), x + w - m.u(10) - text_x - (m.u(18) if game.favorite else 0))
+        if m.side_detail:
+            # Under the artwork, wrapped into the column's own width: the column
+            # is tall and the old one-ellipsised-line-per-field left most of it
+            # empty (see :meth:`_draw_wrapped_meta`).
+            text_top = art[1] + art[3] + m.u(10)
+            text_w = max(m.u(20), art[2] - (m.u(18) if game.favorite else 0))
+            self._draw_wrapped_meta(painter, game, meta,
+                                    (art[0], text_top, text_w,
+                                     (y + h - m.u(12)) - text_top))
+            if game.favorite:
+                painter.text((x + w - m.u(12), text_top + m.u(4)), "★", size=13,
+                             fill=COLORS.accent, anchor="rm")
+            return
+
+        # Folded under the rows: one line per field beside the artwork, the blurb
+        # on the last one, scrolled sideways when it does not fit.
         lines = (
             (game.display_name, 14, COLORS.text),
             (f"{meta.system_label} · {meta.publisher}", 11, COLORS.text_dim),
             (f"{meta.genre} · {meta.players} · {meta.release}", 11, COLORS.text_dim),
         )
+        text_x = art[0] + art[2] + m.u(10)
+        text_w = max(m.u(20),
+                     x + w - m.u(10) - text_x - (m.u(18) if game.favorite else 0))
+        text_top = y + m.u(12)
         for index, (text, size, colour) in enumerate(lines):
             painter.text(
-                (text_x, y + m.u(24) + index * m.u(25)),
+                (text_x, text_top + m.u(12) + index * m.u(25)),
                 painter.ellipsize(text, size=size, max_width=text_w),
                 size=size, fill=colour, anchor="lm",
             )
         # The blurb gets the last line and scrolls when it does not fit, instead
         # of being cut off mid-sentence (see :meth:`_draw_marquee`).
         self._draw_marquee(painter, (meta.description or "")[:_MARQUEE_DESC_CHARS],
-                           text_x, y + m.u(24) + 3 * m.u(25), text_w)
+                           text_x, text_top + m.u(12) + 3 * m.u(25), text_w)
         if game.favorite:
-            painter.text((x + w - m.u(12), y + m.u(24)), "★", size=13,
+            painter.text((x + w - m.u(12), text_top + m.u(12)), "★", size=13,
                          fill=COLORS.accent, anchor="rm")
+
+    def _draw_wrapped_meta(self, painter: Painter, game, meta,
+                           box: tuple[int, int, int, int]) -> None:
+        """The column's text, wrapped to the panel, scrolling when it overflows.
+
+        The folded strip gives each field one ellipsised line, which is all its
+        118 px allow.  The right-hand column has the height to wrap them, and a
+        blurb long enough to run past the panel scrolls through it -- the same
+        clipped window the dual-screen panel uses for its description (see
+        ``screens/bottom.py``).
+        """
+        x, top, width, height = box
+        m = painter.metrics
+        if width <= 0 or height <= 0:
+            return
+        cursor = top
+        for text, size, colour in (
+            (game.display_name, 14, COLORS.text),
+            (f"{meta.system_label} · {meta.publisher}", 11, COLORS.text_dim),
+            (f"{meta.genre} · {meta.players} · {meta.release}", 11, COLORS.text_dim),
+        ):
+            for line in painter.wrap_text(text, size=size, max_width=width,
+                                          max_lines=3):
+                if cursor + size > top + height:
+                    return
+                painter.text((x, cursor), line, size=size, fill=colour, anchor="la")
+                cursor += size + m.u(5)
+            cursor += m.u(4)
+        self._draw_desc_block(painter, meta.description or "",
+                              (x, cursor, width, (top + height) - cursor))
+
+    def _draw_desc_block(self, painter: Painter, text: str,
+                         box: tuple[int, int, int, int]) -> None:
+        """A wrapped blurb filling ``box``; scrolled by the app when it does not fit."""
+        x, top, width, height = box
+        m = painter.metrics
+        if width <= 0 or height <= 0 or not text.strip():
+            return
+        step = m.u(17)
+        lines = painter.wrap_text(text, size=11, max_width=width, max_lines=40)
+        visible = max(1, height // step)
+        scroll = self._desc_scroll
+        scroll.active = False
+        scroll.overflow = 0.0
+        if len(lines) <= visible:
+            for index, line in enumerate(lines):
+                painter.text((x, top + index * step), line, size=11,
+                             fill=COLORS.text_dim, anchor="la")
+            return
+        # Taller than the panel: scroll it through, clipped so a line on its way
+        # out does not paint over the rows next door.
+        scroll.overflow = max(0.0, len(lines) * step - height)
+        scroll.active = True
+        offset = max(0.0, min(scroll.overflow, scroll.offset))
+        window = (x, top, width, height)
+        for index, line in enumerate(lines):
+            painter.text((x, top + index * step - offset), line, size=11,
+                         fill=COLORS.text_dim, anchor="la", clip=window)
 
     def _draw_marquee(self, painter: Painter, text: str, x: int, y: int,
                       max_width: int) -> None:
@@ -1247,11 +1879,11 @@ class App:
         if cache is None:
             return
         m = painter.metrics
-        top = m.content_top + m.content_h(single=True)
-        cache.paste(
-            painter.canvas.pil_image.crop((0, top, m.width, top + m.strip_h)),
-            (0, top),
-        )
+        # Full width, not the strip's own box: the rounded panel is inset, and
+        # re-capturing only the inset area would leave the background either
+        # side of it stale.
+        _x, top, _w, height = m.detail_box()
+        painter.canvas.update_snapshot(cache, (0, top, m.width, height))
 
     def _draw_bottom(self, painter: Painter) -> None:
         session = self.session
@@ -1275,12 +1907,17 @@ class App:
         meta = self._meta(game) if game is not None else None
         # 搜索切换选中不驱动视频（上一个游戏的片段会与结果错位），详情走封面兜底。
         frame = None if searching else (self._video.frame() if game is not None else None)
+        # External clip (Android ExoPlayer): the host fills the media box, so we
+        # must not paint a cover over it (§9.2).
+        video_external = (not searching and game is not None
+                          and frame is None and self._video.is_playing())
         # 平台总览的工具栏标题带上该平台的游戏数量；聚合视图没有单一数量。
         game_count = (
             self.library.rom_count(key)
             if game is None and key not in ("ALL", "FAV", "RECENT") else None
         )
 
+        painter.button_hits = []  # this frame's tap targets (§10.4)
         bottom.draw(
             painter,
             self.art,
@@ -1289,22 +1926,32 @@ class App:
             key_label=display_name(key, self.translator.language),
             hints=self._platform_hints() if previewing else self._bottom_hints(),
             video_frame=frame,
+            video_external=video_external,
             video_progress=self._video.progress() if frame is not None else None,
             clip_pending=(game is not None and not searching and self._video.is_pending(game.key)),
             system_desc=self._system_desc(key),
             game_count=game_count,
             desc_scroll=self._desc_scroll,
         )
+        if self._pad_visible():
+            # Portrait: the pad is an overlay on the lower panel, drawn after
+            # the page so it stays put -- and stays live -- on every view
+            # (DESIGN.ANDROID §10.4).
+            self._draw_pad(painter, single=False)
 
     def _advance_desc_scroll(self, now: float) -> None:
-        """Scroll a description taller than its window, down and then back up.
+        """Scroll a description taller than its window, then start it over.
 
-        Ping-pong with a pause at each end rather than a loop: a blurb that
-        jumped from its last line straight back to its first is unreadable at
-        both ends, and the bottom screen is the panel the player reads.
+        One direction, then a beat on the last lines, then back to the first and
+        off again -- no bouncing.  A blurb is read top-down: the old ping-pong
+        stopped at the end, crawled back up through text the player had already
+        seen, paused at the top and only then set off, which reads as being stuck
+        rather than scrolling.
 
         How far there is to go comes from the panel itself (:class:`DescScroll`
         is filled in while drawing), so no layout knowledge is duplicated here.
+        ``direction`` doubles as the phase: ``1`` scrolling, ``0`` holding at the
+        end (the pause is over, so the next call rewinds).
         """
         state = self._desc_scroll
         if not state.active or state.overflow <= 0:
@@ -1318,15 +1965,16 @@ class App:
         if now < state.wait_until:
             return
         speed = self._painters[-1].metrics.u(_DESC_SCROLL_SPEED)
-        state.offset += step * state.direction * speed
-        if state.offset >= state.overflow:
-            state.offset = state.overflow
-            state.direction = -1
-            state.wait_until = now + _DESC_SCROLL_PAUSE
-        elif state.offset <= 0:
-            state.offset = 0.0
-            state.direction = 1
-            state.wait_until = now + _DESC_SCROLL_PAUSE
+        if state.direction > 0:
+            state.offset += step * speed
+            if state.offset >= state.overflow:
+                state.offset = state.overflow
+                state.direction = 0
+                state.wait_until = now + _DESC_SCROLL_PAUSE
+            return
+        # Held at the end: the beat is over, so rewind and set off again.
+        state.offset = 0.0
+        state.direction = 1
 
     # ------------------------------------------------------------------ #
     # View models
@@ -1455,10 +2103,31 @@ class App:
             return  # already handing off; ignore further input
         system_key = self.session.current_system_key()
         try:
-            plan = build_plan(game, self.config)
+            # Android starts another app (an activity); Linux writes a command
+            # line for its bootstrap to run (DESIGN.ANDROID §8.1).
+            plan = (build_android_plan(game, self.config)
+                    if self.platform.name == "android"
+                    else build_plan(game, self.config))
         except LaunchError as exc:
             log.error("launch failed: %s", exc)
-            self.session.notify(str(exc))
+            # The error names a Linux launcher script, which means nothing to a
+            # phone user: on Android this failure is "this system has no Android
+            # emulator at all", so say that instead of the script.
+            self.session.notify(
+                self.translator.t("launch.unsupported_system")
+                if is_android_skin() else str(exc)
+            )
+            return
+
+        # An emulator that takes the ROM as a ``content://`` URI can only be handed
+        # a grant this app holds itself, so the ROM folder has to be authorised once
+        # (SAF).  Ask for it *before* anything is torn down: the player presses A
+        # again straight after the picker and the game starts with the grant in
+        # place.
+        if (getattr(plan.target, "document_uri", False)
+                and not self.platform.rom_access_granted()):
+            self.platform.request_rom_access()
+            self.session.notify(self.translator.t("launch.grant_rom"))
             return
 
         # The emulator wants the sound card next: a blip player still holding
@@ -1511,7 +2180,7 @@ class App:
         self._launch_game_name = game.name
         self._launch_at = time.monotonic()
         self._launch_plan = plan
-        self.platform.launch_game(plan.argv)
+        self.platform.launch_game(plan.target)
 
     def _launch_resident(self, plan: LaunchPlan) -> None:
         """Run the game while this process stays alive (DESIGN §8.2 fast path).
@@ -1529,10 +2198,23 @@ class App:
         log.info("staying resident: hiding windows for %s", plan.core_label)
         self.platform.suspend_display()
         try:
-            result = subprocess.run(list(plan.argv))
-            log.info("game exited with %s", result.returncode)
+            # The platform owns the child process: on Android the same call
+            # starts an activity (or a hosted core) and waits for it, which is
+            # why this is not a subprocess call any more.
+            log.info("game exited with %s", self.platform.run_foreground(plan.target))
+        except UnsupportedTarget as exc:
+            # Nothing on the device could take the intent.  Name what is missing:
+            # the shared RetroArch path says RetroArch, a system with an emulator
+            # app of its own says that app -- sending a player to install
+            # RetroArch when the game needs DraStic points them the wrong way.
+            log.warning("launch unsupported on this platform: %s", exc)
+            missing = android_missing_app(plan)
+            self.session.notify(
+                self.translator.t("launch.need_app", app=missing)
+                if missing else self.translator.t("launch.unsupported")
+            )
         except OSError as exc:
-            log.error("could not start %s: %s", plan.argv, exc)
+            log.error("could not start %s: %s", plan.target, exc)
             self.session.notify(str(exc))
         finally:
             self.platform.resume_display()

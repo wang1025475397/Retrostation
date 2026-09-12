@@ -43,6 +43,7 @@ class FakeVideoPipe:
         self.size = size
         self.duration = 1.0
         self.closed = False
+        self.external = False
         self._left = 2
 
     def read_frame(self) -> object | None:
@@ -50,6 +51,9 @@ class FakeVideoPipe:
             return None
         self._left -= 1
         return object()
+
+    def set_volume(self, value: float) -> None:
+        self.volume = value
 
     def close(self) -> None:
         self.closed = True
