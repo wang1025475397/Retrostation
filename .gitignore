@@ -32,3 +32,4 @@ screenshots-preview/
 # the pip command in that script's docstring.
 vendor/
 generated-images/
+prototype/android/

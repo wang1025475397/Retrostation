@@ -224,6 +224,10 @@ class Metrics:
     #: height to themselves, while the carousel needs the width.  Off by default
     #: so every existing arrangement stays exactly as it was.
     side_detail: bool = False
+    #: Single screen only: the folded panel is fully retracted, so the content
+    #: gets the whole screen.  Distinct from ``side_detail == False``, which
+    #: leaves the panel *under* the content -- this is "there is no panel".
+    detail_hidden: bool = False
 
     # -- form ------------------------------------------------------------- #
 
@@ -232,15 +236,16 @@ class Metrics:
         """Whether the detail view shares this screen with the content."""
         return self.form is not Form.DUAL
 
-    def with_side_detail(self, enabled: bool) -> "Metrics":
+    def with_side_detail(self, enabled: bool, *, hidden: bool = False) -> "Metrics":
         """The same screen with the folded panel moved to the side (or back).
 
-        Returns ``self`` when nothing changes, so the caller can assign the
-        result unconditionally without rebuilding the layout every frame.
+        ``hidden`` retracts that panel completely, leaving the content the whole
+        screen.  Returns ``self`` when nothing changes, so the caller can assign
+        the result unconditionally without rebuilding the layout every frame.
         """
-        if enabled == self.side_detail:
+        if enabled == self.side_detail and hidden == self.detail_hidden:
             return self
-        return dataclasses.replace(self, side_detail=enabled)
+        return dataclasses.replace(self, side_detail=enabled, detail_hidden=hidden)
 
     # -- scaling ---------------------------------------------------------- #
 
@@ -295,6 +300,8 @@ class Metrics:
         lines, and still leaves the rows most of the width they were designed
         for (DESIGN §11.3).
         """
+        if self.detail_hidden:
+            return 0
         return max(self.u(220), round(self.width * 0.34))
 
     @property
@@ -335,6 +342,10 @@ class Metrics:
         """
         if self.form is Form.DUAL:
             return (0, 0, self.width, self.height)
+        if self.detail_hidden:
+            # Retracted: a zero-width box, so everything that paints into it
+            # draws nothing while content_w / content_h stay at full size.
+            return (self.width, self.content_top, 0, 0)
         if self.side_detail:
             # Flush against the right edge and the button bar: the column runs
             # the full height the rows do, which is the point of moving it.
@@ -389,13 +400,24 @@ class Metrics:
 
     @property
     def grid_cols(self) -> int:
-        """Column count adapts to width so tall phone screens look sane."""
+        """Column count adapts to width so tall phone screens look sane.
+
+        Five per 640 reference px (was four) with the ceiling raised, so a phone
+        in landscape fills its width with covers instead of leaving fat gaps.
+        """
         spare = self.content_w / (BASE_W * self.scale) if self.scale else 1.0
-        return _clamp(round(4 * spare), 3, 6)
+        return _clamp(round(5 * spare), 4, 8)
 
     def grid_rows(self, *, single: bool | None = None) -> int:
+        """Rows derived from the height, not fixed at 2/3.
+
+        A fixed count wasted a tall panel on over-sized cells (and squashed them
+        on a short one); fitting them to the area keeps a cell near its design
+        size whatever the screen -- and shows more of the collection at once.
+        """
         single = self.is_single if single is None else single
-        return 2 if single else 3
+        target = max(1, self.u(118))
+        return _clamp(self.content_h(single=single) // target, 2, 5)
 
     def grid_cell_h(self, *, single: bool | None = None) -> int:
         rows = self.grid_rows(single=single)

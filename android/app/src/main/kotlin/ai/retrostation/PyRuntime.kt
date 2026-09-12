@@ -312,6 +312,18 @@ class PyRuntime(private val context: Context) {
         }
 
         /**
+         * Activity flags a launch plan may ask for, by name.  Named on the Python
+         * side so a plan reads the same everywhere; translated here because the
+         * numbers only exist in Java.
+         */
+        private val FLAGS = mapOf(
+            "clear_task" to android.content.Intent.FLAG_ACTIVITY_CLEAR_TASK,
+            "clear_top" to android.content.Intent.FLAG_ACTIVITY_CLEAR_TOP,
+            "no_history" to android.content.Intent.FLAG_ACTIVITY_NO_HISTORY,
+            "new_task" to android.content.Intent.FLAG_ACTIVITY_NEW_TASK,
+        )
+
+        /**
          * Fire a launcher intent (DESIGN.ANDROID §8.1).  Returns false when no app
          * can handle it, so the caller can say "install RetroArch" instead of
          * dropping the player out of the frontend.
@@ -321,14 +333,51 @@ class PyRuntime(private val context: Context) {
             val target = android.content.Intent(
                 spec.optString("action", android.content.Intent.ACTION_MAIN)
             )
-            spec.optString("data_uri").takeIf { it.isNotEmpty() }?.let {
-                target.data = android.net.Uri.parse(it)
+            spec.optString("data_uri").takeIf { it.isNotEmpty() }?.let { raw ->
+              try {
+                val path = raw.removePrefix("file://").takeIf { raw.startsWith("file://") }
+                if (path != null && spec.optBoolean("document_uri")) {
+                    val uri = RomAccess.documentUri(context, path)
+                        ?: throw IllegalStateException("no authorised ROM folder covers $path")
+                    target.data = uri
+                    // The grant has to exist *before* startActivity: the flag
+                    // alone is applied asynchronously, so the emulator can read
+                    // the ROM before it arrives -- which is how "first launch
+                    // fails, the second one works" happens.  ClipData carries the
+                    // same URI, because some receivers only look there.
+                    try {
+                        context.grantUriPermission(
+                            spec.optString("package"), uri,
+                            android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                                android.content.Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+                    } catch (e: Exception) {
+                        android.util.Log.w("RSK", "grant failed for $uri (${e.message})")
+                    }
+                    target.addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    target.addFlags(android.content.Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+                    target.clipData = android.content.ClipData.newRawUri("ROM", uri)
+                } else {
+                    target.data = android.net.Uri.parse(raw)
+                    if (target.data?.scheme == "file") allowFileUriExposure()
+                }
+              } catch (e: Exception) {
+                // A launch must never be lost to a URI that cannot be built or
+                // granted here: fall back to the plain path the plan asked for.
+                android.util.Log.w("RSK", "document URI failed (${e.message}); using $raw")
+                target.data = android.net.Uri.parse(raw)
+                if (target.data?.scheme == "file") allowFileUriExposure()
+              }
             }
             val pkg = spec.optString("package")
             spec.optString("activity").takeIf { it.isNotEmpty() }?.let {
                 target.setClassName(pkg, it)
             } ?: pkg.takeIf { it.isNotEmpty() }?.let { target.setPackage(it) }
             spec.optString("mime").takeIf { it.isNotEmpty() }?.let { target.type = it }
+            spec.optJSONArray("flags")?.let { flags ->
+                for (i in 0 until flags.length()) {
+                    FLAGS[flags.getString(i)]?.let { target.addFlags(it) }
+                }
+            }
             spec.optJSONArray("extras")?.let { extras ->
                 for (i in 0 until extras.length()) {
                     val pair = extras.getJSONArray(i)
@@ -341,8 +390,48 @@ class PyRuntime(private val context: Context) {
             } catch (e: android.content.ActivityNotFoundException) {
                 android.util.Log.w("RSK", "no activity for $target")
                 false
+            } catch (e: SecurityException) {
+                // A content:// URI this app does not hold a grant for: the system
+                // refuses it at startActivity ("you could obtain access using
+                // ACTION_OPEN_DOCUMENT").  Report it as "nothing handled the
+                // launch" rather than letting it unwind the frontend.
+                android.util.Log.w("RSK", "not allowed to hand over $target (${e.message})")
+                false
             }
         }
+        /**
+         * Let a ROM leave this process as ``file://``.
+         *
+         * The platform's default VM policy refuses that -- ``Intent.prepareToLeave
+         * Process`` throws ``FileUriExposedException`` -- to stop apps leaking
+         * private files by accident.  Here the exposure is the point: the player
+         * installed the emulator and asked us to open the ROM in it, and emulators
+         * like DraStic read the path themselves (a ``content://`` URI just lands
+         * them on their own menu).  Relaxed for the launch and nothing else; the
+         * receiving app still has to hold storage permission to read the file.
+         */
+        private fun allowFileUriExposure() {
+            android.os.StrictMode.setVmPolicy(
+                android.os.StrictMode.VmPolicy.Builder().build())
+        }
+
+        /** The authorised folder in readable form, for the settings row. */
+        fun romAccessLabel(): String = RomAccess.label(context)
+
+        /** Whether the player has authorised a ROM folder (see [RomAccess]). */
+        fun romAccessGranted(): Boolean = RomAccess.granted(context)
+
+        /**
+         * Ask for one.  The picker runs in the activity and the grant it returns
+         * is stored by [MainActivity.onActivityResult]; the next launch picks it
+         * up, so this returns immediately.
+         */
+        fun requestRomAccess(): Boolean {
+            val activity = context as? MainActivity ?: return false
+            activity.runOnUiThread { activity.pickRomTree() }
+            return true
+        }
+
         fun onGameExited() = Unit
         fun shutdown() {
             frame.close()

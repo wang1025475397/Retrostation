@@ -373,6 +373,65 @@ class PilCanvas(Canvas):
             source = source.convert("RGBA")
         self._image.paste(source, (x, y), source)
 
+    def image_crop(self, bitmap: object, src: Sequence[float],
+                   dst: Sequence[float]) -> None:
+        """Paste a *sub-rectangle* of ``bitmap`` at ``dst``, unscaled.
+
+        :meth:`image` scales its whole source into the box, which is wrong for
+        moving part of a picture: a pan has to shift the pixels it already has
+        and leave everything else alone, so it needs the source region too.  The
+        source is clamped to the bitmap; anything in ``dst`` outside the canvas
+        is clipped, which is what scrolling off an edge should look like.
+        """
+        sx, sy, sw, sh = (round(v) for v in src)
+        dx, dy, dw, dh = (round(v) for v in dst)
+        if sw <= 0 or sh <= 0 or dw <= 0 or dh <= 0:
+            return
+        source: Image.Image = bitmap  # type: ignore[assignment]
+        left, top = max(0, sx), max(0, sy)
+        right = min(source.width, sx + sw)
+        bottom = min(source.height, sy + sh)
+        if right <= left or bottom <= top:
+            return
+        patch = source.crop((left, top, right, bottom))
+        if patch.size != (dw, dh):
+            try:
+                resample = Image.Resampling.LANCZOS
+            except AttributeError:
+                resample = Image.LANCZOS
+            patch = patch.resize((dw, dh), resample)
+        if patch.mode != "RGBA":
+            patch = patch.convert("RGBA")
+        self._image.paste(patch, (dx, dy), patch)
+
+    def image_rounded(self, bitmap: object, box: Sequence[float], *,
+                      radius: int) -> None:
+        """Paste ``bitmap`` into ``box``, clipped to a rounded rectangle.
+
+        :meth:`image` honours the bitmap's own alpha and nothing else, so a
+        square cover shows its four corners poking out of a rounded frame -- the
+        platform cards did exactly that.  Only for opaque art: the paste replaces
+        the destination rather than blending over it, which is what a cover wants
+        and what a translucent logo does not.
+        """
+        x, y, w, h = (round(v) for v in box)
+        if w <= 0 or h <= 0:
+            return
+        source: Image.Image = bitmap  # type: ignore[assignment]
+        if source.size != (w, h):
+            try:
+                resample = Image.Resampling.LANCZOS
+            except AttributeError:
+                resample = Image.LANCZOS
+            source = source.resize((w, h), resample)
+        mask = Image.new("L", (w, h), 0)
+        ImageDraw.Draw(mask).rounded_rectangle(
+            (0, 0, w - 1, h - 1),
+            radius=max(0, min(radius, min(w, h) // 2)),
+            fill=255,
+        )
+        self._image.paste(source, (x, y), mask)
+
     def image_fit(
         self,
         bitmap: object,

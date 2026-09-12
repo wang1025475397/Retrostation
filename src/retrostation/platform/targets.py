@@ -65,6 +65,17 @@ class IntentTarget:
     mime: str = ""
     #: Ordered so logs and tests read the same way every run.
     extras: tuple[tuple[str, str], ...] = ()
+    #: Activity flags the app asks for, by name (``clear_task``, ``clear_top``).
+    #: Named rather than numeric so a launch plan stays readable and stays out of
+    #: the platform's constant space; emulator apps that keep a session of their
+    #: own need a *clean* task, or they open on their own menu instead of the ROM
+    #: they were handed (§8.3).
+    flags: tuple[str, ...] = ()
+    #: Hand the ROM over as the *system storage provider's* ``content://`` URI --
+    #: the shape a file manager passes on "open with" -- instead of a raw path.
+    #: Some emulators (DraStic) accept only that: a ``file://`` path and another
+    #: app's FileProvider URI both make it answer on its own menu (§8.3).
+    document_uri: bool = False
     #: Tried in order when this one does not come up.  RetroArch has shipped
     #: builds that need the core's full path rather than its file name, so the
     #: same launch has to be expressible twice (DESIGN.ANDROID §8.3).

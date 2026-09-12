@@ -65,6 +65,16 @@ class MainActivity : Activity() {
         hadStorage = storageGranted()
         if (!hadStorage) root.post { askStorageAccess() }
 
+        // The ROM folder is a *second*, separate authorisation: an emulator that
+        // takes the ROM as a content:// URI can only be handed a grant this app
+        // holds itself, so the player picks the folder once (SAF).  Offered here
+        // at startup -- the settings row and the launch prompt lead back to it --
+        // and only once, so backing out does not nag on every boot.
+        if (!RomAccess.granted(this) && !RomAccess.askedBefore(this)) {
+            RomAccess.markAsked(this)
+            root.post { pickRomTree() }
+        }
+
         // Bootstrap Python *after* the first frame.  The Chaquopy runtime start
         // blocks the main thread for seconds, and an onCreate that heavy stalls
         // the launch transition: the window surface is never shown and the screen
@@ -279,13 +289,46 @@ class MainActivity : Activity() {
         }
     }
 
+    /**
+     * Ask the player for the ROM folder (SAF).
+     *
+     * Emulators that take a ROM as a ``content://`` URI can only be handed one
+     * the app itself holds, so the folder has to come from a real picker; the
+     * grant is persisted in [RomAccess] and used by every following launch.
+     */
+    fun pickRomTree() {
+        startActivityForResult(
+            android.content.Intent(android.content.Intent.ACTION_OPEN_DOCUMENT_TREE).apply {
+                addFlags(
+                    android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                        android.content.Intent.FLAG_GRANT_WRITE_URI_PERMISSION or
+                        android.content.Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION or
+                        android.content.Intent.FLAG_GRANT_PREFIX_URI_PERMISSION
+                )
+            },
+            REQUEST_ROM_TREE,
+        )
+    }
+
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: android.content.Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == REQUEST_ROM_TREE) {
+            // Null means the player backed out; keep whatever was authorised before.
+            RomAccess.remember(this, data?.data?.takeIf { resultCode == RESULT_OK })
+            // The core polls this at launch, so nothing else to signal: the next
+            // "A" starts the game with the grant in place.
+            return
+        }
         py.onGameExited() // a launched emulator or inline core returned
     }
 
     override fun onDestroy() {
         py.stop()
         super.onDestroy()
+    }
+
+    private companion object {
+        /** Request code for the ROM-folder picker; see [pickRomTree]. */
+        const val REQUEST_ROM_TREE = 0x5AF0
     }
 }

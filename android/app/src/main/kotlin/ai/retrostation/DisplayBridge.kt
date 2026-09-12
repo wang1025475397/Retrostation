@@ -57,18 +57,22 @@ class DisplayBridge(private val context: Context) {
             return sizes
         }
 
-        // Single physical panel: default to ONE full-screen canvas (single-screen
-        // mode) -- the detail folds into a right-hand column on the game page and
-        // a bottom strip on the platform page, which is what the phone is expected
-        // to look like.  ``dual`` still asks for the handheld-style split into two
-        // stacked canvases (content on top, detail/preview below), kept for anyone
-        // who prefers the emulated dual-screen model.
+        // Single physical panel: portrait keeps the handheld's two stacked
+        // canvases (content on top, detail/preview below); landscape is ONE
+        // full-screen canvas, where the game page moves the detail into a
+        // right-hand column instead.  The flip between one and two canvases is
+        // why MainActivity recreates the activity on a real orientation change --
+        // the running core commits to a canvas list at ``init_display``.
+        // "single" / "dual" override the orientation.
         val (pw, ph) = primary
-        if (mode == "dual") {
-            val topH = (ph * PORTRAIT_TOP_SHARE).toInt()
-            return listOf(logicalSize(pw to topH), logicalSize(pw to (ph - topH)))
+        val split = when (mode) {
+            "single" -> false
+            "dual" -> true
+            else -> ph > pw
         }
-        return listOf(logicalSize(pw to ph))
+        if (!split) return listOf(logicalSize(pw to ph))
+        val topH = (ph * PORTRAIT_TOP_SHARE).toInt()
+        return listOf(logicalSize(pw to topH), logicalSize(pw to (ph - topH)))
     }
 
     companion object {
@@ -78,12 +82,14 @@ class DisplayBridge(private val context: Context) {
         const val PORTRAIT_TOP_SHARE = 0.56
     }
 
-    /** Mirror of `display.logical_size` (DESIGN.ANDROID §4.1).  2.2 MP budget,
+    /** Mirror of `display.logical_size` (DESIGN.ANDROID §4.1).  1.5 MP budget,
      *  aligned to 4 px, clamped to [640, 2400].  Larger logical canvas shrinks the
-     *  GPU upscale and kills "毛边"; keep in sync with the Python side. */
+     *  GPU upscale and kills "毛边", but every frame copies the whole canvas out of
+     *  Python and into a bitmap, so this is the direct cost of a scroll frame --
+     *  keep in sync with `display._TARGET_MP`. */
     internal fun logicalSize(physical: Pair<Int, Int>): Pair<Int, Int> {
         val (pw, ph) = physical
-        val targetPx = 2.2 * 1_000_000.0
+        val targetPx = 1.5 * 1_000_000.0
         val ratio = pw.toDouble() / ph
         val lh = kotlin.math.sqrt(targetPx / ratio)
         val lw = lh * ratio

@@ -600,6 +600,28 @@ class Platform(abc.ABC):
 
     # -- launching -------------------------------------------------------- #
 
+    def rom_access_granted(self) -> bool:
+        """Whether a ROM can be handed to another app as a URI.
+
+        Always true off Android: a Linux command line carries the path itself and
+        needs no grant.  On Android some emulators only accept a ``content://``
+        URI that this app *holds*, and an app can only grant what it holds, so the
+        player authorises the ROM folder once (SAF).
+        """
+        return True
+
+    def rom_access_label(self) -> str:
+        """The authorised ROM folder, for display; empty when there is none.
+
+        Only Android has one to show: the handheld carries the path in its own
+        command line and never asks the player for a folder.
+        """
+        return ""
+
+    def request_rom_access(self) -> None:
+        """Ask the player to authorise the ROM folder (no-op off Android)."""
+        return None
+
     @abc.abstractmethod
     def launch_game(self, target: LaunchTarget) -> None:
         """Hand the device over to a game.

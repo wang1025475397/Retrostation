@@ -41,6 +41,9 @@ class ArtProvider:
         #: ``(game key, width, height)`` already found to carry no fanart or
         #: screenshot at all, so the panel stops asking to have it decoded.
         self._backdrop_missing: set[tuple] = set()
+        #: Serve the shipped platform art from cache only (the player is moving;
+        #: see :meth:`set_art_deferred`).
+        self._art_deferred = False
 
     # ------------------------------------------------------------------ #
 
@@ -166,10 +169,41 @@ class ArtProvider:
 
     # -- shipped platform artwork ---------------------------------------- #
 
-    def platform_background(self, key: str, width: int, height: int) -> object | None:
-        """Square art for a platform card, or ``None`` when we ship none."""
-        return self.platform_art.background(key, width, height)
+    def platform_background(self, key: str, width: int, height: int, *,
+                            decode: bool | None = None) -> object | None:
+        """Square art for a platform card, or ``None`` when we ship none.
 
-    def platform_logo(self, key: str, width: int, height: int) -> object | None:
-        """The platform's logo, alpha preserved, or ``None``."""
-        return self.platform_art.logo(key, width, height)
+        ``decode`` defaults to what :meth:`set_art_deferred` last said, so the
+        screens need no plumbing: while the player is moving the art comes from
+        cache only and a miss draws the card's placeholder instead of blocking
+        the frame loop on a JPEG.
+        """
+        if decode is None:
+            decode = not self._art_deferred
+        return self.platform_art.background(key, width, height, decode=decode)
+
+    def platform_logo(self, key: str, width: int, height: int, *,
+                      decode: bool | None = None) -> object | None:
+        """The platform's logo, alpha preserved, or ``None`` (see above).
+
+        Never deferred: a logo is a small PNG (a few milliseconds to decode and
+        scale), and the card's fallback is its *name* -- text flashing where the
+        logo belongs while the player walks along the row read as a glitch, and
+        it was worse than the decode it saved.  Only the background (a 256 px
+        JPEG, the expensive half) is held back while moving.
+        """
+        if decode is None:
+            decode = True
+        return self.platform_art.logo(key, width, height, decode=decode)
+
+    def set_art_deferred(self, deferred: bool) -> None:
+        """Hold the shipped platform art's decodes back (the player is moving).
+
+        These are the last thing the frame loop still decodes on demand: the
+        covers come from the warm-up, but this art ships with the app and has no
+        on-disk cache, so a card arriving on screen decoded its background and
+        two logos right there -- the ~20-40 ms hitch on reaching a platform that
+        had not been shown yet.  Deferred, the card shows its placeholder for a
+        moment and the art lands on the repaint after the cursor stops.
+        """
+        self._art_deferred = deferred

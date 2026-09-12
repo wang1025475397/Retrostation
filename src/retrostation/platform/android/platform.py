@@ -110,6 +110,18 @@ class AndroidPlatform(Platform):
 
     # -- launching -------------------------------------------------------- #
 
+    def rom_access_granted(self) -> bool:
+        """Whether the player has authorised a ROM folder (§8.3)."""
+        return self._bridge.rom_access_granted()
+
+    def rom_access_label(self) -> str:
+        """The folder the player authorised, for the settings row."""
+        return self._bridge.rom_access_label()
+
+    def request_rom_access(self) -> None:
+        """Ask for it: the folder picker runs in the host activity."""
+        self._bridge.request_rom_access()
+
     def launch_game(self, target: LaunchTarget) -> None:
         # Android never runs an argv; the Linux-only kind is refused loudly.
         if isinstance(target, ArgvTarget):

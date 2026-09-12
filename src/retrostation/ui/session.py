@@ -641,11 +641,14 @@ class Session:
         if self.layout == "grid":
             return view.grid_hit(m, count, self.game_index,
                                  self._grid_cols(), self._grid_rows(),
-                                 single=self._single, x=x, y=y)
+                                 single=self._single, x=x, y=y,
+                                 scroll=self.scroll_offset(count))
         if self.layout == "carousel":
             return view.carousel_hit(m, count, self.game_index,
-                                     single=self._single, x=x, y=y)
-        return view.list_hit(m, count, self.game_index, self._page_size(), x, y)
+                                     single=self._single, x=x, y=y,
+                                     scroll=self.scroll_offset(count))
+        return view.list_hit(m, count, self.game_index, self._page_size(), x, y,
+                             scroll=self.scroll_offset(count))
 
     def _tap_detail(self) -> Outcome:
         """Tap on the detail canvas (portrait's lower screen): start the game.
@@ -692,6 +695,16 @@ class Session:
         Sub-step movement is accumulated: a slow drag delivers a couple of
         logical pixels per frame, and discarding those would make it feel dead.
         """
+        if self._pans():
+            # The grid/list pan: the cells move under the finger and stop exactly
+            # where they are let go (no snapping) -- a tap is what selects.  The
+            # carousel pans sideways and follows with its cursor instead.
+            if self.layout == "carousel":
+                self.scroll_px -= dx
+                self._anchor_carousel()
+            else:
+                self.scroll_px = self._clamp_scroll(self.scroll_px - dy)
+            return Outcome(redraw=True)
         pitch = self._scroll_pitch()
         if pitch <= 0:
             return Outcome()
@@ -712,6 +725,15 @@ class Session:
         pitch = self._scroll_pitch()
         if pitch <= 0:
             return Outcome()
+        if self._pans():
+            # The flick's inertia pans the same way, then the carousel settles.
+            if self.layout == "carousel":
+                self.scroll_px -= dx
+                self._anchor_carousel()
+                self.scroll_px = 0.0
+            else:
+                self.scroll_px = self._clamp_scroll(self.scroll_px - dy)
+            return Outcome(redraw=True)
         travel = dx if self._scrolls_sideways() else dy
         steps = int(-travel / pitch)
         steps = max(-_FLING_MAX_ROWS, min(_FLING_MAX_ROWS, steps))
@@ -722,8 +744,8 @@ class Session:
     def _vertical_step(self) -> int:
         if self.layout == "grid":
             return self._grid_cols()
-        if self.layout == "carousel":
-            return CAROUSEL_PAGE
+        # The carousel steps one game, not a page: it is a row of neighbours, so
+        # a page-sized jump reads as "it skipped" rather than "I moved".
         return 1
 
     def _page_size(self) -> int:
@@ -733,6 +755,131 @@ class Session:
 
     def _grid_cols(self) -> int:
         return self._metrics.grid_cols if self._metrics else 4
+
+    # -- list / grid viewport (smooth scrolling) --------------------------- #
+
+    def _pans(self) -> bool:
+        """Whether a drag pans this view rather than stepping its cursor."""
+        return self.view == VIEW_GAMES and self.layout in ("grid", "list", "carousel")
+
+    def _carousel_pitch(self) -> float:
+        m = self._metrics
+        if m is None:
+            return 0.0
+        return float(m.carousel_card_w(single=self._single) + m.carousel_gap)
+
+    def _anchor_carousel(self) -> None:
+        """Follow the pan with the cursor, a card at a time.
+
+        The carousel has no free cursor: whatever sits in the middle *is* the
+        selection (that is what the strip means), so a drag moves the cursor with
+        it -- otherwise the strip would run out of drawn cards on the side the
+        finger is heading for.
+        """
+        pitch = self._carousel_pitch()
+        if pitch <= 0:
+            return
+        count = len(self.games())
+        while self.scroll_px >= pitch / 2 and self.game_index < count - 1:
+            self.scroll_px -= pitch
+            self.game_index += 1
+        while self.scroll_px <= -pitch / 2 and self.game_index > 0:
+            self.scroll_px += pitch
+            self.game_index -= 1
+
+    def end_drag(self) -> None:
+        """The finger lifted: the carousel settles onto its card.
+
+        The pan offset is only ever half a card at most (the anchor above keeps
+        it there), so snapping is a rounding, not a slide.
+        """
+        if self._metrics is not None and self.layout == "carousel" and self.view == VIEW_GAMES:
+            self._anchor_carousel()
+            self.scroll_px = 0.0
+
+    def _cols(self) -> int:
+        """Items per row: the grid's column count, one for a list."""
+        return max(1, self._grid_cols()) if self.layout == "grid" else 1
+
+    def _pad(self) -> float:
+        m = self._metrics
+        if m is None:
+            return 0.0
+        return float(m.grid_padding if self.layout == "grid" else m.u(8))
+
+    def _gap(self) -> float:
+        m = self._metrics
+        return float(m.grid_gap) if (m is not None and self.layout == "grid") else 0.0
+
+    def _pitch(self) -> float:
+        """Distance between two rows, in logical pixels."""
+        m = self._metrics
+        if m is None:
+            return 0.0
+        if self.layout == "grid":
+            return float(m.grid_cell_h(single=self._single) + m.grid_gap)
+        return float(m.row_step)
+
+    def _item_h(self) -> float:
+        """Height of one item's own box (less the gap after it)."""
+        m = self._metrics
+        if m is None:
+            return 0.0
+        if self.layout == "grid":
+            return float(m.grid_cell_h(single=self._single))
+        return float(m.row_h)
+
+    def _content_height(self, count: int) -> float:
+        """How tall the whole list is, in the drawing's own coordinates."""
+        if count <= 0 or self._pitch() <= 0:
+            return 0.0
+        cols = self._cols()
+        rows = (count + cols - 1) // cols
+        return self._pad() + rows * self._pitch() - self._gap()
+
+    def _viewport(self) -> float:
+        m = self._metrics
+        return float(m.content_h(single=self._single)) if m is not None else 0.0
+
+    def _clamp_scroll(self, value: float) -> float:
+        limit = max(0.0, self._content_height(len(self.games())) - self._viewport())
+        return max(0.0, min(value, limit))
+
+    def scroll_offset(self, count: int) -> int:
+        """The panned view's scroll position in whole pixels (0 elsewhere)."""
+        if not self._pans() or self._metrics is None:
+            return 0
+        if self.layout == "carousel":
+            # Sideways, and bounded by the cursor following it rather than by a
+            # vertical extent: clamping it with the height would pin it to zero.
+            return int(self.scroll_px)
+        self.scroll_px = max(0.0, min(self.scroll_px,
+                                      max(0.0, self._content_height(count) - self._viewport())))
+        return int(self.scroll_px)
+
+    def _scroll_cursor_into_view(self) -> None:
+        """Keep the cursor on screen after a key move -- the drag is free to
+        leave it anywhere, so the keyboard has to chase it."""
+        if self._metrics is None or not self._pans():
+            return
+        if self.layout == "carousel":
+            # The carousel draws the cursor's card centred, so there is nothing
+            # to chase: whatever offset is left is a drag's, and chasing it here
+            # computed an absolute position from the *index* (hundreds of cards
+            # of pixels), which threw the strip far off screen on every key press.
+            self.scroll_px = 0.0
+            return
+        pitch = self._pitch()
+        if pitch <= 0:
+            return
+        top = self._pad() + (self.game_index // self._cols()) * pitch
+        height = self._item_h()
+        view = self._viewport()
+        if top - self.scroll_px < 0:
+            self.scroll_px = top
+        elif top + height - self.scroll_px > view:
+            self.scroll_px = top + height - view
+        self.scroll_px = max(0.0, self.scroll_px)
 
     def _grid_rows(self) -> int:
         return self._metrics.grid_rows(single=self._single) if self._metrics else 3
@@ -750,6 +897,9 @@ class Session:
     #: Raised when the player picked the other card: the resume snapshot names
     #: a game on the card we are leaving, so the app has to drop it.
     card_changed: bool = False
+    #: Pixel offset of the grid's viewport: dragging pans the cells past a fixed
+    #: cursor instead of stepping the selection (see :meth:`_drag_scroll`).
+    scroll_px: float = 0.0
     #: One frame's worth of :meth:`games`; see that method.
     _visible: list[Game] | None = field(default=None, init=False, repr=False, compare=False)
     #: Game key to select as soon as :meth:`games` can be built.  A resume
@@ -767,10 +917,12 @@ class Session:
         if count == 0:
             return Outcome()
         self.game_index = max(0, min(count - 1, self.game_index + step))
+        self._scroll_cursor_into_view()
         return Outcome(redraw=True)
 
     def _back_to_platforms(self) -> Outcome:
         self.view = VIEW_PLATFORMS
+        self.scroll_px = 0.0
         return Outcome(redraw=True)
 
     def _toggle_favorite(self) -> Outcome:
@@ -901,6 +1053,15 @@ class Session:
             self.modal = MODAL_NONE
             self._menu_stash = None
             return self._clear_cache()
+        if key == "rom_dir":
+            # Close first: the picker opens a system window over the frontend.
+            self.modal = MODAL_NONE
+            self._menu_stash = None
+            request = getattr(self, "rom_access_request", None)
+            if request is not None:
+                request()
+                self.notify(self.translator("toast.rom_dir"))
+            return Outcome(redraw=True)
 
         stashed = self._menu_stash[0] if self._menu_stash is not None else None
         if stashed is not None:
@@ -1120,6 +1281,12 @@ class Session:
         # there is no alternative, and the row would just taunt the player.
         if len(self.rom_roots) > 1:
             rows.append(("card", self.translator("menu.card"), self._card_label()))
+        # Android-only, injected by the app: the folder the player authorised for
+        # emulators that take a ``content://`` URI.  Listed so it can be checked,
+        # and A re-opens the picker to point it somewhere else.
+        if getattr(self, "rom_access_label", None) is not None:
+            rows.append(("rom_dir", self.translator("menu.rom_dir"),
+                         self.rom_access_label() or "-"))
         rows += [
             ("layout", self.translator("menu.layout"), self.translator(f"games.layout_{self.layout}")),
             # Video plays in the detail strip on one screen too, so this row

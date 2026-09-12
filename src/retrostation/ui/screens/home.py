@@ -116,8 +116,14 @@ def _card_art(painter: Painter, art: ArtProvider, tile: Tile,
     logo_h = m.platform_logo_h
 
     # Square and centred horizontally: the selected card is wider than the
-    # others, and stretching the background to fill it would distort it.
-    art_box = (x + (w - art_side) // 2, y, art_side, art_side)
+    # others, and stretching the background to fill it would distort it.  Never
+    # wider than the card itself, or the narrower cards show the art spilling
+    # out of their frame.
+    art_side = max(0, min(art_side, w))
+    # Nudged down a hair: flush with the frame's top edge the artwork read as
+    # riding high (the frame's optical centre sits above the square's).  ~5 px on
+    # the panel, which is what ``u(4)`` comes to at this scale.
+    art_box = (x + (w - art_side) // 2, y + m.u(4), art_side, art_side)
     background = art.platform_background(tile.key, art_side, art_side)
     logo = art.platform_logo(tile.key, w - m.u(10), logo_h)
 
@@ -125,7 +131,8 @@ def _card_art(painter: Painter, art: ArtProvider, tile: Tile,
         # No cover: paint a neutral placeholder.  When the platform also ships
         # no logo there is nothing to identify it by, so write its name
         # straight onto the cover instead of leaving a blank invalid tile.
-        painter.image(art.placeholder(tile.key, art_side, art_side), art_box)
+        painter.image_rounded(art.placeholder(tile.key, art_side, art_side),
+                              art_box, radius=m.u(6))
         if logo is None:
             # Dim the gradient behind the name so it stays legible no matter
             # which hue the deterministic placeholder picked.
@@ -136,7 +143,7 @@ def _card_art(painter: Painter, art: ArtProvider, tile: Tile,
                 size=14, fill=COLORS.text, anchor="mm",
             )
     else:
-        painter.image(background, art_box)
+        painter.image_rounded(background, art_box, radius=m.u(6))
 
     # The cover is the base system's, so a variant directory would be pixel
     # identical to the platform it borrows from without this tag.
@@ -145,9 +152,14 @@ def _card_art(painter: Painter, art: ArtProvider, tile: Tile,
 
     # The logo band sits in whatever is left below the artwork, vertically
     # centred so the selected card's extra padding is shared above and below.
+    # Clamped to that room: a short card used to push the logo past its bottom
+    # edge, where it read as a logo floating outside the frame.
     below_top = y + art_side
-    below_h = max(logo_h, (y + h) - below_top)
-    band = (x, below_top + (below_h - logo_h) // 2, w, logo_h)
+    room = (y + h) - below_top
+    if room <= 0:
+        return
+    logo_h = min(logo_h, room)
+    band = (x, below_top + (room - logo_h) // 2, w, logo_h)
 
     if logo is not None:
         painter.image_fit(logo, band)

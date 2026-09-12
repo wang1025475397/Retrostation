@@ -237,10 +237,15 @@ class InputBridge(
     }
 
     private fun mapAction(keyCode: Int): String? {
-        // chaquopy's PyObject has no isNone(); str(None) == "None" is the reliable test.
-        // keymap_action_name hands back the action *value* ("b"), not the enum repr.
+        // chaquopy's PyObject has no isNone(), and a Python None comes back as a
+        // Java *null* PyObject -- so the null check MUST come first; str(None) ==
+        // "None" only holds once res is non-null.  Without it every unmapped key
+        // threw an NPE straight out of onKeyDown, which is instant death for the
+        // app (the whole alphabet, on a phone with a hardware keyboard).
+        // keymap_action_name hands back the action *value* ("b"), not the enum
+        // repr.
         val res = py.getModule("retrostation.platform.android.input")
-            .callAttr("keymap_action_name", keyCode)
+            .callAttr("keymap_action_name", keyCode) ?: return null
         val s = res.toString()
         return if (s == "None") null else s
     }

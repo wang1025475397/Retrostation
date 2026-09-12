@@ -26,6 +26,8 @@ def _intent_dict(target: IntentTarget) -> dict[str, Any]:
         "data_uri": target.data_uri,
         "mime": target.mime,
         "extras": list(target.extras),
+        "flags": list(target.flags),
+        "document_uri": target.document_uri,
         "fallbacks": [ _intent_dict(f) for f in target.fallbacks ],
     }
 
@@ -147,6 +149,18 @@ class AndroidBridge:
     def start_activity(self, target: IntentTarget) -> bool:
         """Fire the intent; ``False`` when nothing on the device handles it."""
         return bool(self._kt.startActivity(json.dumps(_intent_dict(target))))
+
+    def rom_access_granted(self) -> bool:
+        """Whether the player authorised a ROM folder (SAF); see ``RomAccess``."""
+        return bool(self._kt.romAccessGranted())
+
+    def rom_access_label(self) -> str:
+        """The authorised ROM folder in readable form ("" when none)."""
+        return str(self._kt.romAccessLabel())
+
+    def request_rom_access(self) -> None:
+        """Open the folder picker; the grant lands in ``RomAccess``."""
+        self._kt.requestRomAccess()
 
     def host_core(self, target: object) -> None:
         # Inline libretro host -- implemented at B0/B1.  Until then the platform

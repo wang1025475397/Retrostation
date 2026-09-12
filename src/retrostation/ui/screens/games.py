@@ -215,6 +215,42 @@ def draw_backdrop(painter: Painter, art: ArtProvider, game: Game) -> None:
     painter.image(flat, (0, 0, width, height))
 
 
+def paint_backdrop_region(painter: Painter, art: ArtProvider, game: Game,
+                          band: tuple[int, int]) -> bool:
+    """Refill one horizontal strip with the panel's backdrop; ``False`` if none.
+
+    A pan shifts pixels it already has, so the strip it exposed has to come back
+    as *the same* background.  Pasting the raw source would not do: what is on
+    screen is that bitmap dimmed and flattened over the page colour, so the strip
+    would sit a shade off and the seam would show (see ``App._pan_paint``).  Both
+    of those are cached, so this is a sub-rectangle paste.
+    """
+    y0, y1 = band
+    height = max(0, y1 - y0)
+    if height <= 0:
+        return True
+    width = painter.width
+    bitmap = art.backdrop(game, width, painter.height)
+    if bitmap is None:
+        return False
+    key = (game.key, width, painter.height)
+    faded = _BACKDROP_DIM.get(key)
+    if faded is None:
+        faded = painter.canvas.dim(bitmap, _BACKDROP_OPACITY)
+        if len(_BACKDROP_DIM) >= _BACKDROP_LIMIT:
+            _BACKDROP_DIM.clear()
+        _BACKDROP_DIM[key] = faded
+    flat_key = (key, COLORS.bg)
+    flat = _BACKDROP_FLAT.get(flat_key)
+    if flat is None:
+        flat = painter.canvas.flatten(faded, COLORS.bg)
+        if len(_BACKDROP_FLAT) >= _BACKDROP_LIMIT:
+            _BACKDROP_FLAT.clear()
+        _BACKDROP_FLAT[flat_key] = flat
+    painter.image_crop(flat, (0, y0, width, height), (0, y0, width, height))
+    return True
+
+
 def panel_fill(painter: Painter):
     """What a row or card fills itself with.
 
@@ -260,27 +296,38 @@ def draw_list(
     highlight: bool = True,
     only: int | None = None,
     sublabel_for: Callable[[Game], str] | None = None,
+    scroll: int = 0,
+    band: tuple[int, int] | None = None,
 ) -> int:
     """Returns the first visible row, which the app keeps across frames.
 
+    Rows sit at their *absolute* position less ``scroll`` (the viewport's pixel
+    offset), so a drag pans them smoothly instead of stepping the cursor and half
+    a row can stick out either end.  ``band`` limits the draw to a canvas slice
+    (a pan redraws only what it exposed -- see ``App._pan_paint``).
     ``highlight=False`` paints every row unselected (so the panel can be cached
     and the selection repainted on top later); ``only`` repaints just one row.
-    ``sublabel_for`` adds a second line under each name (used for the platform
-    a result belongs to on a global search); pass ``None`` for a single line.
+    ``sublabel_for`` adds a second line under each name (used for the platform a
+    result belongs to on a global search); pass ``None`` for a single line.
     """
     m = painter.metrics
     row_step = m.row_step
+    pad = m.u(8)
+    bottom = m.content_top + m.content_h(single=_single(painter))
+    first = max(0, int((scroll - pad) // row_step)) if row_step > 0 else 0
 
-    first = (index // rows_per_page) * rows_per_page
-    for row, position in enumerate(range(first, min(len(games), first + rows_per_page))):
-        if only is not None and position != only:
-            continue
-        game = games[position]
-        y = m.content_top + m.u(8) + row * row_step
-        selected = highlight and position == index
-        _row(painter, art, game, (m.u(8), y, m.content_w - m.u(24), m.row_h), selected=selected,
-             position=position, total=len(games),
-             sublabel=sublabel_for(game) if sublabel_for else None)
+    position = first
+    y = m.content_top + pad + first * row_step - scroll
+    while position < len(games) and y < bottom:
+        if only is None or position == only:
+            if band is None or (y <= band[1] and y + m.row_h >= band[0]):
+                game = games[position]
+                _row(painter, art, game, (m.u(8), y, m.content_w - m.u(24), m.row_h),
+                     selected=highlight and position == index, position=position,
+                     total=len(games),
+                     sublabel=sublabel_for(game) if sublabel_for else None)
+        position += 1
+        y += row_step
 
     return first
 
@@ -374,26 +421,45 @@ def draw_grid(
     rows: int,
     highlight: bool = True,
     only: int | None = None,
+    scroll: int = 0,
+    band: tuple[int, int] | None = None,
 ) -> int:
+    """Returns the first visible position.
+
+    Cells are placed at their *absolute* row, less ``scroll`` -- the viewport's
+    pixel offset -- so a drag pans them smoothly instead of stepping the cursor,
+    and the top or bottom of the panel can show half a cell.  ``rows`` only sizes
+    the cell now; how many rows are drawn follows from the offset, so the panel
+    stops being page-aligned.  ``only`` repaints a single cell (the cached-panel
+    path), and rows that fell above the content area are skipped here.
+    """
     m = painter.metrics
-    per_page = cols * rows
-    page = index // per_page
-    first = page * per_page
     cell_h = m.grid_cell_h(single=_single(painter))
     padding, gap = m.grid_padding, m.grid_gap
     cell_w = (m.content_w - 2 * padding - gap * (cols - 1)) // cols
+    pitch = cell_h + gap
+    top = m.content_top + padding - scroll
+    bottom = m.content_top + m.content_h(single=_single(painter))
+    first_row = max(0, int((scroll - padding) // pitch)) if pitch > 0 else 0
+    first = first_row * cols
 
-    for slot in range(per_page):
-        position = first + slot
-        if position >= len(games):
-            break
-        if only is not None and position != only:
-            continue
-        col, row = slot % cols, slot // cols
-        x = padding + col * (cell_w + gap)
-        y = m.content_top + padding + row * (cell_h + gap)
-        _card(painter, art, games[position], (x, y, cell_w, cell_h),
-              selected=highlight and position == index)
+    row = first_row
+    y = top + first_row * pitch
+    while row * cols < len(games) and y < bottom:
+        # ``band`` restricts the draw to a horizontal slice of the canvas: a pan
+        # shifts the previous picture and only this slice is new (see
+        # ``App._pan_paint``).  Rows outside it are skipped, not just clipped.
+        if band is None or (y <= band[1] and y + cell_h >= band[0]):
+            for col in range(cols):
+                position = row * cols + col
+                if position >= len(games):
+                    break
+                if only is None or position == only:
+                    x = padding + col * (cell_w + gap)
+                    _card(painter, art, games[position], (x, y, cell_w, cell_h),
+                          selected=highlight and position == index)
+        row += 1
+        y += pitch
 
     return first
 
@@ -463,6 +529,7 @@ def draw_carousel(
     *,
     highlight: bool = True,
     only: int | None = None,
+    scroll: int = 0,
 ) -> int:
     m = painter.metrics
     single = _single(painter)
@@ -490,7 +557,7 @@ def draw_carousel(
         opacity = _OPACITY[offset]
         side = 1 if position > index else (-1 if position < index else 0)
         cw, ch = widths[offset], heights[offset]
-        cx = from_center + side * offsets[offset]
+        cx = from_center + side * offsets[offset] - scroll
         box = (cx - cw // 2, top + (card_h - ch) // 2, cw, ch)
         _cover_card(painter, art, games[position], box,
                     selected=highlight and offset == 0, opacity=opacity, logo_ratio=0.72)
@@ -565,53 +632,51 @@ def draw_scrollbar(
     scrollbar(painter, index=index, total=total, visible=visible, content_h=content_h)
 
 
-def list_hit(m, count: int, index: int, rows_per_page: int, x: int, y: int) -> int | None:
+def list_hit(m, count: int, index: int, rows_per_page: int, x: int, y: int,
+             scroll: int = 0) -> int | None:
     """The game position a tap landed on in the list view (DESIGN.ANDROID §10.3).
 
-    Mirrors ``draw_list``: page-aligned rows starting at ``content_top``,
-    stepping ``row_step``.  The horizontal check is deliberately loose -- a
-    full-width row is the tap target, so any x inside the content area counts.
+    Mirrors ``draw_list``: absolute rows from ``content_top``, stepping
+    ``row_step``, less the viewport's ``scroll`` -- which is what makes a tap land
+    on the row under the finger once the panel has been panned.  The horizontal
+    check is deliberately loose: a full-width row is the tap target, so any x
+    inside the content area counts.
     """
-    first = (index // rows_per_page) * rows_per_page
     top = m.content_top + m.u(8)
-    if y < top:
-        return None
-    row = (y - top) // m.row_step
-    if row >= rows_per_page:
-        return None
-    position = first + row
-    if position >= count:
+    position = int((y - top + scroll) // m.row_step)
+    if position < 0 or position >= count:
         return None
     return position
 
 
 def grid_hit(m, count: int, index: int, cols: int, rows: int, *, single: bool,
-             x: int, y: int) -> int | None:
+             x: int, y: int, scroll: int = 0) -> int | None:
     """The game position a tap landed on in the grid view (DESIGN.ANDROID §10.3).
 
-    Mirrors ``draw_grid``: page-aligned slots from ``content_top``, ``cell_w``
-    wide and ``cell_h`` tall, separated by ``grid_gap``.  A tap in the gap
-    between two cells hits nothing -- the padding is not a cell.
+    Mirrors ``draw_grid``: absolute rows from ``content_top``, ``cell_w`` wide and
+    ``cell_h`` tall, separated by ``grid_gap``, less the viewport's ``scroll`` --
+    which is what makes a tap land on the cell under the finger once the panel
+    has been panned.  A tap in the gap between two cells hits nothing.
     """
-    per_page = cols * rows
-    first = (index // per_page) * per_page
     padding, gap = m.grid_padding, m.grid_gap
     cell_w = (m.content_w - 2 * padding - gap * (cols - 1)) // cols
     cell_h = m.grid_cell_h(single=single)
     left = x - padding
-    top = y - (m.content_top + padding)
+    top = y - (m.content_top + padding) + scroll
     if left < 0 or top < 0:
         return None
     col = left // (cell_w + gap)
     row = top // (cell_h + gap)
-    if col >= cols or row >= rows or left - col * (cell_w + gap) > cell_w:
+    if col >= cols or left - col * (cell_w + gap) > cell_w:
         return None
-    position = first + row * cols + col
+    if top - row * (cell_h + gap) > cell_h:
+        return None
+    position = row * cols + col
     return position if position < count else None
 
 
 def carousel_hit(m, count: int, index: int, *, single: bool,
-                 x: int, y: int) -> int | None:
+                 x: int, y: int, scroll: int = 0) -> int | None:
     """The game position a tap landed on in the carousel view (§10.3).
 
     Mirrors ``draw_carousel``: the centred card at ``width // 2`` and its
@@ -634,7 +699,7 @@ def carousel_hit(m, count: int, index: int, *, single: bool,
             if not 0 <= position < count:
                 continue
             w, h, off = widths[k], heights[k], offsets[k]
-            box_left = centre + side * off - w // 2
+            box_left = centre + side * off - w // 2 - scroll
             box_top = top + (card_h - h) // 2
             if box_left <= x < box_left + w and box_top <= y < box_top + h:
                 return position

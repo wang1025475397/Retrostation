@@ -96,6 +96,13 @@ class Painter:
     def image(self, bitmap: object, box: Sequence[float]) -> None:
         self.canvas.image(bitmap, box)
 
+    def image_rounded(self, bitmap: object, box: Sequence[float], *, radius: int) -> None:
+        self.canvas.image_rounded(bitmap, box, radius=radius)
+
+    def image_crop(self, bitmap: object, src: Sequence[float],
+                   dst: Sequence[float]) -> None:
+        self.canvas.image_crop(bitmap, src, dst)
+
     def image_fit(self, bitmap: object, box: Sequence[float]) -> None:
         self.canvas.image_fit(bitmap, box)
 
