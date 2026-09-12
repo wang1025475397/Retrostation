@@ -162,6 +162,14 @@ def cover_art(
 #: below: these are panel-sized, so a handful of them would crowd out the small
 #: cover copies the carousel re-dims on every frame.
 _BACKDROP_DIM: dict[tuple, object] = {}
+#: ``(game key, w, h, bg) -> flattened backdrop`` -- the dimmed art composited
+#: over the page colour and made opaque, ready to paste.  ``flatten`` allocates
+#: and blends a panel-sized RGBA image, one of the most expensive single ops in
+#: a repaint (~2.2 MP), and its result only depends on the game, the size and
+#: the palette -- so it is cached rather than redone on every full repaint.
+#: The background colour is part of the key because the palette can change at
+#: runtime (theme switch).
+_BACKDROP_FLAT: dict[tuple, object] = {}
 _BACKDROP_LIMIT = 4
 
 #: How far the backdrop is faded.  It sits under text, so it has to stay quiet:
@@ -194,8 +202,17 @@ def draw_backdrop(painter: Painter, art: ArtProvider, game: Game) -> None:
             _BACKDROP_DIM.clear()
         _BACKDROP_DIM[key] = faded
     # The canvas must stay fully opaque -- see ``Canvas.flatten``: an alpha<255
-    # pixel would show through to black rather than to the dimmed art.
-    painter.image(painter.canvas.flatten(faded, COLORS.bg), (0, 0, width, height))
+    # pixel would show through to black rather than to the dimmed art.  The
+    # flattened plate is cached: it is a panel-sized allocated blend that only
+    # changes with the game, the size or the palette (see ``_BACKDROP_FLAT``).
+    flat_key = (key, tuple(COLORS.bg))
+    flat = _BACKDROP_FLAT.get(flat_key)
+    if flat is None:
+        flat = painter.canvas.flatten(faded, COLORS.bg)
+        if len(_BACKDROP_FLAT) >= _BACKDROP_LIMIT:
+            _BACKDROP_FLAT.clear()
+        _BACKDROP_FLAT[flat_key] = flat
+    painter.image(flat, (0, 0, width, height))
 
 
 def panel_fill(painter: Painter):

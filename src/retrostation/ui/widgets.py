@@ -106,6 +106,18 @@ def _scaled(alpha: int, opacity: int) -> int:
     return max(0, min(255, round(alpha * max(0, min(100, opacity)) / 100)))
 
 
+def _fit_text(painter: Painter, text: str, *, max_width: int, size: int) -> int:
+    """Largest size <= ``size`` at which ``text`` still fits ``max_width``.
+
+    The pad's labels go into fixed pills; on a wide canvas the size derived from
+    the pill's height runs past the pill's width, so "SELECT" spilled over both
+    edges.  Measure and step down instead.
+    """
+    while size > 8 and painter.text_width(text, size=size) > max_width:
+        size -= 1
+    return size
+
+
 def dpad(painter: Painter, box: tuple[int, int, int, int], *,
          opacity: int = 100) -> None:
     """A translucent d-pad whose arms join ``painter.button_hits``.
@@ -157,16 +169,20 @@ def game_pad(painter: Painter, box: tuple[int, int, int, int], *,
     tap-to-button path presses them with no extra wiring.
     """
     x, y, w, h = box
+    margin = painter.metrics.u(6)
     side = min(h, w // 3)
     cy = y + (h - side) // 2
-    left = x
+    left = x + margin
     if avoid is not None:
         ax, ay, aw, ah = avoid
         # The clip is a native surface painted above this canvas, so it cannot
         # be covered: the d-pad steps aside instead -- it is the cluster that
-        # shares a corner with the media box.
+        # shares a corner with the media box.  Clamped afterwards so a wide
+        # media box (the platform page's bottom strip) cannot shove it clean off
+        # the right edge, where it would simply vanish.
         if ax < left + side and left < ax + aw and ay < cy + side and cy < ay + ah:
             left = ax + aw + painter.metrics.u(8)
+    left = max(x + margin, min(left, x + w - side - margin))
     dpad(painter, (left, cy, side, side), opacity=opacity)
 
     r = max(9, int(side * 0.205))
@@ -174,7 +190,9 @@ def game_pad(painter: Painter, box: tuple[int, int, int, int], *,
     # centre, and letting that exceed half the box height clipped the bottom
     # button against the panel edge.
     off = min(int(side * 0.355), max(4, h // 2 - r - 2))
-    cx = x + w - side // 2 - r
+    # Right edge, not the centre of the right third: A ends at ``w - margin`` so
+    # the cluster lands under the thumb resting on the corner.
+    cx = x + w - margin - off - r
     mid = y + h // 2
     hits: list[tuple[tuple[int, int, int, int], str]] = []
     # Diamond, Switch layout: A right, B down, X up, Y left.
@@ -182,21 +200,27 @@ def game_pad(painter: Painter, box: tuple[int, int, int, int], *,
         bx, by = cx + dx - r, mid + dy - r
         painter.ellipse((bx, by, r * 2, r * 2),
                         fill=(*_FACE_COLOURS[label], _scaled(255, opacity)))
-        painter.text((bx + r, by + r), label, size=max(10, int(r * 1.1)),
+        painter.text((bx + r, by + r), label,
+                     size=_fit_text(painter, label, max_width=int(r * 1.15),
+                                    size=max(10, int(r * 0.85))),
                      fill=(24, 24, 28), anchor="mm")
         hits.append(((bx, by, r * 2, r * 2), label))
 
-    pill_w, pill_h = max(56, int(side * 0.42)), max(16, int(side * 0.20))
-    px = x + side + max(2, (w - 2 * side - pill_w) // 2)
-    gap = max(8, side // 8)          # airy: the two pills read as a pair, not a blob
+    # SELECT / START: side by side along the bottom, centred between the sticks.
+    pill_h = max(16, int(side * 0.20))
+    pill_w = max(56, int(side * 0.52))
+    gap = max(8, side // 10)         # the two pills read as a pair, not a blob
+    px = x + (w - (pill_w * 2 + gap)) // 2
+    py = y + h - pill_h
     for i, label in enumerate(("SELECT", "START")):
-        py = mid - pill_h - gap // 2 + i * (pill_h + gap)
-        painter.rounded_rect((px, py, pill_w, pill_h), radius=pill_h // 2,
+        bx = px + i * (pill_w + gap)
+        painter.rounded_rect((bx, py, pill_w, pill_h), radius=pill_h // 2,
                              fill=(236, 238, 244, _scaled(230, opacity)))
-        painter.text((px + pill_w // 2, py + pill_h // 2), label,
-                     size=max(9, int(pill_h * 0.56)), fill=(22, 22, 26),
-                     anchor="mm")
-        hits.append(((px, py, pill_w, pill_h), label))
+        size = _fit_text(painter, label, max_width=pill_w - 2 * margin,
+                         size=max(9, int(pill_h * 0.62)))
+        painter.text((bx + pill_w // 2, py + pill_h // 2), label,
+                     size=size, fill=(22, 22, 26), anchor="mm")
+        hits.append(((bx, py, pill_w, pill_h), label))
 
     painter.button_hits.extend(hits)
 
@@ -221,11 +245,11 @@ def pad_box(m, *, single: bool, height: int | None = None) -> tuple[int, int, in
         # the visible bottom and clipped it (which is why this used to sit at a
         # made-up 65% instead of at the bottom).
         y = panel_h - h - m.u(16)
-    # Full width, even when the detail panel sits beside the rows: the thumb
-    # reaches the screen edge, not the width of the list.  Sparing the panel
-    # put A/B/X/Y a hand's width away from the right edge, which is the corner
-    # the right thumb actually rests on.
-    return (m.u(12), y, m.width - 2 * m.u(12), h)
+    # Full width, edge to edge: the d-pad hugs the left and A/B/X/Y the right,
+    # which is where the thumbs actually rest.  Insetting the box and then
+    # centring each cluster inside its third left both well inboard of the
+    # corners they are meant to reach.
+    return (0, y, m.width, h)
 
 
 def pad_bitmap(m, box, *, opacity: int, avoid=None, platform=None, translator=None):
@@ -238,7 +262,10 @@ def pad_bitmap(m, box, *, opacity: int, avoid=None, platform=None, translator=No
     from ..platform.canvas import PilCanvas
 
     x, y, w, h = box
-    surface = PilCanvas(max(1, w), max(1, h))
+    # Transparent scratch: PilCanvas defaults to *opaque* black, and the pad is
+    # only translucent shapes -- pasting that black plate back would leave the
+    # whole cluster sitting on a solid black rectangle instead of the content.
+    surface = PilCanvas(max(1, w), max(1, h), (0, 0, 0, 0))
     scratch = Painter(surface, m, platform, translator)
     scratch.button_hits = []
     local = None if avoid is None else (avoid[0] - x, avoid[1] - y, avoid[2], avoid[3])

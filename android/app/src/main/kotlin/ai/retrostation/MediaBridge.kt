@@ -6,8 +6,10 @@ import android.view.SurfaceView
 import android.view.ViewGroup
 import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
+import androidx.media3.common.VideoSize
 import androidx.media3.exoplayer.ExoPlayer
 import java.io.File
+import kotlin.math.roundToInt
 
 /**
  * Video preview composited by the platform, under the UI frame
@@ -59,6 +61,24 @@ class MediaBridge(
             exo.volume = volume
             exo.repeatMode = Player.REPEAT_MODE_ALL
             exo.setMediaItem(MediaItem.fromUri(Uri.fromFile(File(path))))
+            // Letterbox the clip inside the allotted media box: once we know the
+            // real frame size, shrink the surface to the largest sub-rect of
+            // (w,h) that keeps the video's aspect ratio, so it is never stretched
+            // (DESIGN §6.5 -- detail-area video must honour its own ratio).
+            exo.addListener(object : Player.Listener {
+                override fun onVideoSizeChanged(size: VideoSize) {
+                    if (size.width <= 0 || size.height <= 0) return
+                    val (fx, fy, fw, fh) = letterbox(x, y, w, h, size.width, size.height)
+                    root.post {
+                        val lp = surface.layoutParams
+                        lp.width = (fw * sx).toInt()
+                        lp.height = (fh * sy).toInt()
+                        surface.layoutParams = lp
+                        surface.x = host.left + fx * sx
+                        surface.y = host.top + fy * sy
+                    }
+                }
+            })
             exo.prepare()
             exo.playWhenReady = true
             player = exo
@@ -92,6 +112,33 @@ class MediaBridge(
     fun setVolume(value: Float) {
         volume = value.coerceIn(0f, 1f)
         root.post { player?.volume = volume }
+    }
+
+    /**
+     * Largest sub-rect of the allotted media box `(x,y,w,h)` that keeps the
+     * video's aspect ratio, centred in it -- the surface is sized to this so the
+     * clip is letterboxed, never stretched.  Returns `(fx, fy, fw, fh)` in the
+     * same canvas units the caller passed in.
+     */
+    private fun letterbox(
+        x: Int, y: Int, w: Int, h: Int, vw: Int, vh: Int,
+    ): IntArray {
+        val boxAspect = w.toFloat() / h
+        val vidAspect = vw.toFloat() / vh
+        val fw: Int
+        val fh: Int
+        if (vidAspect > boxAspect) {
+            // Video wider than the box: fit the width, bars top and bottom.
+            fw = w
+            fh = (w / vidAspect).roundToInt()
+        } else {
+            // Video taller: fit the height, bars left and right.
+            fh = h
+            fw = (h * vidAspect).roundToInt()
+        }
+        val fx = x + (w - fw) / 2
+        val fy = y + (h - fh) / 2
+        return intArrayOf(fx, fy, fw, fh)
     }
 
     fun stop() = root.post { release() }

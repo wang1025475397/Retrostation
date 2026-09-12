@@ -3,10 +3,14 @@ package ai.retrostation
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.Canvas
+import android.graphics.Matrix
+import android.graphics.Paint
 import com.chaquo.python.Python
 import com.chaquo.python.android.AndroidPlatform
 import java.io.ByteArrayOutputStream
 import java.io.File
+import java.nio.ByteBuffer
 import kotlin.math.max
 
 /**
@@ -205,6 +209,57 @@ class PyRuntime(private val context: Context) {
                 out.toByteArray()
             }
         }
+        /**
+         * Decode ``path`` straight to ``width`` x ``height`` and hand back raw RGBA.
+         *
+         * [decodeImage] gives Python a full-size *PNG*: the host re-encodes the
+         * artwork (400 KB - 1 MB per file on a real card) and Python then decodes
+         * that again only to scale it down -- ~55 ms per cover.  Here the decode
+         * is subsampled to roughly twice the target, scaled natively and copied
+         * out as raw RGBA: no re-encode, no multi-megabyte PNG across the bridge,
+         * and nothing left for the Python side to scale.
+         *
+         * ``cover`` fills the box and centre-crops it; otherwise the picture is
+         * contained inside it with transparent bars -- what the screens' own
+         * fit/cover helpers would have produced.
+         */
+        fun decodeImageScaled(path: String, width: Int, height: Int, cover: Boolean): ByteArray? {
+            if (!File(path).isFile || width <= 0 || height <= 0) return null
+            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeFile(path, bounds)
+            val sw = bounds.outWidth
+            val sh = bounds.outHeight
+            if (sw <= 0 || sh <= 0) return null
+
+            var sample = 1
+            while (sw / (sample * 2) >= width && sh / (sample * 2) >= height) sample *= 2
+            val decoded = BitmapFactory.decodeFile(path, BitmapFactory.Options().apply {
+                inSampleSize = sample
+                inPreferredConfig = Bitmap.Config.ARGB_8888
+            }) ?: return null
+
+            val scale = if (cover) {
+                maxOf(width.toFloat() / decoded.width, height.toFloat() / decoded.height)
+            } else {
+                minOf(width.toFloat() / decoded.width, height.toFloat() / decoded.height)
+            }
+            val target = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+            val matrix = Matrix().apply {
+                setScale(scale, scale)
+                postTranslate(
+                    (width - decoded.width * scale) / 2f,
+                    (height - decoded.height * scale) / 2f,
+                )
+            }
+            Canvas(target).drawBitmap(decoded, matrix, Paint(Paint.FILTER_BITMAP_FLAG))
+            decoded.recycle()
+
+            val buffer = ByteBuffer.allocate(target.byteCount)
+            target.copyPixelsToBuffer(buffer)
+            target.recycle()
+            return buffer.array()
+        }
+
         fun configDir(): String =
             context.getExternalFilesDir(null)?.absolutePath ?: context.filesDir.absolutePath
 

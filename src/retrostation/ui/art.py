@@ -38,17 +38,35 @@ class ArtProvider:
         self._placeholders: dict[tuple, object] = {}
         #: Panel-sized backdrop per ``(game key, width, height)``.
         self._backdrops: dict[tuple, object] = {}
+        #: ``(game key, width, height)`` already found to carry no fanart or
+        #: screenshot at all, so the panel stops asking to have it decoded.
+        self._backdrop_missing: set[tuple] = set()
 
     # ------------------------------------------------------------------ #
 
     def thumbnail(self, game: Game, width: int, height: int, *,
                   prefer_logo: bool = False, cover: bool = False) -> object | None:
-        """Scaled artwork for ``game``, or ``None`` when there is none."""
+        """Scaled artwork for ``game``, or ``None`` when it cannot be shown yet.
+
+        The frame loop never decodes: it takes what the warm thread has already
+        cached and leaves the rest to the warm-up that :meth:`prefetch` fills
+        from the frame loop's idle pass.  ``None`` therefore means
+        either "this game has no such artwork" or "not ready yet"; the screens
+        draw the same empty plate for both, and the panel is repainted once the
+        warm-up lands (see the epoch check in ``App._draw``).
+        """
         kind = ASSET_LOGO if prefer_logo else ASSET_COVER
-        path = game.asset(kind)
-        if path is None:
+        if game.asset(kind) is None:
             return None
-        return self._library.thumbnail(kind, game, width, height, cover=cover)
+        bitmap = self._library.thumbnail_cached(kind, game, width, height, cover=cover)
+        if bitmap is None:
+            # Nothing anywhere: decode it now.  Waiting for the warm-up instead
+            # means a placeholder that, on a long list, can take minutes to be
+            # replaced -- indistinguishable from "the covers are missing".  The
+            # warm-up still pre-builds what the cursor is about to reach, so this
+            # is the one-off case, not the steady state.
+            bitmap = self._library.thumbnail(kind, game, width, height, cover=cover)
+        return bitmap
 
     def backdrop(self, game: Game, width: int, height: int) -> object | None:
         """Panel-filling art to sit behind the game page, or ``None``.
@@ -58,24 +76,49 @@ class ArtProvider:
         assets ``background`` and ``screenshot`` -- which is precisely where the
         media scanner already files them -- so both layouts land here without
         any special case.
+
+        Never decodes (see :meth:`thumbnail`).  A miss is deliberately *not*
+        cached: the next frame retries and hits as soon as the warm thread is
+        done, which is what makes the art fade in instead of stalling a frame.
         """
         key = (game.key, width, height)
-        if key in self._backdrops:
-            return self._backdrops[key]
+        cached = self._backdrops.get(key)
+        if cached is not None or key in self._backdrop_missing:
+            return cached
 
-        bitmap = None
+        pending = False
         for kind in (ASSET_FANART, ASSET_SCREENSHOT):
             if game.asset(kind) is None:
                 continue
-            scaled = self._library.thumbnail(kind, game, width, height)
-            if scaled is not None:
-                bitmap = cover_bitmap(scaled, width, height)
-                break
+            scaled = self._library.thumbnail_cached(kind, game, width, height)
+            if scaled is None:
+                pending = True
+                continue
+            bitmap = cover_bitmap(scaled, width, height)
+            if len(self._backdrops) >= _BACKDROP_LIMIT:
+                self._backdrops.clear()
+            self._backdrops[key] = bitmap
+            return bitmap
 
-        if len(self._backdrops) >= _BACKDROP_LIMIT:
-            self._backdrops.clear()
-        self._backdrops[key] = bitmap
-        return bitmap
+        if pending:
+            # Same as :meth:`thumbnail`: decode rather than show nothing, and let
+            # the warm-up cover the cases this one did not (see ``prefetch``).
+            for kind in (ASSET_FANART, ASSET_SCREENSHOT):
+                if game.asset(kind) is None:
+                    continue
+                scaled = self._library.thumbnail(kind, game, width, height)
+                if scaled is not None:
+                    bitmap = cover_bitmap(scaled, width, height)
+                    if len(self._backdrops) >= _BACKDROP_LIMIT:
+                        self._backdrops.clear()
+                    self._backdrops[key] = bitmap
+                    return bitmap
+            return None
+        # Every kind is absent: remember that, so the panel is not asked again.
+        if len(self._backdrop_missing) >= _BACKDROP_LIMIT:
+            self._backdrop_missing.clear()
+        self._backdrop_missing.add(key)
+        return None
 
     def placeholder(self, seed: str, width: int, height: int) -> object:
         key = (seed, width, height)

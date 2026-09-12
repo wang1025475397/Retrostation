@@ -79,6 +79,16 @@ class AndroidBridge:
         data = self._kt.decodeImage(str(path))
         return bytes(data) if data is not None else None
 
+    def decode_image_scaled(
+        self, path: Path, width: int, height: int, cover: bool
+    ) -> bytes | None:
+        """Raw RGBA for ``path``, decoded by the host at ``width`` x ``height``.
+
+        No PNG re-encode and no full-size bitmap: see ``HostBridge.decodeImageScaled``.
+        """
+        data = self._kt.decodeImageScaled(str(path), int(width), int(height), bool(cover))
+        return bytes(data) if data is not None else None
+
     def open_video(self, path: Path, index: int, rect: tuple[int, int, int, int]) -> None:
         """Start the clip in the media box (canvas units) on canvas ``index``."""
         x, y, w, h = rect

@@ -13,6 +13,7 @@ byte-for-byte the same interface the Linux and desktop platforms implement.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -38,6 +39,14 @@ class AndroidPlatform(Platform):
     """Front-end host on Android.  Resident by default (DESIGN.ANDROID §8.11)."""
 
     name = "android"
+
+    #: The host decoder lands straight on the requested size (see
+    #: :meth:`load_thumbnail`), so the on-card thumbnail cache buys nothing here
+    #: -- and costs plenty: the artwork on a real card is one folder per game, so
+    #: every cover wrote ~1.4 MB of lossless PNG into its own new directory.
+    #: Measured: about one game a second to build, and a several-hundred-
+    #: millisecond wait before a cover could be shown at all.
+    caches_thumbnails = False
 
     def __init__(self, bridge: Any, *, font_dir: str | None = None) -> None:
         #: Injected by ``PyRuntime`` on device; a fake in tests.
@@ -172,6 +181,26 @@ class AndroidPlatform(Platform):
                 dirs = ("/system/fonts", "/product/fonts")
             self._fonts = FontBook(dirs)
         return self._fonts.get(size)
+
+    def load_thumbnail(self, path: Path, width: int, height: int, *,
+                       cover: bool = False) -> object | None:
+        """The picture decoded *at* the requested size, or ``None``.
+
+        Fast path for every thumbnail the UI asks for: the host subsamples,
+        scales natively and returns raw RGBA, so nothing decodes the 400 KB -
+        1 MB source at full size, nothing re-encodes it, and nothing here scales
+        it either.  ``cover`` fills and centre-crops the box, otherwise the
+        picture is contained inside it with transparent bars.
+        """
+        from PIL import Image
+
+        data = self._bridge.decode_image_scaled(path, width, height, cover)
+        if data is None:
+            return None
+        try:
+            return Image.frombytes("RGBA", (width, height), data, "raw", "RGBA", 0, 1)
+        except (ValueError, TypeError):
+            return None
 
     def load_image(self, path: Path) -> object:
         """Open ``path`` as a PIL image.

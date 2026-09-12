@@ -334,7 +334,7 @@ class Session:
         """
         if self._preview_cache is None:
             games = sorted(self.games(), key=self._preview_order)
-            self._preview_cache = games[:6]
+            self._preview_cache = games[:14]
         return self._preview_cache
 
     def preview_games_for(self, key: str) -> list[Game]:
@@ -349,7 +349,7 @@ class Session:
         games = self.library.resolve_all(key)
         if not self.config.show_hidden:
             games = [game for game in games if not game.hidden]
-        return sorted(games, key=self._preview_order)[:6]
+        return sorted(games, key=self._preview_order)[:14]
 
     @staticmethod
     def _preview_order(game: Game) -> tuple[int, float, str]:
@@ -484,6 +484,13 @@ class Session:
         # 触摸（DESIGN.ANDROID §10.3）：点卡片选中，再点已选中的卡片进入。
         if action is InputAction.TAP and event.x is not None:
             return self._tap_platform(event)
+        # The platform row is horizontal, so a swipe walks it left and right --
+        # the same follow-the-finger path the game carousel uses.
+        if action is InputAction.DRAG:
+            return self._drag_scroll(event.dy, event.dx)
+        if action is InputAction.FLING:
+            self._touch_px = 0.0
+            return self._fling_scroll(event.dy, event.dx)
 
         # 平台行：上/左右切换平台，下键进入预览选择。
         if action is InputAction.DOWN:
@@ -573,10 +580,10 @@ class Session:
             self._touch_px = 0.0
             return self._tap_game(event)
         if action is InputAction.DRAG:
-            return self._scroll_games(event.dy)
+            return self._drag_scroll(event.dy, event.dx)
         if action is InputAction.FLING:
             self._touch_px = 0.0
-            return self._fling_games(event.dy)
+            return self._fling_scroll(event.dy, event.dx)
         if action is InputAction.A:
             return self._pick_or_launch(self.current_game())
         if action is InputAction.B:
@@ -650,36 +657,67 @@ class Session:
             return self._pick_or_launch(self.current_game())
         return self._enter_games()
 
-    def _scroll_games(self, dy: int) -> Outcome:
-        """Drag scrolls the list by whole rows (DESIGN.ANDROID §10.3).
+    def _scrolls_sideways(self) -> bool:
+        """Whether the current list runs along the x axis.
 
-        Sub-row movement is accumulated: a slow drag delivers a couple of
+        The platform page and the games carousel are rows of cards; the list and
+        the grid are columns.  A drag has to follow the axis its view is laid out
+        on -- measuring only ``dy`` is why a swipe across the carousel did
+        nothing at all.
+        """
+        return self.view == VIEW_PLATFORMS or self.layout == "carousel"
+
+    def _scroll_pitch(self) -> int:
+        """Logical pixels one step covers along whichever axis scrolls."""
+        m = self._metrics
+        if m is None:
+            return 0
+        if self.view == VIEW_PLATFORMS:
+            return m.platform_art + m.u(8)
+        if self.layout == "carousel":
+            return m.carousel_card_w(single=self._single) + m.carousel_gap
+        return m.row_step
+
+    def _move_steps(self, steps: int) -> Outcome:
+        """Move this view's cursor by whole steps along its scrolling axis."""
+        if self.view == VIEW_PLATFORMS:
+            return self._move_platform(steps)
+        if self._scrolls_sideways():
+            return self._move_game(steps)
+        return self._move_game(steps * self._vertical_step())
+
+    def _drag_scroll(self, dy: int, dx: int) -> Outcome:
+        """A drag follows the finger, one whole step at a time (§10.3).
+
+        Sub-step movement is accumulated: a slow drag delivers a couple of
         logical pixels per frame, and discarding those would make it feel dead.
         """
-        row_step = self._metrics.row_step if self._metrics else 0
-        if row_step <= 0:
+        pitch = self._scroll_pitch()
+        if pitch <= 0:
             return Outcome()
-        self._touch_px += dy
-        rows = int(-self._touch_px / row_step)  # drag up (dy<0) walks down the list
-        if rows == 0:
+        self._touch_px += dx if self._scrolls_sideways() else dy
+        steps = int(-self._touch_px / pitch)
+        if steps == 0:
             return Outcome()
-        self._touch_px += rows * row_step
-        return self._move_game(rows * self._vertical_step())
+        self._touch_px += steps * pitch
+        return self._move_steps(steps)
 
-    def _fling_games(self, dy: int) -> Outcome:
+    def _fling_scroll(self, dy: int, dx: int) -> Outcome:
         """A quick swipe jumps by the inertia distance the bridge measured.
 
         Clamped hard: an unclamped flick launched the list most of a page at
-        once, which read as "the list jumped" rather than "I scrolled".
+        once, which read as "the list jumped" rather than "I scrolled".  Sideways
+        it is the same distance on the other axis.
         """
-        row_step = self._metrics.row_step if self._metrics else 0
-        if row_step <= 0:
+        pitch = self._scroll_pitch()
+        if pitch <= 0:
             return Outcome()
-        rows = int(-dy / row_step)
-        rows = max(-_FLING_MAX_ROWS, min(_FLING_MAX_ROWS, rows))
-        if rows == 0:
-            rows = 1 if dy < 0 else -1
-        return self._move_game(rows * self._vertical_step())
+        travel = dx if self._scrolls_sideways() else dy
+        steps = int(-travel / pitch)
+        steps = max(-_FLING_MAX_ROWS, min(_FLING_MAX_ROWS, steps))
+        if steps == 0:
+            steps = 1 if travel < 0 else -1
+        return self._move_steps(steps)
 
     def _vertical_step(self) -> int:
         if self.layout == "grid":

@@ -14,6 +14,7 @@ import android.view.View
 import android.view.WindowManager
 import android.widget.FrameLayout
 import android.widget.LinearLayout
+import kotlin.math.roundToInt
 
 /**
  * Host activity.  Owns the lifecycle, the (one or two) [RetroSurfaceView]s, and the
@@ -33,6 +34,10 @@ import android.widget.LinearLayout
 class MainActivity : Activity() {
 
     private lateinit var py: PyRuntime
+    /** Cached so [applySplit] can recompute logical canvas sizes without re-probing. */
+    private val display = DisplayBridge(this)
+    /** The stacked/side-by-side container; [applySplit] flips its orientation. */
+    private lateinit var contentColumn: LinearLayout
     /** Orientation this instance was built for; see [onConfigurationChanged]. */
     private var orientation = Configuration.ORIENTATION_UNDEFINED
     /** Storage access as of the last resume; see [onResume]. */
@@ -49,7 +54,7 @@ class MainActivity : Activity() {
         // Probe first: the view layout has to match the canvas count the Python
         // side will be told about.  One instance here, one in PyRuntime.start();
         // DisplayBridge is stateless, so both agree.
-        val sizes = DisplayBridge(this).probe("auto")
+        val sizes = display.probe("auto")
         val root = buildLayout(sizes.size)
         py.rootView = root
         setContentView(root)
@@ -86,29 +91,88 @@ class MainActivity : Activity() {
             }
         }
         // Always a ViewGroup: the media layer adds/removes its surface inside it.
-        val column = LinearLayout(this).apply {
+        // Stored as [contentColumn] so [applySplit] can flip it to side-by-side.
+        contentColumn = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(Color.BLACK) // the seam between the two canvases
         }
         if (views.size == 1) {
-            column.addView(views[0], LinearLayout.LayoutParams(
+            contentColumn.addView(views[0], LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.MATCH_PARENT))
         } else {
-            // Portrait: stack the canvases.  Weights come from the same constant
+            // Two canvases: stack them.  Weights come from the same constant
             // the probe split the pixels with, so the seam lands on the edge.
+            // [applySplit] re-uses these weights for the horizontal arrangement.
             val topShare = DisplayBridge.PORTRAIT_TOP_SHARE.toFloat()
-            column.addView(views[0], LinearLayout.LayoutParams(
+            contentColumn.addView(views[0], LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, 0, topShare))
-            column.addView(views[1], LinearLayout.LayoutParams(
+            contentColumn.addView(views[1], LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f - topShare))
         }
         // FrameLayout outside: the media layer positions its surface absolutely
         // inside it; a LinearLayout would re-place it and ignore x/y.
         return FrameLayout(this).apply {
-            addView(column, FrameLayout.LayoutParams(
+            addView(contentColumn, FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.MATCH_PARENT))
+        }
+    }
+
+    /**
+     * Flip the two phone canvases between stacked (portrait / platform view) and
+     * side-by-side (landscape + game detail) without restarting the core
+     * (DESIGN §11.3).  Returns the new *logical* canvas sizes for each surface;
+     * the Python side rebuilds its canvases/metrics from them.
+     */
+    fun applySplit(horizontal: Boolean): List<Pair<Int, Int>> {
+        val share = DisplayBridge.PORTRAIT_TOP_SHARE
+        // View mutation must run on the UI thread; the logical sizes are derived
+        // from the panel dimensions + share, so they are ready immediately and do
+        // not depend on the (async) layout pass the request triggers.
+        runOnUiThread {
+            // The core boots before the first layout in some cold starts; without
+            // this guard a lateinit access would kill the core thread.
+            if (!::contentColumn.isInitialized) return@runOnUiThread
+            contentColumn.orientation =
+                if (horizontal) LinearLayout.HORIZONTAL else LinearLayout.VERTICAL
+            // buildLayout sized the children for a *column* (width MATCH_PARENT,
+            // height 0 + weight).  Flipping to a row without rewriting them leaves
+            // height=0, which collapses both canvases to nothing -- the screen goes
+            // black.  In a row the weight sizes the WIDTH, so the two axes swap.
+            if (contentColumn.childCount == 2) {
+                val weights = listOf(share.toFloat(), 1f - share.toFloat())
+                for (i in 0 until 2) {
+                    val child = contentColumn.getChildAt(i)
+                    val lp = (child.layoutParams as? LinearLayout.LayoutParams)
+                        ?: LinearLayout.LayoutParams(0, 0)
+                    if (horizontal) {
+                        lp.width = 0
+                        lp.height = LinearLayout.LayoutParams.MATCH_PARENT
+                    } else {
+                        lp.width = LinearLayout.LayoutParams.MATCH_PARENT
+                        lp.height = 0
+                    }
+                    lp.weight = weights[i]
+                    child.layoutParams = lp
+                }
+            }
+            contentColumn.requestLayout()
+            contentColumn.invalidate()
+        }
+        val metrics = resources.displayMetrics
+        val pw = metrics.widthPixels
+        val ph = metrics.heightPixels
+        return if (horizontal) {
+            listOf(
+                display.logicalSize((pw * share).roundToInt() to ph),
+                display.logicalSize((pw * (1f - share)).roundToInt() to ph),
+            )
+        } else {
+            listOf(
+                display.logicalSize(pw to (ph * share).roundToInt()),
+                display.logicalSize(pw to (ph * (1f - share)).roundToInt()),
+            )
         }
     }
 
@@ -135,12 +199,22 @@ class MainActivity : Activity() {
     // Every handler guards on ``ready``: the core boots after the first frame,
     // so a key pressed during that window has no bridge to feed yet.
     override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
-        if (py.ready && py.inputBridge.offerKey(keyCode, event)) return true
+        // Swallow every key once the core is up: only mapped keys become
+        // semantic actions, and unmapped ones must never reach the system
+        // default (some ROMs finish the activity on an unhandled key, which
+        // looked like "any key quits").  Boot window still defers to the system.
+        if (py.ready) {
+            py.inputBridge.offerKey(keyCode, event)
+            return true
+        }
         return super.onKeyDown(keyCode, event)
     }
 
     override fun onKeyUp(keyCode: Int, event: KeyEvent): Boolean {
-        if (py.ready && py.inputBridge.offerKeyUp(keyCode, event)) return true
+        if (py.ready) {
+            py.inputBridge.offerKeyUp(keyCode, event)
+            return true
+        }
         return super.onKeyUp(keyCode, event)
     }
 
@@ -156,7 +230,13 @@ class MainActivity : Activity() {
      */
     @Deprecated("Deprecated in Java")
     override fun onBackPressed() {
-        if (py.ready && py.inputBridge.offerBack()) return
+        // Once the core is up the back key is the app's "B"; it must never finish
+        // the activity.  A phone with no other exit path made any back press quit,
+        // which read as "any key exits" (DESIGN.ANDROID §10.2).
+        if (py.ready) {
+            py.inputBridge.offerBack()
+            return
+        }
         super.onBackPressed()
     }
 

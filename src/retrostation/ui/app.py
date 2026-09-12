@@ -93,6 +93,13 @@ _POLL_SLICE = 0.008
 #: it delays the game.  The spinner animates for this whole window.
 _LAUNCH_SPIN_SECONDS = 0.9
 _SPIN_FRAME = 0.05
+#: How long a finger must stay on a pad button before it starts repeating, and
+#: how often it repeats after that.  A flat panel has no key repeat of its own,
+#: so "hold the direction and keep scrolling" has to be built here; the first
+#: delay is what keeps a plain press from turning into two moves.
+_HOLD_FIRST = 0.32
+_HOLD_REPEAT = 0.075
+
 #: Which blip each button makes.  Only the buttons that move or commit
 #: something answer: the volume rocker already changes something audible, and
 #: typing a query is confirmed by the results appearing.
@@ -284,6 +291,19 @@ class App:
         #: like the backdrop so fast scrolling does not decode a cover per move.
         self._strip_state_pending = False
         self._strip_state_at = 0.0
+        #: Last ``HH:MM`` stamped into the status bar.  A single-screen frame is
+        #: only re-shipped when something changed, and the clock is the one thing
+        #: that changes on its own, so it is what forces a minute tick.
+        self._last_clock = ""
+        #: Last thumbnail-cache epoch seen.  The frame loop draws only artwork
+        #: that is already cached, so a bump here means the warm thread finished
+        #: something and the panel has to be repainted to show it.
+        self._art_epoch = -1
+        #: The pad button a finger is holding down, when it repeats next, and how
+        #: long a following tap should be ignored (see :meth:`_touch_down`).
+        self._held_action: InputAction | None = None
+        self._hold_next = 0.0
+        self._hold_swallow_until = 0.0
         #: Same as ``_strip_state_*`` but for the dual-screen bottom panel, which
         #: is only used when there are two painters (see :meth:`_bottom_due`).
         self._bottom_state_pending = False
@@ -364,7 +384,10 @@ class App:
                     # Hand-off splash: keep spinning it so the player sees motion.
                     # Resident devices hand off by hiding the windows (no exit), so
                     # the spin ends by running the game rather than stopping the loop.
-                    self._draw(now)
+                    try:
+                        self._draw(now)
+                    except Exception:  # noqa: BLE001
+                        log.exception("launch splash draw crashed; frame skipped")
                     if now - self._launch_at >= _LAUNCH_SPIN_SECONDS:
                         if self._launch_resident_mode:
                             self._launch_resident(self._launch_plan)
@@ -397,9 +420,13 @@ class App:
                     time.sleep(min(0.002, _TARGET_FPS - (now - last_frame)))
                     continue
                 last_frame = now
-                self._tick_video()
-                self._draw(now)
-                self._tick_prefetch(now)
+                self._tick_hold(now)
+                try:
+                    self._tick_video()
+                    self._draw(now)
+                    self._tick_prefetch(now)
+                except Exception:  # noqa: BLE001 - a bad frame must not kill the loop
+                    log.exception("frame crashed; skipped")
                 frames += 1
                 if frames == 1:
                     self._fire_ready()
@@ -439,16 +466,33 @@ class App:
     # ------------------------------------------------------------------ #
 
     def _handle(self, event: InputEvent) -> None:
+        # The pad's own touch events are consumed here: neither is a command the
+        # session knows about, and both only exist so a held button can repeat.
+        if event.action is InputAction.TOUCH_DOWN:
+            self._touch_down(event)
+            return
+        if event.action is InputAction.TOUCH_UP:
+            self._held_action = None
+            return
         # A tap on the button bar presses that button before anything else reads
         # the coordinates (DESIGN.ANDROID §10.4).
-        if (event.action is InputAction.TAP and event.x is not None
-                and self._tap_button(event)):
-            return
+        if event.action is InputAction.TAP and event.x is not None:
+            if self._hold_swallow_until and time.monotonic() <= self._hold_swallow_until:
+                # The press already happened on touch-down (see _touch_down);
+                # the lift arrives as a TAP and must not press twice.
+                self._hold_swallow_until = 0.0
+                return
+            if self._tap_button(event):
+                return
         self._blip(event)
         # Anything the player does outranks the warm-up: they are about to
         # move, and the thread shares this core with the frame loop.
         self._activity_at = time.monotonic()
-        outcome = self.session.handle(event)
+        try:
+            outcome = self.session.handle(event)
+        except Exception:  # noqa: BLE001 - one bad key must not kill the core thread
+            log.exception("input handler crashed on %r; event dropped", event)
+            return
         if outcome.quit:
             self._running = False
             return
@@ -496,6 +540,46 @@ class App:
                                         screen=event.screen))
                 return True
         return False
+
+    def _touch_down(self, event: InputEvent) -> None:
+        """A finger landed: a pad button under it presses and starts repeating.
+
+        A flat panel has no key repeat, and a press held past the tap window used
+        to emit nothing at all -- so holding a direction did nothing.  The button
+        is pressed once here and then repeated by :meth:`_tick_hold` for as long
+        as the finger stays down.  Anywhere else, this is ignored: the tap and
+        the gestures still arrive on their own.
+        """
+        action = self._pad_action_at(event)
+        self._held_action = action
+        if action is None:
+            return
+        self._hold_next = time.monotonic() + _HOLD_FIRST
+        self._hold_swallow_until = time.monotonic() + 0.75
+        self._handle(InputEvent(action=action, kind=InputKind.PRESS, screen=event.screen))
+
+    def _pad_action_at(self, event: InputEvent) -> InputAction | None:
+        """The action of the pad button under a touch, or ``None`` elsewhere."""
+        if event.x is None or event.y is None:
+            return None
+        index = event.screen if 0 <= event.screen < len(self._painters) else 0
+        hits = getattr(self._painters[index], "button_hits", ())
+        for (x, y, w, h), label in hits:
+            if x <= event.x <= x + w and y <= event.y <= y + h:
+                return _BAR_LABEL_ACTIONS.get(label)
+        return None
+
+    def _tick_hold(self, now: float) -> None:
+        """Repeat the pad button a finger is holding down.
+
+        Sent as ``InputKind.REPEAT``: every screen treats a repeat as a press
+        (that is what a held key looks like) but the button click is skipped, so
+        auto-repeat does not turn into a machine-gun of blips.
+        """
+        if self._held_action is None or now < self._hold_next:
+            return
+        self._hold_next = now + _HOLD_REPEAT
+        self._handle(InputEvent(action=self._held_action, kind=InputKind.REPEAT))
 
     def _apply_sfx(self) -> None:
         """Push the button-sound settings down to the platform."""
@@ -577,6 +661,14 @@ class App:
         if bk != self._top_backdrop:
             self._backdrop_pending = True
             self._backdrop_at = now
+        # The frame loop draws only artwork that is already cached (see
+        # ArtProvider.thumbnail), so when the warm thread lands a bitmap the
+        # panel has to be repainted or the empty plate would stay on screen
+        # until something else happened to move.
+        epoch = self.library.thumbnail_epoch
+        if epoch != self._art_epoch:
+            self._art_epoch = epoch
+            self._top_dirty = True
         due = key != self._top_key or self._top_dirty
         # Postpone a repaint that would land on top of a video frame: the frame
         # is published on the decoder's clock, so it waits for us.  ``overdue``
@@ -601,12 +693,17 @@ class App:
 
         painter = self._painters[0]
         top_painted = False
+        #: Whether the panel's pixels actually changed.  ``top_painted`` only
+        #: says the stage ran (a cache reuse counts), which is not the same thing
+        #: and cannot drive the "nothing moved, do not re-ship the frame" test.
+        top_repainted = False
         if not blocked:
             if due or self._top_cache is None:
                 if full:
                     self._paint_full(painter)
                 else:
                     self._paint_incremental(painter)
+                top_repainted = True
             else:
                 self._reuse(painter)
             top_painted = True
@@ -640,26 +737,41 @@ class App:
             # repainted every frame while one is running, or the blurb would
             # sit frozen at whatever offset the last repaint happened to use.
             strip_due = video_due or state_ready or self._marquee_active
-            if top_painted and not strip_due:
+            # The status bar carries a clock, so the frame has to be re-stamped
+            # when the minute turns even if nothing else moved.
+            stamp = time.strftime("%H:%M")
+            clock_due = stamp != self._last_clock
+            if top_repainted and not strip_due:
                 self._draw_overlays(painter)
                 status_bar(painter, dual=False)
                 self.platform.present(0)
-            else:
-                if not top_painted:
+                self._last_clock = stamp
+            elif top_repainted or strip_due or clock_due:
+                if not top_repainted:
                     # A guard rather than decoration: restoring a snapshot that
                     # was never taken is meaningless, so a missing cache has to
                     # be caught here and not just in the scheduling above.
                     if self._top_cache is not None:
                         painter.canvas.restore(self._top_cache)
                         self._draw_selection(painter, only=self._top_sel)
-                self._draw_detail_strip(painter)
-                self._cache_strip(painter)
+                    # Only the restore path paints the strip here: a full repaint
+                    # has already baked it into the cache (see _paint_full), and
+                    # drawing it a second time measured ~21 ms of a scroll frame.
+                    self._draw_detail_strip(painter)
+                    self._cache_strip(painter)
                 self._draw_overlays(painter)
                 status_bar(painter, dual=False)
                 self.platform.present(0)
+                self._last_clock = stamp
                 if state_ready:
                     # The debounced static content is now current.
                     self._strip_state_pending = False
+            # else: nothing changed this frame.  The canvas still holds exactly
+            # this frame's pixels, so re-stamping it, redrawing the strip and
+            # shipping another 8.8 MB again would cost ~20 ms for nothing --
+            # measured on the device as tobytes 9 ms + bridge 7 ms + overlays,
+            # on essentially every idle frame.  The clock above is the only
+            # thing that would have gone stale.
             self._bottom_at = now
             self._bottom_key = key
             self._bottom_seq = self._video.frame_seq
@@ -739,6 +851,11 @@ class App:
             self._prefetch_scope = scope
             self._prefetch_done.clear()
             self._cache_count = None
+        # Both halves wait for a pause.  The screens decode on demand when they
+        # need something now, so the warm-up is only ever *ahead* of the cursor:
+        # it shares this interpreter with the frame loop, and a decode held
+        # across a scroll starves it.  Starting after the pause also means the
+        # queue begins at the cursor instead of at wherever a scroll left it.
         active = (not self._launching
                   and session.view == VIEW_GAMES
                   and now - self._activity_at >= _PREFETCH_IDLE)
@@ -834,7 +951,7 @@ class App:
         only while the number can still change (the warm-up is running, or it
         has not been taken yet).
         """
-        if self._cache_count_running or not self.config.thumbnail_cache:
+        if self._cache_count_running or not self.library.caches_thumbnails:
             return
         writes = self.library.thumbnail_writes
         if (self._cache_count is not None and not self._prefetch_active
@@ -878,6 +995,10 @@ class App:
     def _enqueue_prefetch(self) -> None:
         """Hand the warm-up thread the games the cursor is most likely to
         reach next, nearest first."""
+        if not self.library.caches_thumbnails:
+            # Nothing is cached on this platform: the decoder lands on the
+            # requested size by itself (see Platform.caches_thumbnails).
+            return
         session = self.session
         games_list = session.games()
         if not games_list:
@@ -1070,26 +1191,22 @@ class App:
         """
         m = painter.metrics
         box = pad_box(m, single=single, height=painter.canvas.size[1])
-        avoid = self._media_box(m)
+        # No dodging: the d-pad is anchored to the left corner.  On a single
+        # screen the only media box is the detail panel's artwork slot -- the
+        # right-hand column on the game page (nowhere near the left) or the
+        # bottom strip's cover on the platform page (drawn on this canvas, under
+        # this overlay).  Dodging it shoved the d-pad a quarter of the way
+        # across the panel on the platform page, which is exactly what it must
+        # not do.
         opacity = self.config.virtual_pad_opacity
-        key = (box, opacity, avoid)
+        key = (box, opacity)
         if key != self._pad_key:
             self._pad_image, self._pad_hits = pad_bitmap(
-                m, box, opacity=opacity, avoid=avoid,
+                m, box, opacity=opacity,
                 platform=self.platform, translator=self.translator)
             self._pad_key = key
         painter.image(self._pad_image, box)
         painter.button_hits.extend(self._pad_hits)
-
-    def _media_box(self, m) -> tuple[int, int, int, int]:
-        """Where the clip is painted -- the box the pad's d-pad must keep off.
-
-        The clip is a native surface above this canvas (Android), so nothing we
-        draw can cover it; the pad moves instead.
-        """
-        if m.form is Form.DUAL:
-            return (m.u(12), m.bottom_title_h + m.body_padding, m.media_w, m.media_h)
-        return self._strip_art_box(m)
 
     def _pad_visible(self) -> bool:
         """Android's on-screen pad: only there, and only while enabled."""
@@ -1203,14 +1320,16 @@ class App:
         return first
 
     def _sync_side_detail(self) -> None:
-        """List and grid move the folded panel beside the rows.
+        """Single screen: the video + detail panel lives on the right.
 
-        Both views are row/cell shaped and read better with the full height;
-        the carousel is *about* its width, so it keeps the panel underneath
-        (DESIGN §11.3).  A no-op while the arrangement already matches, which is
-        every frame but the ones that follow a view change.
+        A single-screen phone runs one canvas; on the game page the video +
+        detail column moves to the right so the rows keep the full height, while
+        the platform page keeps its preview strip along the bottom.  Only ever
+        called for a single canvas -- a dual setup keeps its detail on the second
+        screen.  A no-op while the arrangement already matches, which is every
+        frame but the ones that follow a view change.
         """
-        want = self.session.layout in ("list", "grid")
+        want = self.session.view == VIEW_GAMES
         if self._painters[0].metrics.side_detail == want:
             return
         for painter in self._painters:

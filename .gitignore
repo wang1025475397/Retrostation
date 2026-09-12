@@ -31,3 +31,4 @@ screenshots-preview/
 # "make-vendor-archive" is how they travel; the Pillow half is regenerable with
 # the pip command in that script's docstring.
 vendor/
+generated-images/

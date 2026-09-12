@@ -81,6 +81,12 @@ class InputAction(str, enum.Enum):
     #: A finger landed and lifted at :attr:`InputEvent.x` / ``y``, in the
     #: coordinate space of :attr:`InputEvent.screen`'s canvas.
     TAP = "tap"
+    #: A finger touched down (``TOUCH_DOWN``) or lifted (``TOUCH_UP``) at
+    #: :attr:`InputEvent.x` / ``y``.  Not commands in themselves: the on-screen
+    #: pad uses them to start and stop *holding* a button, which is the only way
+    #: a press on a flat panel can repeat the way a real held key does.
+    TOUCH_DOWN = "touch_down"
+    TOUCH_UP = "touch_up"
     #: A finger is dragging: :attr:`InputEvent.dx` / ``dy`` carry the movement
     #: since the previous event, in canvas units.
     DRAG = "drag"

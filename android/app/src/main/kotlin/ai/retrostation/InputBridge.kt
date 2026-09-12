@@ -113,6 +113,11 @@ class InputBridge(
                 dragging = false
                 tracker?.recycle()
                 tracker = VelocityTracker.obtain().apply { addMovement(event) }
+                // The pad has to know a finger is *on* a button: a press held
+                // past the tap window used to emit nothing at all, so holding a
+                // direction did nothing at all.
+                emitTouch("touch_down", screen,
+                    x = (event.x / sx).toInt(), y = (event.y / sy).toInt())
             }
 
             MotionEvent.ACTION_MOVE -> {
@@ -130,12 +135,26 @@ class InputBridge(
             }
 
             MotionEvent.ACTION_UP -> {
+                // Release first: it stops the pad repeating, and the tap that may
+                // follow is the one that press already accounted for.
+                emitTouch("touch_up", screen,
+                    x = (event.x / sx).toInt(), y = (event.y / sy).toInt(),
+                    kind = "release")
                 if (!dragging && event.eventTime - downAt <= TAP_MAX_MS) {
                     emitTouch("tap", screen,
                         x = (event.x / sx).toInt(), y = (event.y / sy).toInt())
                 } else if (dragging) {
-                    trackVelocity(event)?.let { vy ->
-                        if (abs(vy) > FLING_MIN_VX) {
+                    trackVelocity(event)?.let { (vx, vy) ->
+                        // Whichever axis the finger was actually travelling
+                        // along.  The platform row and the game carousel are
+                        // rows of cards, so their swipe is sideways -- measuring
+                        // only yVelocity made those a no-op.
+                        if (abs(vx) > abs(vy)) {
+                            if (abs(vx) > FLING_MIN_VX) {
+                                emitGesture("fling", screen,
+                                    dx = (vx / 1000f * FLING_SECONDS / sx).toInt())
+                            }
+                        } else if (abs(vy) > FLING_MIN_VX) {
                             emitGesture("fling", screen,
                                 dy = (vy / 1000f * FLING_SECONDS / sy).toInt())
                         }
@@ -153,11 +172,12 @@ class InputBridge(
         return true
     }
 
-    private fun trackVelocity(event: MotionEvent): Float? {
+    /** The finger's velocity on both axes, in physical px per second. */
+    private fun trackVelocity(event: MotionEvent): Pair<Float, Float>? {
         val t = tracker ?: return null
         t.addMovement(event)
         t.computeCurrentVelocity(1000) // px per second
-        return t.yVelocity
+        return t.xVelocity to t.yVelocity
     }
 
     // -- drain ---------------------------------------------------------------- //
@@ -194,9 +214,10 @@ class InputBridge(
         push(mapOf("action" to action, "kind" to kind))
     }
 
-    private fun emitTouch(action: String, screen: Int, x: Int, y: Int) {
+    private fun emitTouch(action: String, screen: Int, x: Int, y: Int,
+                          kind: String = "press") {
         push(mapOf(
-            "action" to action, "kind" to "press",
+            "action" to action, "kind" to kind,
             "screen" to screen, "x" to x, "y" to y,
         ))
     }

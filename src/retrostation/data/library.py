@@ -85,10 +85,14 @@ class Library:
         self._lock = threading.RLock()
         self._roms: dict[str, list[Rom]] = {}
         self._systems: dict[str, SystemLibrary] = {}
+        #: Platforms that decode thumbnails at the requested size natively
+        #: (Android) also say the card cache is not worth building -- see
+        #: ``Platform.caches_thumbnails``.
         self._thumbnails = ThumbnailCache(
             platform,
             platform.config_dir / "thumbnails",
-            enabled=config.thumbnail_cache,
+            enabled=config.thumbnail_cache
+            and getattr(platform, "caches_thumbnails", True),
         )
         self.last_scan: ScanResult | None = None
 
@@ -358,6 +362,43 @@ class Library:
         if source is None:
             return None
         return self._thumbnails.get(kind, source, width, height, cover=cover)
+
+    def thumbnail_cached(self, kind: str, game: Game, width: int, height: int,
+                         *, cover: bool = False):
+        """The scaled bitmap only if it is already cached; never decodes.
+
+        What the frame loop uses: a miss costs a placeholder for a frame or two
+        while the warm thread decodes, where decoding inline costs ~55 ms -- most
+        of two frames -- and is what made fast scrolling hitch.
+        """
+        source = game.asset(kind)
+        if source is None:
+            return None
+        return self._thumbnails.get_cached(source, width, height, cover=cover)
+
+    @property
+    def thumbnail_epoch(self) -> int:
+        """Counts artwork that has entered the memory cache; see ``thumbnail_cached``."""
+        return self._thumbnails.epoch
+
+    @property
+    def caches_thumbnails(self) -> bool:
+        """Whether the on-card thumbnail cache exists at all.
+
+        False on platforms that decode artwork at the requested size natively:
+        there is nothing to warm, nothing to write and nothing to count, so the
+        frame loop skips all three.
+        """
+        return self._thumbnails.enabled
+
+    @property
+    def thumbnail_warm_enabled(self) -> bool:
+        """Whether a warm-up can ever produce artwork (see ``thumbnail_cached``).
+
+        False only when the cache is switched off, in which case a miss would
+        stay a miss forever and the caller has to decode it itself.
+        """
+        return self._thumbnails.enabled
 
     def count_cached_games(self, games, slots) -> int:
         """How many of ``games`` already have every slot on the card.

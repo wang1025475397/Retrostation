@@ -18,6 +18,18 @@ class FrameBridge(
     /** Set when the host is tearing the frontend down; pushes are dropped. */
     @Volatile private var closed = false
 
+    /**
+     * Two bitmaps per surface, filled alternately.
+     *
+     * A fresh ``Bitmap.createBitmap`` per push allocated ~8.8 MB at the phone's
+     * logical size and we push at the frame rate: ~265 MB/s of Java-heap churn,
+     * which showed up as the carousel hitching every few frames while the GC
+     * caught up.  Reusing a pair removes the allocation, and alternating keeps
+     * the UI thread reading the buffer we are not writing (no tearing).
+     */
+    private val pool = Array(logical.size) { arrayOfNulls<Bitmap>(2) }
+    private val cursor = IntArray(logical.size)
+
     fun close() {
         closed = true
     }
@@ -26,7 +38,13 @@ class FrameBridge(
         if (closed || index !in surfaces.indices) return
         val (lw, lh) = logical[index]
         if (rgba.size != lw * lh * 4) return // size mismatch: ignore rather than crash
-        val bmp = Bitmap.createBitmap(lw, lh, Bitmap.Config.ARGB_8888)
+        val slot = cursor[index] and 1
+        cursor[index] = slot + 1
+        var bmp = pool[index][slot]
+        if (bmp == null || bmp.width != lw || bmp.height != lh) {
+            bmp = Bitmap.createBitmap(lw, lh, Bitmap.Config.ARGB_8888)
+            pool[index][slot] = bmp
+        }
         bmp.copyPixelsFromBuffer(ByteBuffer.wrap(rgba))
         surfaces[index].setBitmap(bmp)
     }

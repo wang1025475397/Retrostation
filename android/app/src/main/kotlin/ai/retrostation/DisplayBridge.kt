@@ -57,9 +57,14 @@ class DisplayBridge(private val context: Context) {
             return sizes
         }
 
-        // Single physical panel: split by orientation.
+        // Single physical panel: default to ONE full-screen canvas (single-screen
+        // mode) -- the detail folds into a right-hand column on the game page and
+        // a bottom strip on the platform page, which is what the phone is expected
+        // to look like.  ``dual`` still asks for the handheld-style split into two
+        // stacked canvases (content on top, detail/preview below), kept for anyone
+        // who prefers the emulated dual-screen model.
         val (pw, ph) = primary
-        if (mode != "single" && ph > pw) {
+        if (mode == "dual") {
             val topH = (ph * PORTRAIT_TOP_SHARE).toInt()
             return listOf(logicalSize(pw to topH), logicalSize(pw to (ph - topH)))
         }
@@ -73,17 +78,18 @@ class DisplayBridge(private val context: Context) {
         const val PORTRAIT_TOP_SHARE = 0.56
     }
 
-    /** Mirror of `display.logical_size` (DESIGN.ANDROID §4.1).  0.7 MP budget,
-     *  aligned to 4 px, clamped to [480, 1280].  Keep in sync with the Python side. */
-    private fun logicalSize(physical: Pair<Int, Int>): Pair<Int, Int> {
+    /** Mirror of `display.logical_size` (DESIGN.ANDROID §4.1).  2.2 MP budget,
+     *  aligned to 4 px, clamped to [640, 2400].  Larger logical canvas shrinks the
+     *  GPU upscale and kills "毛边"; keep in sync with the Python side. */
+    internal fun logicalSize(physical: Pair<Int, Int>): Pair<Int, Int> {
         val (pw, ph) = physical
-        val targetPx = 0.7 * 1_000_000.0
+        val targetPx = 2.2 * 1_000_000.0
         val ratio = pw.toDouble() / ph
         val lh = kotlin.math.sqrt(targetPx / ratio)
         val lw = lh * ratio
         fun snap(v: Double): Int {
             val s = kotlin.math.round(v / 4.0) * 4.0
-            return s.toInt().coerceIn(480, 1280)
+            return s.toInt().coerceIn(640, 2400)
         }
         return snap(lw) to snap(lh)
     }
