@@ -159,12 +159,15 @@ class TestButtonMapping:
         #   HIDE              desktop keymap only (the handheld hides from the menu)
         #   CHAR              a typed character, not a button
         #   TAP/DRAG/FLING    touch, only from platforms with a touchscreen
+        #   TOUCH_DOWN/UP     the touch layer's own bookkeeping, not a command
         not_buttons = {
             InputAction.HIDE,
             InputAction.CHAR,
             InputAction.TAP,
             InputAction.DRAG,
             InputAction.FLING,
+            InputAction.TOUCH_DOWN,
+            InputAction.TOUCH_UP,
         }
         reachable = set(DEFAULT_KEYMAP.values()) | {
             side for pair in HAT_AXES.values() for side in pair

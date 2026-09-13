@@ -50,6 +50,11 @@ android {
         versionCode = pkgVersionCode
         versionName = pkgVersionName
 
+        // Instrumented tests (`gradlew :app:connectedDebugAndroidTest`) drive the
+        // parts of the bridge that only exist on a device: the display probe, the
+        // logical-canvas maths and the ROM-folder URI mapping (DESIGN.ANDROID §8.3).
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
         ndk {
             // Ship only 64-bit: the 16 KB page devices are all arm64.
             abiFilters += listOf("arm64-v8a")
@@ -126,4 +131,9 @@ dependencies {
     implementation("androidx.core:core-ktx:1.13.1")
     // Video preview: ExoPlayer renders into its own surface under the UI frame.
     implementation("androidx.media3:media3-exoplayer:1.4.1")
+
+    // Instrumented tests.  The bridges they cover need no Python runtime, so the
+    // test APK stays free of Chaquopy.
+    androidTestImplementation("androidx.test.ext:junit:1.2.1")
+    androidTestImplementation("androidx.test:runner:1.6.2")
 }

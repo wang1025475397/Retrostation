@@ -123,13 +123,18 @@ class TestThumbnailCache:
         assert len(list((source.parent / ".cache").iterdir())) == 1
 
     def test_memory_is_bounded(self, platform, rom_root: Path) -> None:
+        from retrostation.data import media
         from retrostation.data.media import ThumbnailCache
 
         source = rom_root / "FC" / "Imgs" / "魂斗罗.png"
         cache = ThumbnailCache(platform, rom_root / ".thumbs")
-        for width in range(60, 140):
+        # The bound itself is a design choice (a screen's working set, not a
+        # handful) -- what must hold is that it *is* a bound: past it the oldest
+        # bitmaps go, or a long browse would hold every cover ever drawn.
+        limit = media._MEMORY_LIMIT  # noqa: SLF001 - the LRU's own bound
+        for width in range(60, 60 + limit + 10):
             cache.get("cover", source, width, 30)
-        assert len(cache._memory) <= 40  # noqa: SLF001 - testing the LRU itself
+        assert len(cache._memory) == limit  # noqa: SLF001 - testing the LRU itself
 
     def test_missing_source_is_none(self, platform, rom_root: Path) -> None:
         from retrostation.data.media import ThumbnailCache

@@ -35,11 +35,14 @@ class TestMetricsAtReferenceSize:
         assert metrics.rows_per_page(single=True) == 6
 
     def test_grid(self, metrics: Metrics) -> None:
-        assert metrics.grid_cols == 4
+        # Five columns per reference width (was four): the count adapts to the
+        # panel, and the row count is derived from the height rather than fixed
+        # at 2/3, so a wide screen fills its width instead of leaving fat gaps.
+        assert metrics.grid_cols == 5
         assert metrics.grid_rows() == 3
         assert metrics.grid_rows(single=True) == 2
-        assert metrics.items_per_grid_page() == 12
-        assert metrics.items_per_grid_page(single=True) == 8
+        assert metrics.items_per_grid_page() == 15
+        assert metrics.items_per_grid_page(single=True) == 10
 
     def test_carousel(self, metrics: Metrics) -> None:
         assert metrics.carousel_card_h() == 272
@@ -67,15 +70,16 @@ class TestMetricsElsewhere:
         metrics = metrics_for(1920, 1080)
         assert metrics.scale == pytest.approx(2.25)
         assert metrics.status_h == 63
-        # Columns stay sane instead of exploding on a wide screen.
-        assert 3 <= metrics.grid_cols <= 6
+        # Columns scale with the width but stop at the ceiling (eight) instead of
+        # exploding on a wide screen.
+        assert 4 <= metrics.grid_cols <= 8
 
     def test_tall_phone_screen(self) -> None:
         metrics = metrics_for(1080, 2400)
         # Everything scales from the width, so chrome stays proportionate.
         assert metrics.status_h == round(28 * 1.6875)
         assert metrics.content_h() > 0
-        assert 3 <= metrics.grid_cols <= 6
+        assert 4 <= metrics.grid_cols <= 8
 
     def test_every_dimension_is_positive(self) -> None:
         for width, height in ((320, 240), (640, 480), (1280, 720), (1080, 2400)):

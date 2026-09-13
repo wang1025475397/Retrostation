@@ -55,10 +55,16 @@ class TestSingleScreen:
 
         It is decoded at the strip's own slot size, not at
         ``bottom.media_inner_size``: 288x216 down to 160x98 would cost a resize
-        every frame for nothing.
+        every frame for nothing.  The column has to be unfolded on the game page
+        first -- a folded one has nowhere to play, so the decoder is parked.
         """
         app, platform = pair
         app.run(max_frames=2)
+        assert app._video.enabled is False           # folded: no panel to play in
+        platform.send(InputEvent(InputAction.A))     # into a system
+        app.run(max_frames=1)
+        app._toggle_detail()                         # the fold tab, one tap
+        app.run(max_frames=1)
         assert app._video.enabled is True
         box = app._strip_art_box(metrics_for(640, 480, Form.COMPACT))
         assert (app._video._settings.width, app._video._settings.height) == (box[2], box[3])
@@ -152,12 +158,13 @@ class TestSingleScreen:
         assert len(set(strip.getdata())) > 3, "the top cache does not carry the strip"
 
     def test_the_cached_panel_keeps_the_latest_strip(self, pair) -> None:
-        """A restore must bring back the strip as it is *now*.
+        """A restore must bring back the strip as it is *now*, not as it was baked.
 
         The strip is baked into the cached panel, but it changes on every clip
-        frame while the panel is only recached on a full repaint.  Without
-        syncing the two, a restore resurrected the stale copy -- the cover, or
-        an empty slot -- so the strip alternated between it and the live frame.
+        frame while the panel is only recached on a full repaint.  The reuse path
+        therefore repaints the strip and re-bakes it (the comment in ``App.run``
+        says why only that path draws it); without that, a restore resurrected
+        the stale copy, so the strip alternated between it and the live frame.
         """
         app, platform = pair
         app.run(max_frames=1)
@@ -165,16 +172,24 @@ class TestSingleScreen:
         app.run(max_frames=1)
 
         metrics = metrics_for(640, 480, Form.COMPACT)
-        top = metrics.content_top + metrics.content_h(single=True)
-        box = (0, top, 640, top + metrics.strip_h)
-
+        x, y, w, h = metrics.detail_box()
         painter = app._painters[0]
-        painter.rect(box, fill=(255, 0, 0, 255))     # nothing else in the panel is red
+
+        # A stale copy in the cache: the panel was baked while this was on it.
+        painter.rect((x, y, w, h), fill=(255, 0, 0, 255))  # nothing else is red
+        app._cache_strip(painter)
+
+        # A reuse frame: the cache comes back, and the strip is repainted and
+        # re-baked as it is now (this is the sequence App.run drives).
+        app._reuse(painter)
+        app._draw_detail_strip(painter)
         app._cache_strip(painter)
 
         painter.clear()
         app._reuse(painter)
-        assert painter.canvas.pil_image.crop(box).getpixel((5, 5))[:3] == (255, 0, 0)
+        strip = painter.canvas.pil_image.crop((x, y, x + w, y + h))
+        assert strip.getpixel((5, 5))[:3] != (255, 0, 0), "the stale strip came back"
+        assert len(set(strip.getdata())) > 3, "the strip came back empty"
 
     def test_quitting_works(self, pair) -> None:
         app, platform = pair

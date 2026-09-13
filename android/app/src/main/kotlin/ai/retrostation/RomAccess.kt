@@ -101,7 +101,12 @@ object RomAccess {
             return null
         }
         val rest = relative.removePrefix(inside).trimStart('/')
-        return DocumentsContract.buildDocumentUriUsingTree(tree, "$treeId/$rest")
+        // The tree's own document id when the path *is* the authorised folder:
+        // "primary:Roms/" is not an id the provider knows, so the trailing slash
+        // has to go (the ROM itself is never the folder, but the mapping is also
+        // asked for the card's root -- see the settings row).
+        val documentId = if (rest.isEmpty()) treeId else "$treeId/$rest"
+        return DocumentsContract.buildDocumentUriUsingTree(tree, documentId)
     }
 
     /**

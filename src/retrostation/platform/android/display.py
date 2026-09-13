@@ -15,9 +15,8 @@ from ...core.theme import Form
 
 #: Rendering budget in megapixels.  Python paints to a *logical* canvas and the
 #: GPU upscales for free (DESIGN.ANDROID §4.1).  The upscale factor is what makes
-#: text / rounded-corner edges look jaggy ("毛边"): a 0.7 MP budget on a 1080x2400
-#: phone yields a ~560x1248 logical canvas, a ~2x stretch.  Bump this toward the
-#: physical pixel count for crisp edges.
+#: text / rounded-corner edges look jaggy ("毛边"): at 1.5 MP a 1080x2400 phone
+#: gets a ~820x1824 logical canvas, a ~1.3x stretch.
 #:
 #: The cost is proportional, though, and it is paid more than once a frame: the
 #: canvas is restored, repainted, copied out of Python and copied into a bitmap,
@@ -46,9 +45,9 @@ def logical_size(
     """Map a physical display size to a logical canvas size.
 
     >>> logical_size(1080, 2400)          # phone portrait
-    (996, 2212)
+    (820, 1824)
     >>> logical_size(1920, 1080)          # Thor top, 16:9
-    (1768, 994)
+    (1632, 920)
     """
     if physical_w <= 0 or physical_h <= 0:
         raise ValueError(f"invalid physical size {physical_w}x{physical_h}")
