@@ -19,6 +19,7 @@ from PIL import Image
 from ...core.theme import BASE_H, BASE_W, metrics_for
 from ...launcher.launch import write_launch_cmd
 from ..base import AudioPipe, Canvas, FileEntry, InputEvent, Platform, VideoPipe
+from ..targets import ArgvTarget, LaunchTarget, UnsupportedTarget
 from .canvas import PilCanvas, save_bitmap
 from .display import SDLDisplay
 from .fonts import FontBook
@@ -243,7 +244,7 @@ class LinuxPlatform(Platform):
 
     # -- launching -------------------------------------------------------- #
 
-    def launch_game(self, argv: Sequence[str]) -> None:
+    def launch_game(self, target: LaunchTarget) -> None:
         """Queue the command for the bootstrap instead of exec'ing it.
 
         This used to ``os.execv`` straight into the emulator, which handed the
@@ -253,11 +254,24 @@ class LinuxPlatform(Platform):
         intact -- the app unwinds, exits 42, and only then does the game start
         (DESIGN §8.2).  Releasing the display is :meth:`App.run`'s job.
         """
-        args = [str(a) for a in argv]
-        if not args:
-            raise ValueError("launch_game() needs a command")
+        if not isinstance(target, ArgvTarget):
+            # This firmware starts games by running a command; an intent or a
+            # hosted core has no meaning here.
+            raise UnsupportedTarget(self.name, target)
+        args = [str(a) for a in target.argv]
         write_launch_cmd(args, self.launch_cmd_path)
         log.info("queued launch: %s", " ".join(args))
+
+    def run_foreground(self, target: LaunchTarget) -> int | None:
+        """Run the game and wait for it (resident path, DESIGN §8.2 fast path).
+
+        The display is already hidden by the caller; this only owns the child
+        process.  ``OSError`` is left to the caller: it is the one that knows
+        how to tell the player, and it must restore the display either way.
+        """
+        if not isinstance(target, ArgvTarget):
+            raise UnsupportedTarget(self.name, target)
+        return subprocess.run(list(target.argv)).returncode
 
     # -- fonts / media ---------------------------------------------------- #
 

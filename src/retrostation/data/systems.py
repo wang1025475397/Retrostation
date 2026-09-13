@@ -129,6 +129,13 @@ _SYSTEMS: tuple[SystemDef, ...] = (
     # -- Sony ------------------------------------------------------------ #
     SystemDef("ps", "PlayStation", "PlayStation", ("bin", "cue", "pbp", "chd", "iso", "img", "m3u", "ccd"),
               core="pcsx_rearmed_libretro.so", order=21),
+    # ``psx`` is a very common directory name for it (ES-DE's spelling, and what
+    # cards copied from the handheld use), so a tree laid out that way must not
+    # fall through to "unknown system" and report "no emulator on Android".  It
+    # is not ``hidden``: the scanner skips hidden systems outright, and the whole
+    # point of this entry is that a card spelling it ``psx`` keeps its platform.
+    SystemDef("psx", "PlayStation", "PlayStation", ("bin", "cue", "pbp", "chd", "iso", "img", "m3u", "ccd"),
+              core="pcsx_rearmed_libretro.so", order=21),
     SystemDef("ps1", "PlayStation", "PlayStation", ("bin", "cue", "pbp", "chd", "iso"),
               core="pcsx_rearmed_libretro.so", hidden=True),
     SystemDef("psp", "PSP", "PSP", ("iso", "cso", "pbp"),
@@ -237,6 +244,21 @@ def _base_token(key: str) -> str:
     """
     head = key.split()[0] if key.split() else key
     return head.casefold()
+
+
+def canonical_key(key: str) -> str:
+    """The table's own (lower-case) key for a directory spelling.
+
+    ``lookup`` deliberately keeps the directory's spelling on the definition it
+    returns -- the UI shows it, and firmware directories are UPPER CASE -- so a
+    caller that has to *match* a table key (rather than display one) folds it back
+    here: ``"NDS"`` -> ``"nds"``.  A ``"<system> <variant>"`` directory folds to
+    its base system, the same one whose artwork and core it borrows.
+    """
+    definition = SYSTEMS.get(key) or SYSTEMS.get(key.casefold())
+    if definition is not None and definition.key:
+        return definition.key.casefold()
+    return _base_token(key)
 
 
 def is_variant(key: str) -> bool:

@@ -1,3 +1,9 @@
+# IDE
+.idea/
+
+# Throwaway probes from a debugging session (screens, tars, commit messages)
+.tmp-*
+
 # generated artifacts
 __pycache__/
 *.pyc
@@ -25,3 +31,5 @@ screenshots-preview/
 # "make-vendor-archive" is how they travel; the Pillow half is regenerable with
 # the pip command in that script's docstring.
 vendor/
+generated-images/
+prototype/android/

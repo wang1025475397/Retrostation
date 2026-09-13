@@ -6,7 +6,7 @@ import pytest
 
 from retrostation.core import theme
 from retrostation.core.i18n import Translator
-from retrostation.core.theme import Colors, Metrics, metrics_for
+from retrostation.core.theme import Colors, Form, Metrics, metrics_for
 
 
 class TestMetricsAtReferenceSize:
@@ -35,11 +35,14 @@ class TestMetricsAtReferenceSize:
         assert metrics.rows_per_page(single=True) == 6
 
     def test_grid(self, metrics: Metrics) -> None:
-        assert metrics.grid_cols == 4
+        # Five columns per reference width (was four): the count adapts to the
+        # panel, and the row count is derived from the height rather than fixed
+        # at 2/3, so a wide screen fills its width instead of leaving fat gaps.
+        assert metrics.grid_cols == 5
         assert metrics.grid_rows() == 3
         assert metrics.grid_rows(single=True) == 2
-        assert metrics.items_per_grid_page() == 12
-        assert metrics.items_per_grid_page(single=True) == 8
+        assert metrics.items_per_grid_page() == 15
+        assert metrics.items_per_grid_page(single=True) == 10
 
     def test_carousel(self, metrics: Metrics) -> None:
         assert metrics.carousel_card_h() == 272
@@ -67,15 +70,16 @@ class TestMetricsElsewhere:
         metrics = metrics_for(1920, 1080)
         assert metrics.scale == pytest.approx(2.25)
         assert metrics.status_h == 63
-        # Columns stay sane instead of exploding on a wide screen.
-        assert 3 <= metrics.grid_cols <= 6
+        # Columns scale with the width but stop at the ceiling (eight) instead of
+        # exploding on a wide screen.
+        assert 4 <= metrics.grid_cols <= 8
 
     def test_tall_phone_screen(self) -> None:
         metrics = metrics_for(1080, 2400)
         # Everything scales from the width, so chrome stays proportionate.
         assert metrics.status_h == round(28 * 1.6875)
         assert metrics.content_h() > 0
-        assert 3 <= metrics.grid_cols <= 6
+        assert 4 <= metrics.grid_cols <= 8
 
     def test_every_dimension_is_positive(self) -> None:
         for width, height in ((320, 240), (640, 480), (1280, 720), (1080, 2400)):
@@ -91,6 +95,50 @@ class TestMetricsElsewhere:
     def test_bottom_columns_leave_room_for_gap(self) -> None:
         metrics = metrics_for(640, 480)
         assert metrics.media_w + metrics.meta_w < 640
+
+
+class TestForms:
+    """The detail view's arrangement, per screen form (DESIGN.ANDROID §5.5)."""
+
+    def test_dual_reserves_nothing_because_the_other_panel_is_the_detail(self) -> None:
+        metrics = metrics_for(640, 480, Form.DUAL)
+        assert metrics.is_single is False
+        # Content gets everything the chrome leaves; no strip is folded in.
+        assert metrics.content_h() == 480 - (28 + 44 + 30)
+        # The "detail box" is the whole panel: that is what bottom.py paints.
+        assert metrics.detail_box() == (0, 0, 640, 480)
+
+    def test_compact_keeps_the_measured_handheld_strip(self) -> None:
+        """The regression guard for this refactor: 118px, exactly as before."""
+        metrics = metrics_for(640, 480, Form.COMPACT)
+        assert metrics.is_single is True
+        assert metrics.strip_h == 118
+        x, y, w, h = metrics.detail_box()
+        assert (x, w, h) == (8, 640 - 16, 118)
+        assert y == metrics.content_top + metrics.content_h(single=True)
+
+    def test_portrait_takes_a_share_of_the_height_instead(self) -> None:
+        """118 reference px would be a sliver on a 20:9 phone."""
+        metrics = metrics_for(1080, 2400, Form.PORTRAIT)
+        assert metrics.strip_h == round(2400 * 0.40)
+        # And it must not eat the content area whole.
+        assert metrics.content_h() > 0
+
+    def test_single_defaults_to_what_the_form_implies(self) -> None:
+        """Callers written before forms existed pass ``single=`` explicitly;
+        new ones may leave it out and get the same answer."""
+        compact = metrics_for(640, 480, Form.COMPACT)
+        assert compact.content_h() == compact.content_h(single=True)
+        assert compact.grid_rows() == compact.grid_rows(single=True) == 2
+
+        dual = metrics_for(640, 480, Form.DUAL)
+        assert dual.content_h() == dual.content_h(single=False)
+        assert dual.grid_rows() == 3
+
+    def test_an_explicit_single_still_overrides_the_form(self) -> None:
+        """``_paint_full`` bakes the strip using ``single=True`` on a dual panel."""
+        dual = metrics_for(640, 480, Form.DUAL)
+        assert dual.content_h(single=True) < dual.content_h(single=False)
 
 
 class TestColors:

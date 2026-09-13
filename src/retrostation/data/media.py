@@ -480,6 +480,13 @@ def _copy_digest(source: Path, mtime: int) -> str:
     return hashlib.sha1(f"{source}|{mtime}".encode("utf-8")).hexdigest()[:16]
 
 
+#: Bitmaps held in the memory cache.  Sized for the *working set* of a screen
+#: rather than a bare handful: one game contributes a size per layout slot, so
+#: a grid page alone can want twenty entries, and evicting art the current page
+#: is still drawing is what turns into a placeholder that never comes back.
+_MEMORY_LIMIT = 160
+
+
 #: One thumbnail: ``<16 hex>_<width>x<height>[c]``.  Parsed back by
 #: :meth:`ThumbnailCache.prune` to decide whether a source still claims it.
 _ENTRY_RE = re.compile(r"([0-9a-f]{16})_(\d+)x(\d+)(c?)\Z")
@@ -501,6 +508,11 @@ class ThumbnailCache:
         self._enabled = enabled
         self._memory: dict[tuple[str, int, int, int], object] = {}
         self._memory_order: list[tuple[str, int, int, int]] = []
+        #: Bumped every time a bitmap enters the memory cache.  The frame loop
+        #: draws only what is already cached (see :meth:`get_cached`), so this is
+        #: how it notices that the warm thread has made something available and
+        #: the panel is worth repainting.
+        self._epoch = 0
         self._dirs: set[Path] = set()
         self._stats: dict[str, tuple[float, int, bool]] = {}
         #: Cache entries we could not read *and* could not delete, with the
@@ -589,6 +601,50 @@ class ThumbnailCache:
         self._remember(key, bitmap)
         return bitmap
 
+    def get_cached(self, source: Path, width: int, height: int,
+                   *, cover: bool = False) -> object | None:
+        """The bitmap if it is already cached, else ``None``.
+
+        The frame loop goes through here.  It never touches the *original* -- a
+        cold decode is ~55 ms, most of two frame budgets -- but an entry that
+        merely fell out of the memory LRU is read back from the card, which is a
+        few milliseconds and keeps the screen from showing a placeholder for
+        artwork that has already been made once.  A real miss means the caller
+        draws the empty plate for a frame or two while the warm thread works
+        (see :meth:`warm`).
+        """
+        mtime, exists = self._stat(source)
+        if not exists:
+            return None
+        key = (str(source), width, height, mtime, cover)
+        bitmap = self._memory.get(key)
+        if bitmap is not None:
+            return bitmap
+        if getattr(self._platform, "load_thumbnail", None) is not None:
+            # This platform decodes straight to the requested size (see
+            # AndroidPlatform.load_thumbnail), which costs about what re-opening
+            # a cached PNG off the card would -- and the card here is FUSE, one
+            # directory per game.  Skip the round trip and let it decode.
+            return None
+        disk = self._disk_path(source, width, height, mtime, cover=cover)
+        if disk is None or not disk.is_file():
+            return None
+        bitmap = self._load_disk(disk)
+        if bitmap is not None:
+            self._remember(key, bitmap)
+        return bitmap
+
+    def _load_disk(self, disk: Path) -> object | None:
+        """Bring a thumbnail that is already on the card back into memory."""
+        if not self._usable(disk):
+            return None
+        try:
+            return self._platform.load_image(disk)
+        except _DECODE_ERRORS:
+            log.debug("unreadable thumbnail %s, regenerating", disk, exc_info=True)
+            self._discard(disk)
+            return None
+
     def cached(self, source: Path, width: int, height: int, *, cover: bool = False) -> bool:
         """Whether this exact size is already on the card (or in memory).
 
@@ -607,6 +663,17 @@ class ThumbnailCache:
 
     def _decode(self, source: Path, width: int, height: int, mtime: int,
                 *, cover: bool = False) -> object | None:
+        native = getattr(self._platform, "load_thumbnail", None)
+        if native is not None:
+            # Platforms whose decoder lands straight on the target size (see
+            # ``AndroidPlatform.load_thumbnail``) skip every layer below: a few
+            # milliseconds, no full-size decode, no card cache, nothing to scale.
+            # A ``None`` means the host could not read the file at all, so the
+            # Pillow path is still tried before giving up.
+            bitmap = native(source, width, height, cover=cover)
+            if bitmap is not None:
+                return bitmap
+
         disk = self._disk_path(source, width, height, mtime, cover=cover)
         if disk is not None and disk.is_file() and self._usable(disk):
             try:
@@ -806,12 +873,23 @@ class ThumbnailCache:
             if (str(path), width, height, mtime, cover) in self._memory:
                 continue
             disk = self._disk_path(path, width, height, mtime, cover=cover)
-            # Already on the card: the point of the warm-up is to spare the
-            # frame that would have decoded it, and that frame will hit.
-            if disk is None or disk.is_file():
+            if disk is None:
                 continue
             todo.append((width, height, cover, disk))
         if not todo:
+            return
+
+        # Entries already on the card only have to come back into memory -- the
+        # frame loop sees nothing until they do.  The original is read only for
+        # the sizes that still have to be made, so a warm-up of nothing but
+        # cached sizes never touches the full-size artwork.
+        missing = [item for item in todo if not item[3].is_file()]
+        for width, height, cover, disk in todo:
+            if disk.is_file():
+                bitmap = self._load_disk(disk)
+                if bitmap is not None:
+                    self._remember((str(path), width, height, mtime, cover), bitmap)
+        if not missing:
             return
 
         try:
@@ -827,7 +905,7 @@ class ThumbnailCache:
             except _DECODE_ERRORS:
                 return
 
-        for width, height, cover, disk in todo:
+        for width, height, cover, disk in missing:
             if not self._enabled:
                 return
             scaled = (cover_bitmap(original, width, height) if cover
@@ -840,6 +918,7 @@ class ThumbnailCache:
                 self._write(disk, scaled)
             except Exception:  # noqa: BLE001 - see above
                 log.debug("could not write warmed thumbnail %s", disk, exc_info=True)
+            self._remember((str(path), width, height, mtime, cover), scaled)
 
     # ------------------------------------------------------------------ #
     # Pruning
@@ -991,12 +1070,27 @@ class ThumbnailCache:
         """Entries written to the card so far (approximate; read from a thread)."""
         return self._writes
 
+    @property
+    def epoch(self) -> int:
+        """How many bitmaps have entered the memory cache (see :meth:`get_cached`)."""
+        return self._epoch
+
+    @property
+    def enabled(self) -> bool:
+        """Whether the cache is on at all.  Off means nothing is ever warmed."""
+        return self._enabled
+
     # -- memory LRU ------------------------------------------------------- #
 
     def _remember(self, key: tuple[str, int, int, int], bitmap: object) -> None:
-        limit = 40
+        # A screen asks for several sizes per game (list, grid, carousel, banner,
+        # strip), so 40 entries held barely six games and the LRU threw away art
+        # the same page was still drawing.  Thumbnails are small; hold a page or
+        # two of them instead.
+        limit = _MEMORY_LIMIT
         self._memory[key] = bitmap
         self._memory_order.append(key)
+        self._epoch += 1
         while len(self._memory_order) > limit:
             oldest = self._memory_order.pop(0)
             self._memory.pop(oldest, None)

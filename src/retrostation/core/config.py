@@ -161,6 +161,11 @@ class Config:
     theme: str = "amber"
     theme_variant: str = "dark"
     show_status_bar: bool = True
+    #: Show the on-screen pad.  Android only -- a player with a real gamepad
+    #: wants it gone, and ``virtual_pad_opacity`` fades it when it stays.
+    virtual_pad: bool = True
+    #: Pad opacity, 0-100.  100 is solid; lower lets the list show through.
+    virtual_pad_opacity: int = 65
     bottom_refresh_ms: int = 90
     thumbnail_cache: bool = True
 

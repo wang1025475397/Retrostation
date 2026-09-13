@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from ..art import ArtProvider
 from ..painter import Painter
 from ..widgets import button_bar, page_header
-from ...core.theme import COLORS
+from ...core.theme import COLORS, is_android_skin
 from .games import cover_art
 
 @dataclass(frozen=True)
@@ -100,7 +100,9 @@ def _carousel(painter: Painter, art: ArtProvider, tiles: list[Tile], index: int)
         else:
             box = (x, m.platform_top, card_w, card_h)
             outline = COLORS.border
-        painter.rounded_rect(box, radius=m.u(10), fill=COLORS.panel, outline=outline)
+        painter.rounded_rect(box, radius=m.card_radius, fill=COLORS.panel,
+                             outline=outline,
+                             width=2 if is_android_skin() else 1)
 
         _card_art(painter, art, tile, (box[0] + 1, box[1] + 1, box[2] - 2, box[3] - 2))
 
@@ -114,8 +116,14 @@ def _card_art(painter: Painter, art: ArtProvider, tile: Tile,
     logo_h = m.platform_logo_h
 
     # Square and centred horizontally: the selected card is wider than the
-    # others, and stretching the background to fill it would distort it.
-    art_box = (x + (w - art_side) // 2, y, art_side, art_side)
+    # others, and stretching the background to fill it would distort it.  Never
+    # wider than the card itself, or the narrower cards show the art spilling
+    # out of their frame.
+    art_side = max(0, min(art_side, w))
+    # Nudged down a hair: flush with the frame's top edge the artwork read as
+    # riding high (the frame's optical centre sits above the square's).  ~5 px on
+    # the panel, which is what ``u(4)`` comes to at this scale.
+    art_box = (x + (w - art_side) // 2, y + m.u(4), art_side, art_side)
     background = art.platform_background(tile.key, art_side, art_side)
     logo = art.platform_logo(tile.key, w - m.u(10), logo_h)
 
@@ -123,7 +131,8 @@ def _card_art(painter: Painter, art: ArtProvider, tile: Tile,
         # No cover: paint a neutral placeholder.  When the platform also ships
         # no logo there is nothing to identify it by, so write its name
         # straight onto the cover instead of leaving a blank invalid tile.
-        painter.image(art.placeholder(tile.key, art_side, art_side), art_box)
+        painter.image_rounded(art.placeholder(tile.key, art_side, art_side),
+                              art_box, radius=m.u(6))
         if logo is None:
             # Dim the gradient behind the name so it stays legible no matter
             # which hue the deterministic placeholder picked.
@@ -134,7 +143,7 @@ def _card_art(painter: Painter, art: ArtProvider, tile: Tile,
                 size=14, fill=COLORS.text, anchor="mm",
             )
     else:
-        painter.image(background, art_box)
+        painter.image_rounded(background, art_box, radius=m.u(6))
 
     # The cover is the base system's, so a variant directory would be pixel
     # identical to the platform it borrows from without this tag.
@@ -143,9 +152,14 @@ def _card_art(painter: Painter, art: ArtProvider, tile: Tile,
 
     # The logo band sits in whatever is left below the artwork, vertically
     # centred so the selected card's extra padding is shared above and below.
+    # Clamped to that room: a short card used to push the logo past its bottom
+    # edge, where it read as a logo floating outside the frame.
     below_top = y + art_side
-    below_h = max(logo_h, (y + h) - below_top)
-    band = (x, below_top + (below_h - logo_h) // 2, w, logo_h)
+    room = (y + h) - below_top
+    if room <= 0:
+        return
+    logo_h = min(logo_h, room)
+    band = (x, below_top + (room - logo_h) // 2, w, logo_h)
 
     if logo is not None:
         painter.image_fit(logo, band)
@@ -216,3 +230,29 @@ def _preview(painter: Painter, art: ArtProvider, previews: list[object],
                 radius=m.u(5), outline=COLORS.accent,
             )
         x += m.u(92)
+
+
+def carousel_hit(m, count: int, index: int, x: int, y: int) -> int | None:
+    """The carousel card a tap landed on, or ``None`` (DESIGN.ANDROID §10.3).
+
+    Mirrors the geometry ``_carousel`` draws -- the selected card centred at
+    ``m.width // 2``, neighbours stepping by ``card_w + gap`` -- so the two
+    cannot drift apart without someone noticing.  A tap inside the gap between
+    two cards hits nothing: that dead zone is the point.
+    """
+    card_w = m.platform_art + m.u(8)
+    gap = m.platform_gap
+    left0 = m.width // 2 - card_w // 2
+    top = m.platform_top - m.u(6)          # the selected card's outline pad
+    bottom = m.platform_top + m.platform_card_h + m.u(6)
+    if not (top <= y <= bottom):
+        return None
+    rel = x - left0
+    step_w = card_w + gap
+    k = rel // step_w                      # floor; Python floors negatives too
+    if rel - k * step_w > card_w:
+        return None                        # landed in the gap between cards
+    position = index + k
+    if not (0 <= position < count):
+        return None
+    return position

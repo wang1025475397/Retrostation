@@ -98,9 +98,9 @@ class FakePlatform(Platform):
             return []
 
     # launching --------------------------------------------------------- #
-    def launch_game(self, argv) -> None:
+    def launch_game(self, target) -> None:
         """Record the command instead of exec'ing it (the test asserts on it)."""
-        self.launched = tuple(argv)
+        self.launched = tuple(target.argv)
 
     # fonts / media ----------------------------------------------------- #
     def font(self, size: int) -> object:

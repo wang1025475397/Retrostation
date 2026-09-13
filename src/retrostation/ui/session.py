@@ -122,8 +122,35 @@ SORTS = ("name", "play", "recent")
 _CYCLING_ROWS = frozenset(
     {"screen", "card", "layout", "bvideo", "video_sound", "sfx", "sort",
      "show_hidden", "search_by", "theme", "variant", "language", "status_bar",
-     "tcache", "autostart"}
+     "vpad", "vpad_op", "tcache", "autostart",
+     # The stepped rows belong here too: this is also the set touch consults to
+     # decide a row is adjustable, and leaving them out made 背光/预览音量/按键音量
+     # read as "info" rows -- a tap on them did nothing at all, while the one
+     # stepped row that was listed answered every tap with a "+".
+     "brightness", "video_volume", "sfx_volume"}
 )
+
+#: How each settings row is operated, for touch -- a finger has no left/right to
+#: step a value with.  Booleans flip on a tap; a multi-value row opens a picker of
+#: these options (translation key, value); actions run on a tap.  A row left out
+#: keeps the keyboard's step, and "info" rows (about) do nothing.
+_MENU_ACTIONS = frozenset({"hide_game", "clear_cache", "rom_dir"})
+_MENU_TOGGLES = frozenset({"bvideo", "video_sound", "sfx", "tcache", "autostart",
+                           "status_bar", "vpad", "show_hidden"})
+_MENU_CHOICES: dict[str, tuple[tuple[str, str], ...]] = {
+    "screen": (("value.dual", "dual"), ("value.single", "single")),
+    "layout": (("games.layout_list", "list"), ("games.layout_grid", "grid"),
+               ("games.layout_carousel", "carousel")),
+    "sort": (("value.sort_name", "name"), ("value.sort_play", "play"),
+             ("value.sort_recent", "recent")),
+    "theme": tuple((f"value.theme_{name}", name) for name in THEMES),
+    "variant": tuple((f"value.variant_{name}", name) for name in VARIANTS),
+    "search_by": (("value.search_title", "title"), ("value.search_rom", "rom"),
+                  ("value.search_both", "both")),
+    # Raw codes, not labels: the row itself shows the code, so the picker does
+    # too -- and it keeps working the day another language bundle lands.
+    "language": (("value.auto", "auto"), ("zh_CN", "zh_CN"), ("en_US", "en_US")),
+}
 
 
 def _cycle(options: tuple, current, direction: int):
@@ -135,6 +162,10 @@ TOAST_SECONDS = 2.0
 #: Page sizes for the list view (rows) and the carousel.
 LIST_PAGE = 10
 CAROUSEL_PAGE = 10
+
+#: 一次甩动最多滚过的行数（触摸，DESIGN.ANDROID §10.3）：不设上限时一次快速
+#: 滑动会把列表甩掉大半页，感觉像"跳"而不是"滚"。
+_FLING_MAX_ROWS = 6
 
 #: Backlight range in the device's own units (0-255 per panel).  The floor
 #: matters: a screen driven to 0 looks like a crash and the player cannot find
@@ -182,6 +213,9 @@ class Session:
     preview_index: int = 0
     #: preview_games() 的每帧缓存；任何输入都会走 invalidate() 清掉。
     _preview_cache: list | None = None
+    #: 触摸拖动累计的逻辑像素。小于一行的拖动记在这里，攒够一行才走一格，
+    #: 否则慢速拖动（每帧不足一行）会毫无反应（DESIGN.ANDROID §10.3）。
+    _touch_px: float = field(default=0.0, init=False, repr=False)
 
     modal: str = MODAL_NONE
     menu_index: int = 0
@@ -327,7 +361,7 @@ class Session:
         """
         if self._preview_cache is None:
             games = sorted(self.games(), key=self._preview_order)
-            self._preview_cache = games[:6]
+            self._preview_cache = games[:14]
         return self._preview_cache
 
     def preview_games_for(self, key: str) -> list[Game]:
@@ -342,7 +376,7 @@ class Session:
         games = self.library.resolve_all(key)
         if not self.config.show_hidden:
             games = [game for game in games if not game.hidden]
-        return sorted(games, key=self._preview_order)[:6]
+        return sorted(games, key=self._preview_order)[:14]
 
     @staticmethod
     def _preview_order(game: Game) -> tuple[int, float, str]:
@@ -437,6 +471,11 @@ class Session:
         if event.is_press and event.action is InputAction.SEARCH:
             return self._open_search()
 
+        # 竖屏双画布：点下半屏（详情屏）= 启动当前游戏（DESIGN.ANDROID §10.3）。
+        # 这条在掌机上从未落地（没有下屏触摸），Android 免费拿到。
+        if event.is_press and event.action is InputAction.TAP and event.screen == 1:
+            return self._tap_detail()
+
         handlers = {
             VIEW_PLATFORMS: self._handle_platforms,
             VIEW_GAMES: self._handle_games,
@@ -468,6 +507,17 @@ class Session:
             if action is InputAction.MENU:
                 return self._open_exit_dialog()
             return Outcome()
+
+        # 触摸（DESIGN.ANDROID §10.3）：点卡片选中，再点已选中的卡片进入。
+        if action is InputAction.TAP and event.x is not None:
+            return self._tap_platform(event)
+        # The platform row is horizontal, so a swipe walks it left and right --
+        # the same follow-the-finger path the game carousel uses.
+        if action is InputAction.DRAG:
+            return self._drag_scroll(event.dy, event.dx)
+        if action is InputAction.FLING:
+            self._touch_px = 0.0
+            return self._fling_scroll(event.dy, event.dx)
 
         # 平台行：上/左右切换平台，下键进入预览选择。
         if action is InputAction.DOWN:
@@ -552,6 +602,15 @@ class Session:
         if action in (InputAction.L2, InputAction.R2):
             self.game_index = 0 if action is InputAction.L2 else count - 1
             return Outcome(redraw=True)
+        # 触摸（DESIGN.ANDROID §10.3）：点行选中，再点已选中的行启动。
+        if action is InputAction.TAP and event.x is not None:
+            self._touch_px = 0.0
+            return self._tap_game(event)
+        if action is InputAction.DRAG:
+            return self._drag_scroll(event.dy, event.dx)
+        if action is InputAction.FLING:
+            self._touch_px = 0.0
+            return self._fling_scroll(event.dy, event.dx)
         if action is InputAction.A:
             return self._pick_or_launch(self.current_game())
         if action is InputAction.B:
@@ -568,11 +627,152 @@ class Session:
             return self._open_exit_dialog()
         return Outcome()
 
+    # -- touch (DESIGN.ANDROID §10.3) -------------------------------------- #
+
+    def _tap_platform(self, event: InputEvent) -> Outcome:
+        """Tap on the home carousel: select the card; tap it again to enter."""
+        from .screens.home import carousel_hit
+
+        if self._metrics is None:
+            return Outcome()
+        hit = carousel_hit(self._metrics, self.system_count(),
+                           self.platform_index, event.x, event.y)
+        if hit is None:
+            return Outcome()
+        if hit == self.platform_index:
+            return self._enter_games()
+        self.platform_index = hit
+        self.game_index = 0
+        return Outcome(redraw=True)
+
+    def _tap_game(self, event: InputEvent) -> Outcome:
+        """Tap on a game: select it; tap it again to launch (§10.3)."""
+        if self._metrics is None:
+            return Outcome()
+        games = self.games()
+        if not games:
+            return Outcome()
+        hit = self._game_hit(len(games), event.x, event.y)
+        if hit is None:
+            return Outcome()
+        if hit == self.game_index:
+            return self._pick_or_launch(games[hit])
+        self.game_index = hit
+        return Outcome(redraw=True)
+
+    def _game_hit(self, count: int, x: int, y: int) -> int | None:
+        """The position a tap landed on, in whichever view is showing."""
+        from .screens import games as view
+
+        m = self._metrics
+        if self.layout == "grid":
+            return view.grid_hit(m, count, self.game_index,
+                                 self._grid_cols(), self._grid_rows(),
+                                 single=self._single, x=x, y=y,
+                                 scroll=self.scroll_offset(count))
+        if self.layout == "carousel":
+            return view.carousel_hit(m, count, self.game_index,
+                                     single=self._single, x=x, y=y,
+                                     scroll=self.scroll_offset(count))
+        return view.list_hit(m, count, self.game_index, self._page_size(), x, y,
+                             scroll=self.scroll_offset(count))
+
+    def _tap_detail(self) -> Outcome:
+        """Tap on the detail canvas (portrait's lower screen): start the game.
+
+        On the home page it means "open the selected platform" instead -- there
+        is no game under the cursor yet.
+        """
+        if self.view == VIEW_GAMES:
+            return self._pick_or_launch(self.current_game())
+        return self._enter_games()
+
+    def _scrolls_sideways(self) -> bool:
+        """Whether the current list runs along the x axis.
+
+        The platform page and the games carousel are rows of cards; the list and
+        the grid are columns.  A drag has to follow the axis its view is laid out
+        on -- measuring only ``dy`` is why a swipe across the carousel did
+        nothing at all.
+        """
+        return self.view == VIEW_PLATFORMS or self.layout == "carousel"
+
+    def _scroll_pitch(self) -> int:
+        """Logical pixels one step covers along whichever axis scrolls."""
+        m = self._metrics
+        if m is None:
+            return 0
+        if self.view == VIEW_PLATFORMS:
+            return m.platform_art + m.u(8)
+        if self.layout == "carousel":
+            return m.carousel_card_w(single=self._single) + m.carousel_gap
+        return m.row_step
+
+    def _move_steps(self, steps: int) -> Outcome:
+        """Move this view's cursor by whole steps along its scrolling axis."""
+        if self.view == VIEW_PLATFORMS:
+            return self._move_platform(steps)
+        if self._scrolls_sideways():
+            return self._move_game(steps)
+        return self._move_game(steps * self._vertical_step())
+
+    def _drag_scroll(self, dy: int, dx: int) -> Outcome:
+        """A drag follows the finger, one whole step at a time (§10.3).
+
+        Sub-step movement is accumulated: a slow drag delivers a couple of
+        logical pixels per frame, and discarding those would make it feel dead.
+        """
+        if self._pans():
+            # The grid/list pan: the cells move under the finger and stop exactly
+            # where they are let go (no snapping) -- a tap is what selects.  The
+            # carousel pans sideways and follows with its cursor instead.
+            if self.layout == "carousel":
+                self.scroll_px -= dx
+                self._anchor_carousel()
+            else:
+                self.scroll_px = self._clamp_scroll(self.scroll_px - dy)
+            return Outcome(redraw=True)
+        pitch = self._scroll_pitch()
+        if pitch <= 0:
+            return Outcome()
+        self._touch_px += dx if self._scrolls_sideways() else dy
+        steps = int(-self._touch_px / pitch)
+        if steps == 0:
+            return Outcome()
+        self._touch_px += steps * pitch
+        return self._move_steps(steps)
+
+    def _fling_scroll(self, dy: int, dx: int) -> Outcome:
+        """A quick swipe jumps by the inertia distance the bridge measured.
+
+        Clamped hard: an unclamped flick launched the list most of a page at
+        once, which read as "the list jumped" rather than "I scrolled".  Sideways
+        it is the same distance on the other axis.
+        """
+        pitch = self._scroll_pitch()
+        if pitch <= 0:
+            return Outcome()
+        if self._pans():
+            # The flick's inertia pans the same way, then the carousel settles.
+            if self.layout == "carousel":
+                self.scroll_px -= dx
+                self._anchor_carousel()
+                self.scroll_px = 0.0
+            else:
+                self.scroll_px = self._clamp_scroll(self.scroll_px - dy)
+            return Outcome(redraw=True)
+        travel = dx if self._scrolls_sideways() else dy
+        steps = int(-travel / pitch)
+        steps = max(-_FLING_MAX_ROWS, min(_FLING_MAX_ROWS, steps))
+        if steps == 0:
+            steps = 1 if travel < 0 else -1
+        return self._move_steps(steps)
+
     def _vertical_step(self) -> int:
         if self.layout == "grid":
             return self._grid_cols()
-        if self.layout == "carousel":
-            return CAROUSEL_PAGE
+        # The carousel steps one game, not a page: it is a row of neighbours, so
+        # a page-sized jump reads as "it skipped" rather than "I moved".
         return 1
 
     def _page_size(self) -> int:
@@ -582,6 +782,131 @@ class Session:
 
     def _grid_cols(self) -> int:
         return self._metrics.grid_cols if self._metrics else 4
+
+    # -- list / grid viewport (smooth scrolling) --------------------------- #
+
+    def _pans(self) -> bool:
+        """Whether a drag pans this view rather than stepping its cursor."""
+        return self.view == VIEW_GAMES and self.layout in ("grid", "list", "carousel")
+
+    def _carousel_pitch(self) -> float:
+        m = self._metrics
+        if m is None:
+            return 0.0
+        return float(m.carousel_card_w(single=self._single) + m.carousel_gap)
+
+    def _anchor_carousel(self) -> None:
+        """Follow the pan with the cursor, a card at a time.
+
+        The carousel has no free cursor: whatever sits in the middle *is* the
+        selection (that is what the strip means), so a drag moves the cursor with
+        it -- otherwise the strip would run out of drawn cards on the side the
+        finger is heading for.
+        """
+        pitch = self._carousel_pitch()
+        if pitch <= 0:
+            return
+        count = len(self.games())
+        while self.scroll_px >= pitch / 2 and self.game_index < count - 1:
+            self.scroll_px -= pitch
+            self.game_index += 1
+        while self.scroll_px <= -pitch / 2 and self.game_index > 0:
+            self.scroll_px += pitch
+            self.game_index -= 1
+
+    def end_drag(self) -> None:
+        """The finger lifted: the carousel settles onto its card.
+
+        The pan offset is only ever half a card at most (the anchor above keeps
+        it there), so snapping is a rounding, not a slide.
+        """
+        if self._metrics is not None and self.layout == "carousel" and self.view == VIEW_GAMES:
+            self._anchor_carousel()
+            self.scroll_px = 0.0
+
+    def _cols(self) -> int:
+        """Items per row: the grid's column count, one for a list."""
+        return max(1, self._grid_cols()) if self.layout == "grid" else 1
+
+    def _pad(self) -> float:
+        m = self._metrics
+        if m is None:
+            return 0.0
+        return float(m.grid_padding if self.layout == "grid" else m.u(8))
+
+    def _gap(self) -> float:
+        m = self._metrics
+        return float(m.grid_gap) if (m is not None and self.layout == "grid") else 0.0
+
+    def _pitch(self) -> float:
+        """Distance between two rows, in logical pixels."""
+        m = self._metrics
+        if m is None:
+            return 0.0
+        if self.layout == "grid":
+            return float(m.grid_cell_h(single=self._single) + m.grid_gap)
+        return float(m.row_step)
+
+    def _item_h(self) -> float:
+        """Height of one item's own box (less the gap after it)."""
+        m = self._metrics
+        if m is None:
+            return 0.0
+        if self.layout == "grid":
+            return float(m.grid_cell_h(single=self._single))
+        return float(m.row_h)
+
+    def _content_height(self, count: int) -> float:
+        """How tall the whole list is, in the drawing's own coordinates."""
+        if count <= 0 or self._pitch() <= 0:
+            return 0.0
+        cols = self._cols()
+        rows = (count + cols - 1) // cols
+        return self._pad() + rows * self._pitch() - self._gap()
+
+    def _viewport(self) -> float:
+        m = self._metrics
+        return float(m.content_h(single=self._single)) if m is not None else 0.0
+
+    def _clamp_scroll(self, value: float) -> float:
+        limit = max(0.0, self._content_height(len(self.games())) - self._viewport())
+        return max(0.0, min(value, limit))
+
+    def scroll_offset(self, count: int) -> int:
+        """The panned view's scroll position in whole pixels (0 elsewhere)."""
+        if not self._pans() or self._metrics is None:
+            return 0
+        if self.layout == "carousel":
+            # Sideways, and bounded by the cursor following it rather than by a
+            # vertical extent: clamping it with the height would pin it to zero.
+            return int(self.scroll_px)
+        self.scroll_px = max(0.0, min(self.scroll_px,
+                                      max(0.0, self._content_height(count) - self._viewport())))
+        return int(self.scroll_px)
+
+    def _scroll_cursor_into_view(self) -> None:
+        """Keep the cursor on screen after a key move -- the drag is free to
+        leave it anywhere, so the keyboard has to chase it."""
+        if self._metrics is None or not self._pans():
+            return
+        if self.layout == "carousel":
+            # The carousel draws the cursor's card centred, so there is nothing
+            # to chase: whatever offset is left is a drag's, and chasing it here
+            # computed an absolute position from the *index* (hundreds of cards
+            # of pixels), which threw the strip far off screen on every key press.
+            self.scroll_px = 0.0
+            return
+        pitch = self._pitch()
+        if pitch <= 0:
+            return
+        top = self._pad() + (self.game_index // self._cols()) * pitch
+        height = self._item_h()
+        view = self._viewport()
+        if top - self.scroll_px < 0:
+            self.scroll_px = top
+        elif top + height - self.scroll_px > view:
+            self.scroll_px = top + height - view
+        self.scroll_px = max(0.0, self.scroll_px)
 
     def _grid_rows(self) -> int:
         return self._metrics.grid_rows(single=self._single) if self._metrics else 3
@@ -599,6 +924,9 @@ class Session:
     #: Raised when the player picked the other card: the resume snapshot names
     #: a game on the card we are leaving, so the app has to drop it.
     card_changed: bool = False
+    #: Pixel offset of the grid's viewport: dragging pans the cells past a fixed
+    #: cursor instead of stepping the selection (see :meth:`_drag_scroll`).
+    scroll_px: float = 0.0
     #: One frame's worth of :meth:`games`; see that method.
     _visible: list[Game] | None = field(default=None, init=False, repr=False, compare=False)
     #: Game key to select as soon as :meth:`games` can be built.  A resume
@@ -616,10 +944,12 @@ class Session:
         if count == 0:
             return Outcome()
         self.game_index = max(0, min(count - 1, self.game_index + step))
+        self._scroll_cursor_into_view()
         return Outcome(redraw=True)
 
     def _back_to_platforms(self) -> Outcome:
         self.view = VIEW_PLATFORMS
+        self.scroll_px = 0.0
         return Outcome(redraw=True)
 
     def _toggle_favorite(self) -> Outcome:
@@ -720,11 +1050,16 @@ class Session:
     def _handle_menu_modal(self, event: InputEvent) -> Outcome:
         if not event.is_press:
             return Outcome()
+        # One of the rows is open for picking: it owns the input until it closes.
+        if getattr(self, "menu_choice_options", None):
+            return self._handle_menu_choice_modal(event)
         rows = self.menu_rows()
         if event.action is InputAction.UP:
             self.menu_index = (self.menu_index - 1) % len(rows)
+            self.menu_top = None  # a key press re-centres the window on the cursor
         elif event.action is InputAction.DOWN:
             self.menu_index = (self.menu_index + 1) % len(rows)
+            self.menu_top = None
         elif event.action is InputAction.A:
             return self._apply_menu(rows[self.menu_index][0])
         elif event.action in (InputAction.LEFT, InputAction.RIGHT):
@@ -732,7 +1067,205 @@ class Session:
                                      -1 if event.action is InputAction.LEFT else 1)
         elif event.action in (InputAction.B, InputAction.MENU):
             self._cancel_menu()
+        elif event.action is InputAction.TAP and event.x is not None:
+            return self._tap_menu_row(event)
+        elif event.action in (InputAction.DRAG, InputAction.FLING):
+            # While an option list is open a drag belongs to nothing: it must not
+            # scroll the settings behind it.  ``getattr`` because the picker state
+            # only exists once a picker has been opened -- reading it directly
+            # raised AttributeError on every drag and left the menu dead.
+            if getattr(self, "menu_choice_options", None):
+                return Outcome()
+            return self._scroll_menu(event)
         return Outcome(redraw=True)
+
+    def _tap_menu_row(self, event: InputEvent) -> Outcome:
+        """Touch: run the control the finger landed on, else move the cursor.
+
+        Every row carries its own control -- a switch, an option list, a button --
+        because a phone has no left/right to step a value with.  The boxes come
+        from the dialog that drew them (``dialog_hits``), so the geometry stays in
+        one place.
+        """
+        rows = self.menu_rows()
+        # The dialog's own buttons first: the keyboard reaches them with A and B,
+        # and a finger has neither.  Confirm commits the pass the arrows staged --
+        # and never fires an action row as a side effect of confirming, which A on
+        # that row would; cancel drops the pass, exactly like B.
+        button = self._dialog_button_at(event)
+        if button is not None:
+            if button == 0:
+                self._cancel_menu()
+            else:
+                self._apply_menu("")
+            return Outcome(redraw=True)
+        # Then the stepper buttons, before the row is even looked up: they are
+        # controls of their own, and the "+" sits at the far end of the row --
+        # a tap there can miss the row's box, and testing for the row first ate
+        # the tap ("− 80 +" went down but never up).
+        stepper = self._dialog_stepper_at(event)
+        if stepper is not None:
+            index, direction = stepper
+            if index < len(rows):
+                self.menu_index = index
+                return self._adjust_menu(rows[index][0], direction)
+            return Outcome(redraw=True)
+        row = self._dialog_row_at(event)
+        if row is None or row >= len(rows):
+            return Outcome()
+        key, label, value = rows[row]
+        self.menu_index = row
+        kind = self._menu_row_kind(key)
+        if kind == "action":
+            return self._apply_menu(key)
+        if kind == "toggle":
+            # A switch is one tap; there is no right-arrow on a phone.
+            return self._adjust_menu(key, 1)
+        if kind == "choice":
+            return self._open_menu_choice(key, label, value)
+        return Outcome(redraw=True)
+
+    def _dialog_button_at(self, event: InputEvent) -> int | None:
+        """Which bottom button of the open dialog a tap landed on, if any."""
+        if event.x is None or event.y is None:
+            return None
+        for (bx, by, bw, bh), index in getattr(self, "dialog_buttons", ()) or ():
+            if bx <= event.x <= bx + bw and by <= event.y <= by + bh:
+                return index
+        return None
+
+    def _dialog_stepper_at(self, event: InputEvent) -> tuple[int, int] | None:
+        """Which stepper button of a stepped row a tap landed on: ``(row, ±1)``."""
+        if event.x is None or event.y is None:
+            return None
+        for (bx, by, bw, bh), index, direction in getattr(self, "dialog_steppers", ()) or ():
+            if bx <= event.x <= bx + bw and by <= event.y <= by + bh:
+                return index, direction
+        return None
+
+    def _menu_row_kind(self, key: str) -> str:
+        """How a row is operated, so touch knows whether to flip, pick or run it."""
+        if key in _MENU_ACTIONS:
+            return "action"
+        if key in _MENU_TOGGLES:
+            return "toggle"
+        if key in _MENU_CHOICES:
+            return "choice"
+        return "cycle" if key in _CYCLING_ROWS else "info"
+
+    def _open_menu_choice(self, key: str, label: str, value: str) -> Outcome:
+        """Touch: a multi-value row opens its options rather than stepping them."""
+        options = _MENU_CHOICES.get(key)
+        if not options:
+            return Outcome()
+        labels = [self.translator.t(tkey) for tkey, _value in options]
+        self.menu_choice_key = key
+        self.menu_choice_title = label
+        self.menu_choice_options = options
+        self.menu_choice_labels = labels
+        self.menu_choice_index = labels.index(value) if value in labels else 0
+        return Outcome(redraw=True)
+
+    def _handle_menu_choice_modal(self, event: InputEvent) -> Outcome:
+        """Input for an open option list (a radio dialog)."""
+        labels = getattr(self, "menu_choice_labels", ())
+        if event.action is InputAction.UP:
+            self.menu_choice_index = (self.menu_choice_index - 1) % max(1, len(labels))
+        elif event.action is InputAction.DOWN:
+            self.menu_choice_index = (self.menu_choice_index + 1) % max(1, len(labels))
+        elif event.action is InputAction.A:
+            return self._apply_menu_choice(self.menu_choice_index)
+        elif event.action is InputAction.TAP and event.x is not None:
+            row = self._dialog_row_at(event)
+            if row is not None and row < len(labels):
+                return self._apply_menu_choice(row)
+            # Anything else -- the cancel button, the backdrop -- dismisses it.
+            self._menu_choice_close()
+        elif event.action in (InputAction.B, InputAction.MENU):
+            self._menu_choice_close()
+        return Outcome(redraw=True)
+
+    def _apply_menu_choice(self, index: int) -> Outcome:
+        """Step the row to the picked option, then go back to the menu.
+
+        Stepping (rather than writing the field directly) reuses whatever the row
+        already does for left/right -- the only place that knows how each value is
+        stored and what else changes with it.  Direction-agnostic: step forward
+        until the row reports the wanted label, at most one full cycle.
+        """
+        key = getattr(self, "menu_choice_key", "")
+        labels = getattr(self, "menu_choice_labels", ())
+        if key and 0 <= index < len(labels):
+            target = labels[index]
+            for _ in range(len(labels) + 1):
+                if self._menu_row_value(key) == target:
+                    break
+                self._adjust_menu(key, 1)
+        self._menu_choice_close()
+        return Outcome(redraw=True)
+
+    def _menu_choice_close(self) -> None:
+        """Drop the option list and hand input back to the settings menu."""
+        self.menu_choice_options = None
+        self.menu_choice_labels = ()
+        self.menu_choice_key = ""
+        self.menu_choice_title = ""
+
+    def _menu_row_value(self, key: str) -> str:
+        """The value string a settings row currently shows."""
+        for row_key, _label, value in self.menu_rows():
+            if row_key == key:
+                return value
+        return ""
+
+    def _scroll_menu(self, event: InputEvent) -> Outcome:
+        """Touch: a drag moves the *list*, not the cursor.
+
+        The cursor belongs to the keyboard; dragging a list should not walk it,
+        which is exactly what made the menu feel wrong under a finger.  The
+        cursor stays where it is until a direction key asks for it again.
+        """
+        rows = self.menu_rows()
+        pitch = self._dialog_pitch()
+        start, visible = getattr(self, "dialog_window", None) or (0, 0)
+        if pitch <= 0 or not rows or visible <= 0:
+            return Outcome()
+        self._menu_drag_px = getattr(self, "_menu_drag_px", 0.0) + event.dy
+        steps = int(-self._menu_drag_px / pitch)  # drag up (dy<0) walks down the list
+        if steps == 0:
+            return Outcome()
+        self._menu_drag_px += steps * pitch
+        top = max(0, min(max(0, len(rows) - visible), start + steps))
+        if top == start:
+            return Outcome()
+        self.menu_top = top
+        return Outcome(redraw=True)
+
+    def _dialog_row_at(self, event: InputEvent) -> int | None:
+        """Which drawn dialog row a touch landed on, if any."""
+        box = self._dialog_box_at(event)
+        if box is None:
+            return None
+        for candidate, index in getattr(self, "dialog_hits", ()) or ():
+            if candidate == box:
+                return index
+        return None
+
+    def _dialog_box_at(self, event: InputEvent) -> tuple[int, int, int, int] | None:
+        """The box of the drawn dialog row under a touch, if any."""
+        if event.x is None or event.y is None:
+            return None
+        for (bx, by, bw, bh), _index in getattr(self, "dialog_hits", ()) or ():
+            if bx <= event.x <= bx + bw and by <= event.y <= by + bh:
+                return (bx, by, bw, bh)
+        return None
+
+    def _dialog_pitch(self) -> int:
+        """Row pitch of the drawn dialog, from the boxes it reported."""
+        boxes = getattr(self, "dialog_hits", ()) or ()
+        if len(boxes) >= 2:
+            return boxes[1][0][1] - boxes[0][0][1]
+        return boxes[0][0][3] if boxes else 0
 
     def _apply_menu(self, key: str) -> Outcome:
         """A: commit everything the arrows staged, then close.
@@ -750,6 +1283,15 @@ class Session:
             self.modal = MODAL_NONE
             self._menu_stash = None
             return self._clear_cache()
+        if key == "rom_dir":
+            # Close first: the picker opens a system window over the frontend.
+            self.modal = MODAL_NONE
+            self._menu_stash = None
+            request = getattr(self, "rom_access_request", None)
+            if request is not None:
+                request()
+                self.notify(self.translator("toast.rom_dir"))
+            return Outcome(redraw=True)
 
         stashed = self._menu_stash[0] if self._menu_stash is not None else None
         if stashed is not None:
@@ -868,6 +1410,14 @@ class Session:
             self._step_brightness(BRIGHTNESS_STEP)
         elif key == "status_bar":
             self.config.show_status_bar = not self.config.show_status_bar
+        elif key == "vpad":
+            self.config.virtual_pad = not self.config.virtual_pad
+        elif key == "vpad_op":
+            # Snap onto the 10% grid first: a value from a hand-edited
+            # config.json can sit between steps, and ``_cycle`` needs a member.
+            steps = tuple(range(20, 101, 10))
+            current = min(steps, key=lambda v: abs(v - self.config.virtual_pad_opacity))
+            self.config.virtual_pad_opacity = _cycle(steps, current, direction)
         elif key == "tcache":
             # Staged like the rest: the cache only actually switches off when A
             # commits, so flicking the switch back and forth costs nothing.
@@ -961,6 +1511,12 @@ class Session:
         # there is no alternative, and the row would just taunt the player.
         if len(self.rom_roots) > 1:
             rows.append(("card", self.translator("menu.card"), self._card_label()))
+        # Android-only, injected by the app: the folder the player authorised for
+        # emulators that take a ``content://`` URI.  Listed so it can be checked,
+        # and A re-opens the picker to point it somewhere else.
+        if getattr(self, "rom_access_label", None) is not None:
+            rows.append(("rom_dir", self.translator("menu.rom_dir"),
+                         self.rom_access_label() or "-"))
         rows += [
             ("layout", self.translator("menu.layout"), self.translator(f"games.layout_{self.layout}")),
             # Video plays in the detail strip on one screen too, so this row
@@ -995,6 +1551,13 @@ class Session:
              f"{int(config.brightness.get('top', 140))}"),
             ("status_bar", self.translator("menu.status_bar"),
              self.translator("value.on" if config.show_status_bar else "value.off")),
+            # The on-screen pad: shown or hidden, and how solid it is while
+            # shown.  Android-only in effect; on the handheld both rows are
+            # inert, which is why they are not offered as keys there.
+            ("vpad", self.translator("menu.virtual_pad"),
+             self.translator("value.on" if config.virtual_pad else "value.off")),
+            ("vpad_op", self.translator("menu.virtual_pad_opacity"),
+             f"{int(config.virtual_pad_opacity)}%"),
             # The cache pair sits together and last but one: the switch is a
             # set-and-forget preference, and emptying the card is a rare,
             # deliberate act -- not something to land on while arrowing down.
